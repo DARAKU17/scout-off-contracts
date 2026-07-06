@@ -22,6 +22,16 @@ pub struct Subscription {
     pub subscribed_at: u64,
 }
 
+/// A recorded contact event from a scout to a player
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContactRecord {
+    pub player_id: u64,
+    pub scout: Address,
+    /// Ledger timestamp at the moment the contact was recorded
+    pub contacted_at: u64,
+}
+
 /// A logged trial offer from a scout to a player
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -31,6 +41,20 @@ pub struct TrialOffer {
     /// IPFS/Arweave CID of the offer details document
     pub details_hash: String,
     pub logged_at: u64,
+}
+
+/// Tracks the number of contacts a Pro-tier scout has made in their current
+/// subscription period.  `period_start` is the `subscribed_at` timestamp of
+/// the current subscription; when the scout renews, a new record is stored
+/// (keyed by the new `subscribed_at`), effectively resetting the counter.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProContactPeriod {
+    /// `subscribed_at` of the subscription this counter belongs to.
+    /// Used to detect period rollovers on subscription renewal.
+    pub period_start: u64,
+    /// Number of contacts made in this period.
+    pub count: u32,
 }
 
 /// Platform fee configuration
@@ -74,9 +98,15 @@ pub enum DataKey {
     TrialOffer(u64, u32),
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
-    /// scout → Vec<u64> of contacted player_ids
-    ScoutContacts(Address),
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),
+    /// tier → Vec<Address> of scouts subscribed at this tier
+    TierSubscribers(SubscriptionTier),
+    /// Pro-tier contact period counter: scout → ProContactPeriod
+    ProContactCount(Address),
+    /// player_id → Vec<Address> of scouts who have contacted this player
+    PlayerContacts(u64),
+    /// scout → Vec<(player_id, trial_index)> of all trial offers sent
+    ScoutTrialOffers(Address),
 }

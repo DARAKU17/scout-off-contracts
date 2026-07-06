@@ -1,6 +1,10 @@
-#![allow(deprecated)]
+#![allow(deprecated, dead_code)]
 use scoutchain_shared_types::ProgressLevel;
 use soroban_sdk::{Address, Env, Symbol};
+
+pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
+pub const PROGRESS_UPDATED: &str = "progress_updated";
+pub const PLAYER_LEVEL_RESET: &str = "player_level_reset";
 
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
@@ -33,4 +37,14 @@ pub fn player_level_reset(
         (Symbol::new(env, "player_level_reset"),),
         (player_id, old_level.clone(), target_level.clone()),
     );
+}
+
+pub fn contract_paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"),), admin.clone());
+}
+
+pub fn contract_unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"),), admin.clone());
 }

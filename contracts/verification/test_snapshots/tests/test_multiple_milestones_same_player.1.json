@@ -66,7 +66,7 @@
                   "string": "Identity verified"
                 },
                 {
-                  "string": "QmKYC"
+                  "string": "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"
                 }
               ]
             }
@@ -94,7 +94,7 @@
                   "string": "Top speed 32 km/h"
                 },
                 {
-                  "string": "QmSpeed"
+                  "string": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
                 }
               ]
             }
@@ -115,6 +115,30 @@
     "min_temp_entry_ttl": 16,
     "max_entry_ttl": 6312000,
     "ledger_entries": [
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Admin"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4096
+      },
       {
         "entry": {
           "last_modified_ledger_seq": 0,
@@ -159,7 +183,7 @@
                       "symbol": "evidence_hash"
                     },
                     "val": {
-                      "string": "QmKYC"
+                      "string": "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"
                     }
                   },
                   {
@@ -238,7 +262,7 @@
                       "symbol": "evidence_hash"
                     },
                     "val": {
-                      "string": "QmSpeed"
+                      "string": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
                     }
                   },
                   {
@@ -397,6 +421,36 @@
               "key": {
                 "vec": [
                   {
+                    "symbol": "ValidatorPlayerMilestoneCount"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  },
+                  {
+                    "u64": "1"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "u32": 2
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4096
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
                     "symbol": "ValidatorVector"
                   }
                 ]
@@ -434,12 +488,12 @@
                       "key": {
                         "vec": [
                           {
-                            "symbol": "Admin"
+                            "symbol": "ActiveValidatorCount"
                           }
                         ]
                       },
                       "val": {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        "u32": 1
                       }
                     },
                     {
@@ -464,6 +518,18 @@
                       },
                       "val": {
                         "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "TotalMilestoneCount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 2
                       }
                     }
                   ]

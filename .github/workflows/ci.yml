@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-todos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block TODO/FIXME/HACK markers in contract source
+        run: |
+          if grep -rIn '\b(TODO|FIXME|HACK|XXX)\b' contracts/ --include='*.rs'; then
+            echo "ERROR: TODO/FIXME/HACK/XXX markers found in contract source."
+            echo "Resolve them or remove them before merging."
+            exit 1
+          fi
+          echo "No TODO/FIXME/HACK/XXX markers found."

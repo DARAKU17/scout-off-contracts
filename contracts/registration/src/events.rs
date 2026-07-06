@@ -1,5 +1,12 @@
-#![allow(deprecated)]
+#![allow(deprecated, dead_code)]
 use soroban_sdk::{Address, Env, Symbol};
+
+pub const PLAYER_REGISTERED: &str = "player_registered";
+pub const SCOUT_REGISTERED: &str = "scout_registered";
+pub const PROFILE_UPDATED: &str = "profile_updated";
+pub const PLAYER_DEREGISTERED: &str = "player_deregistered";
+pub const PLAYER_LEVEL_SYNCED: &str = "player_level_synced";
+pub const SCOUT_VERIFIED: &str = "scout_verified";
 
 pub fn player_registered(env: &Env, player_id: u64, wallet: &Address) {
     env.events().publish(

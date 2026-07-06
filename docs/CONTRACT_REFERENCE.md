@@ -14,6 +14,7 @@ Every `pub fn` in every `#[contractimpl]` block is documented here.
 - [Shared Types](#shared-types)
 - [Error Codes](#error-codes)
 - [Events](#events)
+- [Glossary](GLOSSARY.md)
 
 ---
 
@@ -97,6 +98,41 @@ Implements the GDPR right-to-erasure. The `player_id` is permanently freed.
 ```bash
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- deregister_player --player_id 1
+```
+
+---
+
+#### `deactivate_player(player_id: u64) -> Result<(), ScoutChainError>`
+
+Hide a player from `filter_players` results without erasing their profile
+(soft-delete). Sets the `PlayerDeactivated` flag; the player's data and
+`player_id` remain intact and can be restored with `reactivate_player`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `PlayerNotFound` · `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- deactivate_player --player_id 1
+```
+
+---
+
+#### `reactivate_player(player_id: u64) -> Result<(), ScoutChainError>`
+
+Reverse a prior `deactivate_player` call. Clears the `PlayerDeactivated`
+flag, making the player visible in `filter_players` results again.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `PlayerNotFound` · `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- reactivate_player --player_id 1
 ```
 
 ---
@@ -479,6 +515,66 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `batch_revoke_validators(wallets: Vec<Address>, reason: Option<String>) -> Result<(), VerificationError>`
+
+Revoke multiple validators in a single atomic transaction. Applies the same
+revoke logic as `revoke_validator` to each wallet in `wallets`, emitting one
+`validator_revoked` event per revocation. If any wallet is not registered the
+entire batch fails and no revocations are applied.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason >128 bytes) · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- batch_revoke_validators \
+  --wallets '["'$VALIDATOR_ADDRESS_1'","'$VALIDATOR_ADDRESS_2'"]' \
+  --reason '"Season review"'
+```
+
+---
+
+#### `restore_validator(wallet: Address) -> Result<(), VerificationError>`
+
+Re-activate a previously revoked validator. The validator's credentials and
+milestone history are preserved — only the `active` flag is flipped back to
+`true`, so they can immediately approve milestones again.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `Overflow` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- restore_validator --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `transfer_validator(old_wallet: Address, new_wallet: Address) -> Result<(), VerificationError>`
+
+Migrate a validator's identity to a new wallet address. Copies the
+`Validator` record (credentials, registration timestamp, active flag) and the
+per-validator milestone count to `new_wallet`, then removes `old_wallet`'s
+storage entries and swaps it for `new_wallet` in the validator registry.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` (old_wallet not registered) · `ValidatorAlreadyRegistered` (new_wallet already registered) · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- transfer_validator \
+  --old_wallet $OLD_VALIDATOR_ADDRESS \
+  --new_wallet $NEW_VALIDATOR_ADDRESS
+```
+
+---
+
 #### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<u32, VerificationError>`
 
 Record a verified milestone for a player. Caller must be a registered, active
@@ -492,7 +588,7 @@ the milestone index.
 | | |
 |---|---|
 | **Auth** | `validator_wallet` must sign |
-| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `Overflow` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `Overflow` · `ProgressCallFailed` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -697,6 +793,118 @@ Return the total number of milestones approved across all players and validators
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_count
+```
+
+---
+
+#### `get_validator_players(wallet: Address) -> Vec<u64>`
+
+Return all distinct player IDs for which `wallet` has approved at least one
+milestone. Accumulated on every `approve_milestone` call; each player ID
+appears at most once.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_players --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `get_active_validator_count() -> u32`
+
+Return the number of currently active (non-revoked) validators.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_active_validator_count
+```
+
+---
+
+#### `get_global_milestone_index(offset: u32, limit: u32) -> GlobalMilestoneIndexPage`
+
+Return a page of the global milestone index — a rolling log of the most
+recent `(player_id, milestone_index)` pairs across all players and
+validators (capped at 500 entries; oldest entries are evicted first).
+`limit` is capped at 50 entries per page. `GlobalMilestoneIndexPage` has
+`entries: Vec<GlobalMilestoneEntry>` and `total: u32`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_global_milestone_index --offset 0 --limit 50
+```
+
+---
+
+#### `get_validator_milestones(wallet: Address) -> Vec<MilestoneRef>`
+
+Return the list of `(player_id, milestone_index)` references for every
+milestone `wallet` has approved. `MilestoneRef` has `player_id: u64` and
+`milestone_index: u32`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_milestones --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `dispute_milestone(player_wallet: Address, player_id: u64, milestone_index: u32, reason: String) -> Result<(), VerificationError>`
+
+Allow a player to dispute a milestone they believe was wrongly attributed.
+Only the player associated with `player_id` may submit a dispute, and only
+one dispute may be open per `(player_id, milestone_index)` pair. Emits a
+`milestone_disputed` event.
+
+| | |
+|---|---|
+| **Auth** | `player_wallet` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- dispute_milestone \
+  --player_wallet $PLAYER_ADDRESS \
+  --player_id 1 \
+  --milestone_index 1 \
+  --reason "Milestone not actually completed"
+```
+
+---
+
+#### `get_dispute(player_id: u64, milestone_index: u32) -> Result<MilestoneDispute, VerificationError>`
+
+Read a milestone dispute by `(player_id, milestone_index)`. `MilestoneDispute`
+has `player_id: u64`, `milestone_index: u32`, `reason: String`, and
+`disputed_at: u64`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `MilestoneNotFound` (no dispute recorded) |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_dispute --player_id 1 --milestone_index 1
 ```
 
 ---
@@ -1035,6 +1243,24 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 ---
 
+#### `get_history_since(player_id: u64, since_timestamp: u64) -> Vec<ProgressEntry>`
+
+Return all of a player's history entries with `updated_at >= since_timestamp`
+(Unix seconds). Useful for indexers polling for changes since their last sync
+point instead of re-reading the full history.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_history_since --player_id 1 --since_timestamp 1700000000
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
@@ -1063,6 +1289,29 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID -- version
 Handles scout subscriptions, pay-to-contact flows, and trial offer logging.
 Fees are collected in XLM (stroops) and held in the contract until admin
 withdrawal.
+
+### `FeeConfig` Struct
+
+Primary configuration struct controlling all subscription and contact fees.
+Passed to `initialize` and `update_fee_config`. All fields must be strictly
+greater than zero; either function returns `InvalidInput` otherwise.
+
+| Field | Rust Type | Unit | Valid Range | Typical Example |
+|---|---|---|---|---|
+| `contact_fee_stroops` | `i128` | stroops (1 XLM = 10 000 000 stroops) | > 0 | `100000` (0.01 XLM) |
+| `basic_sub_stroops` | `i128` | stroops | > 0 | `1000000` (0.1 XLM) |
+| `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
+| `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
+| `sub_duration_secs` | `u64` | seconds | > 0 | `2592000` (30 days = 30 × 24 × 3600) |
+
+**Validation rules:**
+- Every `i128` fee field must be > 0 (zero or negative → `InvalidInput` error code 15).
+- `sub_duration_secs` must be > 0 (zero → `InvalidInput`).
+- There is no enforced upper bound, but values larger than the XLM supply
+  (≈ 500 000 000 XLM = 5 × 10¹⁵ stroops) will cause `Overflow` errors at fee
+  settlement time.
+
+See the [Glossary](GLOSSARY.md#feeconfig) for a plain-language description of each field.
 
 ### Functions
 
@@ -1456,6 +1705,95 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
+#### `get_subscribers_by_tier(tier: SubscriptionTier) -> Vec<Address>`
+
+Return all scout addresses currently subscribed at `tier` (an O(1) index
+lookup backed by the `TierSubscribers` persistent storage key). Includes
+expired subscriptions that have not yet been superseded by a renewal or
+downgrade.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_subscribers_by_tier --tier '"Elite"'
+```
+
+---
+
+#### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
+
+Return the full `ContactRecord` for a `(scout, player_id)` pair, or `None`
+if the scout has never contacted this player.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_contact_record --scout $SCOUT_ADDRESS --player_id 1
+```
+
+---
+
+#### `get_player_contacts(player_id: u64) -> Vec<Address>`
+
+Return all scout addresses that have contacted a player, as an O(1) index
+lookup (backed by the `PlayerContacts` persistent storage key).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_contacts --player_id 1
+```
+
+---
+
+#### `get_player_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return every trial offer logged for a player, reading the full range from
+the player's `TrialCounter`. Unlike `get_all_trial_offers`, this is not
+capped at 20 entries.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_trial_offers --player_id 1
+```
+
+---
+
+#### `get_scout_trial_offers(scout: Address) -> Vec<(u64, u32)>`
+
+Return every `(player_id, trial_offer_index)` pair a scout has logged, as
+an O(1) index lookup (backed by the `ScoutTrialOffers` persistent storage
+key).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_trial_offers --scout $SCOUT_ADDRESS
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
@@ -1489,17 +1827,42 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 
 ### `ProgressLevel`
 
-Four-tier progress level used by all contracts.
+Four-tier progress level used by all contracts. It is the core player ranking type
+referenced throughout registration, verification, progress, and scout_access.
 
-| Integer | Variant | Meaning |
-|---------|---------|---------|
-| 0 | `Unverified` | Profile created, no verifications yet |
-| 1 | `VerifiedIdentity` | Identity confirmed by a validator |
-| 2 | `PerformanceMilestones` | Performance stats verified by a validator |
-| 3 | `EliteTier` | Trial offer logged by an Elite scout |
+#### Variant table
 
-Valid transitions: 0 → 1 → 2 → 3 (sequential only; no skipping or reversing
-except via admin `reset_player_level`).
+| Ordinal | Variant | Semantic meaning |
+|---------|---------|-----------------|
+| 0 | `Unverified` | Profile created on-chain; no identity or performance verification has occurred yet. Default state for all newly registered players. |
+| 1 | `VerifiedIdentity` | Identity confirmed by an approved academy or KYC validator. Player is discoverable by scouts with a Basic subscription or higher. |
+| 2 | `PerformanceMilestones` | Performance statistics verified by an approved third-party validator. Player is discoverable by scouts with a Pro subscription or higher. |
+| 3 | `EliteTier` | Scout feedback or a trial offer has been logged by an Elite-tier scout. Player is discoverable by scouts with an Elite subscription only. |
+
+#### Subscription tier access mapping
+
+| ProgressLevel | Minimum subscription tier to view |
+|---------------|----------------------------------|
+| `Unverified` (0) | None — public profile metadata only (no contact) |
+| `VerifiedIdentity` (1) | Basic |
+| `PerformanceMilestones` (2) | Pro |
+| `EliteTier` (3) | Elite |
+
+Scouts without a sufficient tier can still see that a player exists but cannot view
+full profile details or initiate contact. Contact actions are separately gated by
+`scout_access.contact_player`.
+
+#### Valid transitions
+
+Levels advance sequentially: 0 → 1 → 2 → 3. No skipping or reversing is permitted
+except via the admin function `progress.reset_player_level`.
+
+Level promotion is triggered by `verification.approve_milestone`, which cross-calls
+[`progress.advance_level`](#advance_level-caller-address-player_id-u64-milestone_ref-u32---resultprogresslevel-progresserror).
+The new level is also reflected in `registration` queries, including
+[`registration.filter_players`](#filter_players-region-string-position-string-min_level-progresslevel---resultvecplayerprofile-scoutchainerror),
+which accepts a `min_level` argument to restrict results to players at or above a
+given tier.
 
 ### `ContractHealth`
 
@@ -1680,6 +2043,8 @@ pub struct TrialOffer {
 | 13 | `Overflow` | Milestone counter overflowed |
 | 14 | `MilestoneNotFound` | Index out of range |
 | 15 | `ValidatorCapReached` | 100-validator limit reached; contract upgrade required to raise the cap |
+| 16 | `DuplicateEvidence` | Evidence hash has already been used in a prior `approve_milestone` call |
+| 17 | `MilestoneLimitExceeded` | Validator has already approved 5 milestones for this player |
 
 ### `ProgressError` (progress contract)
 
@@ -1715,6 +2080,9 @@ pub struct TrialOffer {
 | 15 | `InvalidInput` | Zero or negative fee field in `FeeConfig` |
 | 16 | `NoFeesToWithdraw` | No accumulated fees available to withdraw |
 | 17 | `UpgradeTooSoon` | Subscribe called before minimum interval elapsed |
+| 18 | `ContactQuotaExceeded` | Pro-tier scout exceeded monthly contact limit |
+| 19 | `TrialOfferRateLimited` | Trial offer sent to the same player within the 24h cooldown window |
+| 20 | `ProContactLimitReached` | Pro-tier scout reached the contact limit for the current subscription period |
 
 ---
 

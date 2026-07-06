@@ -4,7 +4,25 @@
 # Requires .env.contracts to exist (written by deploy.sh)
 set -euo pipefail
 
+# Pin the stellar-cli version to ensure reproducible bindings.
+# Update this constant and the CI install step together when upgrading.
+REQUIRED_STELLAR_CLI_VERSION="21.6.0"
+
+actual_version=$(stellar --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+if [[ "$actual_version" != "$REQUIRED_STELLAR_CLI_VERSION" ]]; then
+  echo "ERROR: stellar-cli version mismatch."
+  echo "       Required: $REQUIRED_STELLAR_CLI_VERSION"
+  echo "       Found:    ${actual_version:-<not installed>}"
+  echo ""
+  echo "Install the correct version:"
+  echo "  curl -sSL https://raw.githubusercontent.com/stellar/stellar-cli/v${REQUIRED_STELLAR_CLI_VERSION}/install.sh | bash"
+  echo ""
+  echo "See docs/CONTRIBUTING.md for setup instructions."
+  exit 1
+fi
+
 NETWORK="${1:-testnet}"
+# shellcheck disable=SC1091
 source .env.contracts
 
 CONTRACTS=(registration verification progress scout_access)

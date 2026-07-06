@@ -11,11 +11,22 @@ Ensure the following tools are installed at the specified minimum versions befor
 | **cargo** | ships with Rust stable | Verify: `cargo --version` |
 | **clippy** | ships with Rust stable | `rustup component add clippy` |
 | **rustfmt** | ships with Rust stable | `rustup component add rustfmt` |
-| **stellar-cli** | latest stable | See [Stellar CLI install guide](https://developers.stellar.org/docs/tools/developer-tools/cli/install-stellar-cli) |
+| **stellar-cli** | **21.6.0** (pinned) | See install note below |
 | **Node.js** | 20 LTS | Required only for TypeScript bindings generation — `./scripts/generate-bindings.sh` |
 | **npm** | 10+ (ships with Node 20) | Required only for building/testing bindings packages |
 
-> CI uses `dtolnay/rust-toolchain@stable` and installs `stellar-cli` from the latest `main` install script. If a local build diverges from CI, update your Rust toolchain (`rustup update stable`) and reinstall stellar-cli.
+> CI uses `dtolnay/rust-toolchain@stable` and installs `stellar-cli` at the pinned version listed above. If a local build diverges from CI, update your Rust toolchain (`rustup update stable`) and reinstall stellar-cli at the pinned version.
+
+### Installing the pinned stellar-cli version
+
+`scripts/generate-bindings.sh` enforces the required `stellar-cli` version and will fail with a
+clear error if the wrong version is detected. Install the exact version with:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/stellar/stellar-cli/v21.6.0/install.sh | bash
+```
+
+Then verify: `stellar --version` should print `stellar 21.6.0`.
 
 The `wasm32v1-none` target (not the older `wasm32-unknown-unknown`) is required for building Soroban contracts with `soroban-sdk 25.x`. Using the wrong target produces an ABI-incompatible WASM binary.
 
@@ -47,3 +58,8 @@ cargo fmt --all -- --check      # formatting must be clean
 
 Changes to validator registration, revocation, or milestone approval logic require explicit
 review from a second team member before merge — these are the trust anchors of the platform.
+
+## Glossary
+
+Unfamiliar with terms like *validator*, *milestone*, *subscription tier*, or *CID*?
+See [docs/GLOSSARY.md](GLOSSARY.md) for authoritative definitions of all domain-specific terms.

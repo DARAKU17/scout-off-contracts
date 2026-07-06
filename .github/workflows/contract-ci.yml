@@ -61,6 +61,8 @@ jobs:
           shellcheck scripts/setup-testnet.sh
           shellcheck scripts/generate-bindings.sh
           shellcheck scripts/check-bindings.sh
+          shellcheck scripts/health-check.sh
+          shellcheck scripts/rollback.sh
           shellcheck testnet/seed.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
@@ -89,9 +91,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm32v1-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install Stellar CLI
+      - name: Install Stellar CLI (pinned)
         run: |
-          curl -sSL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | bash
+          STELLAR_CLI_VERSION="25.2.0"
+          curl -sSL "https://raw.githubusercontent.com/stellar/stellar-cli/v${STELLAR_CLI_VERSION}/install.sh" | bash
           echo "$HOME/.stellar/bin" >> "$GITHUB_PATH"
 
       - name: Install Node.js
@@ -140,8 +143,25 @@ jobs:
 
       - name: Generate a local sandbox identity
         run: |
-          stellar keys generate ci-deployer --network local --fund
+          stellar keys generate ci-deployer --network local
           echo "ADMIN_ADDRESS=$(stellar keys address ci-deployer)" >> "$GITHUB_ENV"
+
+      - name: Fund the sandbox identity
+        run: |
+          set -euo pipefail
+          # `keys generate --fund` swallows funding errors (logs a warning and
+          # still exits 0), so fund separately with `keys fund`, which
+          # propagates failures, and retry since friendbot/Horizon can lag
+          # behind the RPC endpoint becoming ready.
+          for i in $(seq 1 30); do
+            if stellar keys fund ci-deployer --network local; then
+              exit 0
+            fi
+            echo "Friendbot not ready yet, retrying (${i}/30)..."
+            sleep 2
+          done
+          echo "ERROR: unable to fund ci-deployer after retries"
+          exit 1
 
       - name: Deploy all contracts to local sandbox
         run: |
@@ -219,4 +239,64 @@ jobs:
 
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
+
+  abi-export:
+    name: Export Contract ABIs
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm32v1-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build WASM (release)
+        run: cargo build --workspace --target wasm32v1-none --release
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | bash
+          echo "$HOME/.stellar/bin" >> "$GITHUB_PATH"
+
+      - name: Export contract ABIs
+        run: |
+          set -euo pipefail
+          mkdir -p abi
+          WASM=target/wasm32v1-none/release
+          for contract in registration verification progress scout_access; do
+            wasm="${WASM}/scoutchain_${contract}.wasm"
+            out="abi/${contract}-abi.json"
+            echo "==> Inspecting ${contract}..."
+            stellar contract info interface --wasm "$wasm" --output json-formatted > "$out"
+            echo "ABI for ${contract} (diff this output across commits to detect breaking changes):"
+            cat "$out"
+            echo ""
+          done
+
+      - name: Validate ABI JSON is parseable
+        run: |
+          set -euo pipefail
+          for contract in registration verification progress scout_access; do
+            out="abi/${contract}-abi.json"
+            python3 -c "import json, sys; json.load(open('${out}')); print('${contract}: valid JSON')"
+          done
+
+      - name: Upload ABI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-abis-${{ github.sha }}
+          path: abi/*.json
+          if-no-files-found: error
 

@@ -1,6 +1,14 @@
 #![allow(deprecated)]
 use soroban_sdk::{Address, Env, String, Symbol};
 
+pub const MILESTONE_APPROVED: &str = "milestone_approved";
+pub const VALIDATOR_REGISTERED: &str = "validator_registered";
+pub const VALIDATOR_REVOKED: &str = "validator_revoked";
+pub const CONTRACT_PAUSED: &str = "contract_paused";
+pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
+pub const CONTRACT_INITIALIZED: &str = "contract_initialized";
+pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
+
 pub fn milestone_approved(
     env: &Env,
     player_id: u64,
@@ -19,15 +27,29 @@ pub fn milestone_approved(
     );
 }
 
-pub fn validator_registered(env: &Env, wallet: &Address) {
-    env.events()
-        .publish((Symbol::new(env, "validator_registered"),), wallet.clone());
+pub fn validator_registered(env: &Env, wallet: &Address, credentials: &String) {
+    env.events().publish(
+        (Symbol::new(env, "validator_registered"), wallet.clone()),
+        (wallet.clone(), credentials.clone()),
+    );
 }
 
 pub fn validator_revoked(env: &Env, wallet: &Address, reason: &String) {
     env.events().publish(
         (Symbol::new(env, "validator_revoked"),),
         (wallet.clone(), reason.clone()),
+    );
+}
+
+pub fn validator_restored(env: &Env, wallet: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "validator_restored"),), wallet.clone());
+}
+
+pub fn validator_transferred(env: &Env, old_wallet: &Address, new_wallet: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "validator_transferred"),),
+        (old_wallet.clone(), new_wallet.clone()),
     );
 }
 
@@ -54,14 +76,13 @@ pub fn progress_contract_updated(env: &Env, progress_contract: &Address) {
 }
 
 /// Emitted when a player disputes a milestone (issue #471)
-pub fn milestone_disputed(
-    env: &Env,
-    player_id: u64,
-    milestone_index: u32,
-    reason: &String,
-) {
+pub fn milestone_disputed(env: &Env, player_id: u64, milestone_index: u32, _reason: &String) {
     env.events().publish(
-        (Symbol::new(env, "milestone_disputed"), player_id, milestone_index),
+        (
+            Symbol::new(env, "milestone_disputed"),
+            player_id,
+            milestone_index,
+        ),
         (),
     );
 }

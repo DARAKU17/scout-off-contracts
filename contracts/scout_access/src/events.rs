@@ -1,6 +1,17 @@
-#![allow(deprecated)]
+#![allow(deprecated, dead_code)]
 use crate::types::SubscriptionTier;
 use soroban_sdk::{Address, Env, Symbol};
+
+pub const CONTRACT_INITIALIZED: &str = "contract_initialized";
+pub const SCOUT_SUBSCRIBED: &str = "scout_subscribed";
+pub const PLAYER_CONTACTED: &str = "player_contacted";
+pub const TRIAL_OFFER_LOGGED: &str = "trial_offer_logged";
+pub const FEES_WITHDRAWN: &str = "fees_withdrawn";
+pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
+pub const CONTRACT_PAUSED: &str = "contract_paused";
+pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
+pub const SUBSCRIPTION_REFUNDED: &str = "subscription_refunded";
+pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 
 pub fn contract_initialized(env: &Env, admin: &Address) {
     env.events().publish(
@@ -58,6 +69,32 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "contract_unpaused"),), admin.clone());
 }
 
+pub fn subscription_created(
+    env: &Env,
+    scout: &Address,
+    tier: &SubscriptionTier,
+    subscribed_at: u64,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_created"), scout.clone()),
+        (tier.clone(), subscribed_at, expires_at),
+    );
+}
+
+pub fn subscription_renewed(
+    env: &Env,
+    scout: &Address,
+    tier: &SubscriptionTier,
+    subscribed_at: u64,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_renewed"), scout.clone()),
+        (tier.clone(), subscribed_at, expires_at),
+    );
+}
+
 pub fn subscription_refunded(env: &Env, scout: &Address, amount: i128) {
     env.events().publish(
         (Symbol::new(env, "subscription_refunded"), scout.clone()),
@@ -69,5 +106,16 @@ pub fn progress_contract_updated(env: &Env, progress_contract: &Address) {
     env.events().publish(
         (Symbol::new(env, "progress_contract_updated"),),
         progress_contract.clone(),
+    );
+}
+
+pub fn fee_config_updated(
+    env: &Env,
+    old_config: &crate::types::FeeConfig,
+    new_config: &crate::types::FeeConfig,
+) {
+    env.events().publish(
+        (Symbol::new(env, "fee_config_updated"),),
+        (old_config.clone(), new_config.clone()),
     );
 }

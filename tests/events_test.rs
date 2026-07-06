@@ -1,32 +1,27 @@
+use scoutchain_verification::events::{validator_registered, VALIDATOR_REGISTERED};
 use soroban_sdk::{testutils::Events, vec, Env, IntoVal, String, Symbol};
-
-use crate::events::validator_registered;
 
 #[test]
 fn test_validator_registered_emits_wallet_and_credentials() {
     let env = Env::default();
-    let wallet = env.register_contract(None, crate::MockContract);
+    let wallet = env.register_contract(None, MockContract);
     let credentials = String::from_str(&env, "UEFA Pro License — Coach Level A");
 
     validator_registered(&env, wallet.clone(), credentials.clone());
 
-    // Retrieve all emitted events
     let events = env.events().all();
 
-    // There should be exactly one event
     assert_eq!(events.len(), 1);
 
     let event = events.get(0).unwrap();
 
-    // Verify event topics
     let expected_topics = vec![
         &env,
-        Symbol::new(&env, "validator_registered").into_val(&env),
+        Symbol::new(&env, VALIDATOR_REGISTERED).into_val(&env),
         wallet.clone().into_val(&env),
     ];
     assert_eq!(event.0, expected_topics);
 
-    // Verify event data includes both wallet and credentials
     let expected_data = (wallet.clone(), credentials.clone()).into_val(&env);
     assert_eq!(event.1, expected_data);
 }
@@ -34,7 +29,7 @@ fn test_validator_registered_emits_wallet_and_credentials() {
 #[test]
 fn test_validator_registered_credentials_persisted_correctly() {
     let env = Env::default();
-    let wallet = env.register_contract(None, crate::MockContract);
+    let wallet = env.register_contract(None, MockContract);
     let credentials = String::from_str(&env, "FIFA Certified Academy Director");
 
     validator_registered(&env, wallet.clone(), credentials.clone());
@@ -42,7 +37,6 @@ fn test_validator_registered_credentials_persisted_correctly() {
     let events = env.events().all();
     let event = events.get(0).unwrap();
 
-    // Decode the tuple from event data
     let data: (soroban_sdk::Address, soroban_sdk::String) =
         event.1.into_val(&env);
 
@@ -53,7 +47,7 @@ fn test_validator_registered_credentials_persisted_correctly() {
 #[test]
 fn test_validator_registered_with_empty_credentials() {
     let env = Env::default();
-    let wallet = env.register_contract(None, crate::MockContract);
+    let wallet = env.register_contract(None, MockContract);
     let credentials = String::from_str(&env, "");
 
     validator_registered(&env, wallet.clone(), credentials.clone());
@@ -71,7 +65,7 @@ fn test_validator_registered_with_empty_credentials() {
 #[test]
 fn test_validator_registered_with_long_credentials() {
     let env = Env::default();
-    let wallet = env.register_contract(None, crate::MockContract);
+    let wallet = env.register_contract(None, MockContract);
     let long_cred = String::from_str(
         &env,
         "UEFA Pro License — Coach Level A — Specialization: Youth Development — \
