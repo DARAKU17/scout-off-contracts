@@ -905,6 +905,42 @@ mod tests {
     }
 
     #[test]
+    fn test_set_player_level_without_progress_contract_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes: soroban_sdk::Vec<String> = vec![&env, String::from_str(&env, "QmTest123")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // No ProgressContract has been set, so the call must be rejected.
+        let result = client.try_set_player_level(&player_id, &ProgressLevel::EliteTier);
+        assert_eq!(result, Err(Ok(ScoutChainError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_player_level_wrong_caller_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes: soroban_sdk::Vec<String> = vec![&env, String::from_str(&env, "QmTest123")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        let progress_contract = Address::generate(&env);
+        client.set_progress_contract(&progress_contract);
+
+        // Clear mocked auths so the stored progress contract's require_auth fails.
+        env.mock_auths(&[]);
+        let result = client.try_set_player_level(&player_id, &ProgressLevel::EliteTier);
+        assert!(result.is_err());
+    }
+
+    #[test]
     #[should_panic]
     fn test_duplicate_registration_fails() {
         let (env, client) = setup();
