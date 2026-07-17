@@ -1786,6 +1786,67 @@ mod tests {
         assert_eq!(client.get_trial_count(&1u64), 1);
     }
 
+    /// Issue: TrialCounter's TTL must be extended alongside TrialOffer in the
+    /// same log_trial_offer call, so a counter expiry never causes the next
+    /// offer to be written back to index 1 (overwriting/orphaning the first
+    /// offer that is still live).
+    #[test]
+    fn test_trial_offer_not_orphaned_by_counter_expiry() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let scout1 = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout1, 100_000_000);
+        client.subscribe(&scout1, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout1, &1u64);
+
+        let idx1 = client.log_trial_offer(
+            &scout1,
+            &1u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        assert_eq!(idx1, 1);
+
+        // Advance past the default persistent entry TTL (500). Without the
+        // TrialCounter extend_ttl call, this would drop the counter back to
+        // 0 and the next offer would be written to index 1 again, silently
+        // overwriting the offer above.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 1_000;
+        });
+
+        // A second scout logs an offer for the same player. TrialCounter is
+        // keyed by player_id only, so this exercises the shared counter
+        // without depending on scout1's unrelated Subscription/ContactRecord
+        // TTL window.
+        let scout2 = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout2, 100_000_000);
+        client.subscribe(&scout2, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout2, &1u64);
+
+        let idx2 = client.log_trial_offer(
+            &scout2,
+            &1u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+
+        // The new offer must land at index 2, not collide with index 1.
+        assert_eq!(idx2, 2);
+        assert_eq!(client.get_trial_count(&1u64), 2);
+
+        // Neither offer is orphaned: both remain readable at their original
+        // indices with their original scout.
+        let offer1 = client.get_trial_offer(&1u64, &1u32);
+        assert_eq!(offer1.scout, scout1);
+        let offer2 = client.get_trial_offer(&1u64, &2u32);
+        assert_eq!(offer2.scout, scout2);
+    }
+
     /// Issue: a scout whose Elite subscription has expired must not be able to
     /// log a trial offer. Verifies that `try_log_trial_offer` returns
     /// `Err(Ok(ScoutAccessError::SubscriptionExpired))` once the ledger
