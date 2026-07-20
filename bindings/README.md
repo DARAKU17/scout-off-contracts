@@ -70,6 +70,7 @@ done
 ```
 bindings/
   registration/
+    README.md        ← package overview and links to full documentation
     package.json     ← committed — package scaffold (overwritten by CLI on generation)
     tsconfig.json    ← committed — TypeScript compiler config
     src/             ← GENERATED — do not edit; re-run generate-bindings.sh to refresh

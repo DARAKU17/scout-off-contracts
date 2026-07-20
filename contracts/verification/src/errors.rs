@@ -1,26 +1,62 @@
 use soroban_sdk::contracterror;
+use scoutchain_shared_types::AdminError;
 
+/// Append-only: do not renumber existing variants. See docs/CONTRIBUTING.md.
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum VerificationError {
+    // ── Initialization & lifecycle ──
+    /// `initialize` called more than once.
     AlreadyInitialized = 1,
+    /// Operation before `initialize`.
     NotInitialized = 2,
+    /// Circuit breaker is active.
     ContractPaused = 3,
-    Unauthorized = 4,
-    ValidatorNotFound = 5,
-    ValidatorInactive = 6,
-    ValidatorAlreadyRegistered = 7,
-    PlayerNotFound = 8,
-    InvalidInput = 9,
-    ReasonTooLong = 10,
+    /// `set_progress_contract` called twice.
     AlreadyConfigured = 11,
-    ProgressCallFailed = 12,
-    Overflow = 13,
-    MilestoneNotFound = 14,
+
+    // ── Authorization ──
+    /// Wrong account for a privileged operation.
+    Unauthorized = 4,
+
+    // ── Validators ──
+    /// Wallet not in validator registry.
+    ValidatorNotFound = 5,
+    /// Validator has been revoked.
+    ValidatorInactive = 6,
+    /// Wallet already registered as validator.
+    ValidatorAlreadyRegistered = 7,
+    /// 100-validator limit reached; contract upgrade required to raise the cap.
     ValidatorCapReached = 15,
+
+    // ── Milestones & evidence ──
+    /// Invalid `player_id`.
+    PlayerNotFound = 8,
+    /// Index out of range.
+    MilestoneNotFound = 14,
+    /// Evidence hash has already been used in a prior `approve_milestone` call.
     DuplicateEvidence = 16,
+    /// Validator has already approved 5 milestones for this player.
     MilestoneLimitExceeded = 17,
+
+    // ── Input validation ──
+    /// Bad evidence hash or credentials too long.
+    InvalidInput = 9,
+    /// Revocation reason exceeds 128 bytes.
+    ReasonTooLong = 10,
+
+    // ── Cross-contract & arithmetic ──
+    /// Cross-contract `advance_level` failed.
+    ProgressCallFailed = 12,
+    /// Milestone counter overflowed.
+    Overflow = 13,
+}
+
+impl AdminError for VerificationError {
+    fn not_initialized() -> Self {
+        VerificationError::NotInitialized
+    }
 }
 
 #[cfg(test)]

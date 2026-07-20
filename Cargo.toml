@@ -15,6 +15,7 @@ edition = "2021"
 [workspace.dependencies]
 soroban-sdk = { version = "25.3.1" }
 soroban-sdk-testutils = { version = "25.3.1", package = "soroban-sdk", features = ["testutils"] }
+ed25519-dalek = "=3.0.0-rc.0"
 
 [profile.release]
 opt-level = "z"

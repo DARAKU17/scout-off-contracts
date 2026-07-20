@@ -9,7 +9,7 @@ pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{validate_cid, ContractHealth};
+use scoutchain_shared_types::{require_admin, validate_cid, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
 // The #[contractclient] macro generates a real Client that performs the
@@ -90,6 +90,16 @@ impl ScoutAccessContract {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ScoutAccessError::AlreadyInitialized);
         }
+        // Probe the supplied xlm_token address to confirm it is a deployed
+        // token contract before we accept it. A wrong address (testnet SAC on
+        // mainnet, a typo, a plain account, a non-token contract) would
+        // otherwise only surface as an opaque failure on the first
+        // subscribe() call's transfer. The probe is read-only and
+        // side-effect-free.
+        match token::Client::new(&env, &xlm_token).try_decimals() {
+            Ok(_) => {}
+            Err(_) => return Err(ScoutAccessError::InvalidInput),
+        }
         admin.require_auth();
         Self::validate_fee_config(&fee_config)?;
         Self::bump_instance_ttl(&env);
@@ -114,7 +124,7 @@ impl ScoutAccessContract {
 
     pub fn update_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::validate_fee_config(&fee_config)?;
 
         let old_config = Self::fee_config(&env);
@@ -129,7 +139,7 @@ impl ScoutAccessContract {
 
     pub fn withdraw_fees(env: Env, to: Address) -> Result<i128, ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let key = DataKey::AccumulatedFees;
         let fees: i128 = env.storage().instance().get(&key).unwrap_or(0i128);
         if fees == 0 {
@@ -145,7 +155,7 @@ impl ScoutAccessContract {
 
     pub fn pause_contract(env: Env) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let admin: Address = env
             .storage()
             .persistent()
@@ -158,7 +168,7 @@ impl ScoutAccessContract {
 
     pub fn unpause_contract(env: Env) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let admin: Address = env
             .storage()
             .persistent()
@@ -173,7 +183,7 @@ impl ScoutAccessContract {
     /// atomically advance the player to Level 3 (admin only).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage()
             .instance()
             .set(&DataKey::ProgressContract, &addr);
@@ -191,7 +201,7 @@ impl ScoutAccessContract {
         amount: i128,
     ) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         if amount <= 0 {
             return Err(ScoutAccessError::InvalidInput);
         }
@@ -212,7 +222,7 @@ impl ScoutAccessContract {
         env: Env,
         new_wasm_hash: soroban_sdk::BytesN<32>,
     ) -> Result<(), ScoutAccessError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -759,7 +769,7 @@ impl ScoutAccessContract {
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ScoutAccessError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let old_admin = Self::get_admin(&env);
         env.storage().persistent().set(&DataKey::Admin, &new_admin);
         events::admin_transferred(&env, &old_admin, &new_admin);
@@ -1034,23 +1044,6 @@ impl ScoutAccessContract {
         }
     }
 
-    fn require_admin(env: &Env) -> Result<(), ScoutAccessError> {
-        let admin: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(ScoutAccessError::NotInitialized)?;
-
-        admin.require_auth();
-
-        env.storage().persistent().extend_ttl(
-            &DataKey::Admin,
-            ADMIN_BUMP_LEDGERS,
-            ADMIN_BUMP_LEDGERS,
-        );
-
-        Ok(())
-    }
 
     fn require_initialized(env: &Env) -> Result<(), ScoutAccessError> {
         if !env
@@ -1076,12 +1069,6 @@ impl ScoutAccessContract {
         Ok(())
     }
 
-    fn get_admin(env: &Env) -> Address {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .expect("contract not initialized")
-    }
 
     fn get_token(env: &Env) -> Result<Address, ScoutAccessError> {
         env.storage()
@@ -1247,6 +1234,54 @@ mod tests {
     fn test_initialize_and_health() {
         let (_, _, _, _, client) = setup();
         assert!(client.health().initialized);
+    }
+
+    #[test]
+    fn test_initialize_accepts_real_token_contract() {
+        // A registered SAC exposes decimals() and must pass the probe.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+
+        let res = client.try_initialize(&admin, &xlm, &default_fees());
+        assert!(res.is_ok(), "real token contract should be accepted");
+    }
+
+    #[test]
+    fn test_initialize_rejects_plain_account_as_xlm_token() {
+        // A generated Address is a plain account, not a contract. The
+        // decimals() probe must fail and initialize must return InvalidInput
+        // with no storage side effects.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let not_a_token = Address::generate(&env);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+
+        let res = client.try_initialize(&admin, &not_a_token, &default_fees());
+        assert_eq!(res, Err(Ok(ScoutAccessError::InvalidInput)));
+        assert!(!client.health().initialized);
+    }
+
+    #[test]
+    fn test_initialize_rejects_non_token_contract_as_xlm_token() {
+        // A registered contract that does not expose decimals() must also be
+        // rejected. We register a fresh contract (the scout_access contract
+        // itself) which has no decimals() method.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let not_a_token = env.register_contract(None, ScoutAccessContract);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+
+        let res = client.try_initialize(&admin, &not_a_token, &default_fees());
+        assert_eq!(res, Err(Ok(ScoutAccessError::InvalidInput)));
+        assert!(!client.health().initialized);
     }
 
     #[test]
@@ -1792,6 +1827,8 @@ mod tests {
     /// offer that is still live).
     #[test]
     fn test_trial_offer_not_orphaned_by_counter_expiry() {
+    #[test]
+    fn test_trial_counter_survives_ttl_expiry_and_continues_incrementing() {
         let (env, admin, xlm, _contract_id, client) = setup();
 
         env.ledger().with_mut(|l| {
@@ -1816,6 +1853,8 @@ mod tests {
         // TrialCounter extend_ttl call, this would drop the counter back to
         // 0 and the next offer would be written to index 1 again, silently
         // overwriting the offer above.
+        // Advance the ledger well past the default persistent entry TTL (500)
+        // that a not-yet-extended TrialCounter would have expired at.
         env.ledger().with_mut(|l| {
             l.sequence_number = 100_000 + 1_000;
         });
@@ -1824,6 +1863,13 @@ mod tests {
         // keyed by player_id only, so this exercises the shared counter
         // without depending on scout1's unrelated Subscription/ContactRecord
         // TTL window.
+        // TrialCounter must have survived the expiry window untouched.
+        assert_eq!(client.get_trial_count(&1u64), 1);
+
+        // A second scout logs an offer for the same player at the new ledger
+        // sequence. TrialCounter is keyed by player_id only, so this exercises
+        // the shared counter without depending on scout1's now-expired
+        // Subscription/ContactRecord entries (an unrelated TTL window).
         let scout2 = Address::generate(&env);
         mint_token(&env, &xlm, &admin, &scout2, 100_000_000);
         client.subscribe(&scout2, &SubscriptionTier::Elite);
@@ -1841,6 +1887,10 @@ mod tests {
 
         // Neither offer is orphaned: both remain readable at their original
         // indices with their original scout.
+        // The counter must continue from 1, not reset (i.e. become 2), and
+        // the original offer at index 1 must remain intact.
+        assert_eq!(idx2, 2);
+        assert_eq!(client.get_trial_count(&1u64), 2);
         let offer1 = client.get_trial_offer(&1u64, &1u32);
         assert_eq!(offer1.scout, scout1);
         let offer2 = client.get_trial_offer(&1u64, &2u32);

@@ -43,7 +43,7 @@ adjustable via `update_fee_config`.
 | `basic_sub_stroops` | `i128` | stroops | > 0 | `1000000` (0.1 XLM) |
 | `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
 | `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
-| `sub_duration_secs` | `u64` | seconds | > 0 | `2592000` (30 days) |
+| `sub_duration_secs` | `u64` | duration in seconds (not a Unix timestamp) | > 0 | `2592000` (30 days) |
 
 All fields must be strictly greater than zero; `initialize` and
 `update_fee_config` return `InvalidInput` otherwise.
@@ -137,6 +137,21 @@ fee with no proration.
 
 - Relevant functions: `subscribe`, `get_subscription` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
+
+---
+
+## Timestamp
+
+All absolute on-chain timestamps in this project are Unix seconds: the number
+of seconds elapsed since 1970-01-01 00:00:00 UTC, obtained from the Soroban
+ledger timestamp. This applies to fields such as `registered_at`, `updated_at`,
+`approved_at`, `disputed_at`, `expires_at`, `subscribed_at`, `contacted_at`,
+`logged_at`, and `period_start`, as well as the `since_timestamp` parameter of
+`get_history_since`.
+
+`ledger_sequence` is not a timestamp; it is the Soroban ledger sequence number
+recorded alongside an event. `sub_duration_secs` is a duration in seconds, not
+an absolute Unix timestamp.
 
 ---
 

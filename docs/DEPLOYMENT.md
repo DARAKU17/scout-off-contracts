@@ -17,10 +17,13 @@ missing contract ID error.
    originate here. No dependency on any other contract.
 
 2. **`verification`** — Deployed second because `approve_milestone` must
-   cross-call `progress.advance_level`. The progress contract address is wired
-   in by `initialize.sh` *after* both are deployed; deploying verification
-   before registration is safe but deploying it after progress and skipping
-   registration will break the milestone flow at runtime.
+   cross‑call `progress.advance_level`. The progress contract address is wired
+   in by `initialize.sh` *after* both verification and registration are deployed.
+
+   **Deployment order guidance:**
+
+   - ✅ *Safe*: Deploy `verification` **before** `registration`.
+   - ❌ *Breaks milestone flow*: Deploy `verification` **after** `progress` **and** skip deploying `registration`.
 
 3. **`progress`** — Deployed third. Holds the four-tier level state machine.
    Receives calls only from the verification contract (production) or directly

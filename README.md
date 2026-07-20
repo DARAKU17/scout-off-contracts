@@ -2,7 +2,7 @@
 
 [![Soroban Contract CI](https://github.com/your-org/scoutchain/actions/workflows/contract-ci.yml/badge.svg)](https://github.com/your-org/scoutchain/actions/workflows/contract-ci.yml)
 
-Decentralized football talent scouting platform on Stellar — tamper-proof player profiles, on-chain progress verification, and direct scout-to-player connections powered by Soroban smart contracts.
+Core Soroban (Rust) smart contracts powering the Scouting Platform on the Stellar network. Manages decentralized talent identities, maps tamper-proof progress metrics, handles validator verification signatures, and governs scout platform access.
 
 ## Overview
 
@@ -402,7 +402,7 @@ Run it against your backend PostgreSQL instance:
 psql $DATABASE_URL -f migrations/001_initial_schema.sql
 ```
 
-
+The migration is idempotent and safe to re-run against an already-migrated database: every table and index uses `IF NOT EXISTS`, and the seed row uses `ON CONFLICT DO NOTHING`.
 
 1. **Player Onboarding**
    - Connect Freighter wallet via SEP-10
@@ -461,7 +461,7 @@ When deploying to mainnet, **always verify** `config/mainnet.json` has been upda
 1. Test the full deployment flow on testnet first
 2. Verify all addresses in `.env` are correct for mainnet
 3. Confirm `ADMIN_ADDRESS` is the intended account — ownership cannot be transferred after initialization
-4. Double-check the `XLM_TOKEN_ADDRESS` matches the mainnet address (not testnet)
+4. Double-check the `XLM_TOKEN_ADDRESS` matches the mainnet address (not testnet). The `scout_access.initialize` call now probes `xlm_token` by invoking `decimals()` on it and returns `InvalidInput` if the address is not a deployed token contract, so a wrong address (testnet SAC on mainnet, a typo, a plain account, or a non-token contract) is caught at deploy time rather than surfacing later as an opaque failure on the first `subscribe()` call.
 
 ## Testing
 

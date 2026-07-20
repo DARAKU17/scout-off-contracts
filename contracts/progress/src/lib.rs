@@ -5,7 +5,8 @@ mod events;
 mod types;
 
 use errors::ProgressError;
-use types::{ContractHealth, DataKey, ProgressEntry, ProgressLevel};
+use types::{DataKey, ProgressEntry};
+use scoutchain_shared_types::{require_admin, ContractHealth, ProgressLevel};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -80,7 +81,7 @@ impl ProgressContract {
 
     /// Store the registration contract address so we can sync player levels (admin only).
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage()
             .instance()
             .set(&DataKey::RegistrationContract, &addr);
@@ -89,7 +90,7 @@ impl ProgressContract {
 
     pub fn pause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        let admin = Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         events::contract_paused(&env, &admin);
         Ok(())
@@ -97,7 +98,7 @@ impl ProgressContract {
 
     pub fn unpause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        let admin = Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         events::contract_unpaused(&env, &admin);
         Ok(())
@@ -107,7 +108,7 @@ impl ProgressContract {
     /// that the caller is the configured VerificationContract (admin only).
     pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage()
             .instance()
             .set(&DataKey::VerificationContract, &addr);
@@ -118,7 +119,7 @@ impl ProgressContract {
     /// advance_level (for trial-offer Level-3 advances). Admin only.
     pub fn set_scout_access_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage()
             .instance()
             .set(&DataKey::ScoutAccessContract, &addr);
@@ -147,7 +148,7 @@ impl ProgressContract {
     /// Upgrade the contract WASM. Admin auth required.
     /// Persistent storage (including Admin) survives this call.
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -160,7 +161,7 @@ impl ProgressContract {
         target_level: ProgressLevel,
     ) -> Result<(), ProgressError> {
         Self::require_not_paused(&env)?;
-        let admin = Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         let old_level = Self::get_current_level(&env, player_id);
         Self::record_progress_entry(
@@ -174,6 +175,11 @@ impl ProgressContract {
         env.storage()
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &target_level);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerLevel(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Sync to registration contract if set
         if let Some(reg_contract) = env
@@ -568,20 +574,6 @@ impl ProgressContract {
         Ok(())
     }
 
-    fn require_admin(env: &Env) -> Result<Address, ProgressError> {
-        let admin: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(ProgressError::NotInitialized)?;
-        admin.require_auth();
-        env.storage().persistent().extend_ttl(
-            &DataKey::Admin,
-            ADMIN_BUMP_LEDGERS,
-            ADMIN_BUMP_LEDGERS,
-        );
-        Ok(admin)
-    }
 }
 
 // =============================================================================
@@ -739,6 +731,33 @@ mod tests {
         let entry = client.get_history_entry(&player_id, &1u32);
         assert_eq!(entry.old_level, ProgressLevel::Unverified);
         assert_eq!(entry.new_level, ProgressLevel::VerifiedIdentity);
+    }
+
+    // PlayerLevel TTL must be extended when reset_player_level writes it —
+    // otherwise the reset level silently reverts to Unverified (get_level's
+    // default) once the un-bumped entry expires.
+    #[test]
+    fn test_reset_player_level_ttl_extended_after_write() {
+        use soroban_sdk::testutils::Ledger;
+        let (env, client, _validator) = setup();
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let player_id = 55u64;
+        client.reset_player_level(&player_id, &ProgressLevel::EliteTier);
+
+        // Advance ledger past what the default un-bumped TTL would be.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 1_000;
+        });
+
+        // The reset level must still be readable — TTL was extended on write.
+        // Without the fix, this would fall back to ProgressLevel::Unverified.
+        assert_eq!(client.get_level(&player_id), ProgressLevel::EliteTier);
     }
 
     #[test]

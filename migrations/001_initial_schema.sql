@@ -1,5 +1,7 @@
 -- ScoutChain — initial PostgreSQL schema
 -- Run by the backend on first startup or via a migration tool (e.g. node-pg-migrate)
+-- Note: CREATE TABLE IF NOT EXISTS does not retroactively add constraints to existing tables.
+-- Existing deployed databases require a companion ALTER TABLE ... ADD CONSTRAINT migration.
 
 -- -----------------------------------------------------------------------
 -- Players
@@ -53,7 +55,7 @@ CREATE TABLE IF NOT EXISTS validators (
 CREATE TABLE IF NOT EXISTS milestones (
     id              SERIAL       PRIMARY KEY,
     player_id       BIGINT       NOT NULL REFERENCES players (player_id),
-    milestone_index INTEGER      NOT NULL,           -- index within the contract
+    milestone_index INTEGER      NOT NULL CHECK (milestone_index > 0),           -- index within the contract
     validator       VARCHAR(56)  NOT NULL,
     description     TEXT         NOT NULL,
     evidence_hash   VARCHAR(256) NOT NULL,           -- IPFS CID
@@ -69,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_milestones_player ON milestones (player_id);
 -- -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS scout_subscriptions (
     scout           VARCHAR(56)  PRIMARY KEY,
-    tier            VARCHAR(16)  NOT NULL,           -- Basic | Pro | Elite
+    tier            VARCHAR(16)  NOT NULL CHECK (tier IN ('Basic', 'Pro', 'Elite')), -- Basic | Pro | Elite
     subscribed_at   BIGINT       NOT NULL,
     expires_at      BIGINT       NOT NULL,
     updated_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -95,7 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_player ON contact_records (player_id);
 CREATE TABLE IF NOT EXISTS trial_offers (
     id              SERIAL       PRIMARY KEY,
     player_id       BIGINT       NOT NULL REFERENCES players (player_id),
-    trial_index     INTEGER      NOT NULL,
+    trial_index     INTEGER      NOT NULL CHECK (trial_index > 0),
     scout           VARCHAR(56)  NOT NULL,
     details_hash    VARCHAR(256) NOT NULL,           -- IPFS CID
     logged_at       BIGINT       NOT NULL,

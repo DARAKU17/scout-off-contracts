@@ -1,3 +1,5 @@
+# Full build, test, lint, bindings, and sandbox pipeline; see ci.yml for the
+# separate fast, dependency-free TODO/FIXME/HACK static check.
 name: Soroban Contract CI
 
 on:
@@ -18,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32v1-none
 
@@ -30,6 +32,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-wasm32v1-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Pin ed25519-dalek to fix soroban-env-host trait bound error
+        run: cargo update -p ed25519-dalek@3.0.0 --precise 3.0.0-rc.0
 
       - name: Run tests
         run: cargo test --workspace
@@ -45,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - name: Clippy
@@ -63,6 +68,8 @@ jobs:
           shellcheck scripts/check-bindings.sh
           shellcheck scripts/health-check.sh
           shellcheck scripts/rollback.sh
+          shellcheck scripts/emergency-pause.sh
+          shellcheck scripts/emergency-unpause.sh
           shellcheck testnet/seed.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
@@ -78,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32v1-none
 
@@ -93,7 +100,7 @@ jobs:
 
       - name: Install Stellar CLI (pinned)
         run: |
-          STELLAR_CLI_VERSION="25.2.0"
+          STELLAR_CLI_VERSION="27.0.0"
           curl -sSL "https://raw.githubusercontent.com/stellar/stellar-cli/v${STELLAR_CLI_VERSION}/install.sh" | bash
           echo "$HOME/.stellar/bin" >> "$GITHUB_PATH"
 
@@ -177,15 +184,16 @@ jobs:
               --package "scoutchain-${name//_/-}" \
               --optimize \
               --target-dir target \
-              2>/dev/null \
+              > /dev/null 2>&1 \
               || stellar contract optimize \
                    --wasm "$wasm_src" \
                    --wasm-out "$wasm_opt" \
+                   > /dev/null 2>&1 \
               || cp "$wasm_src" "$wasm_opt"
             stellar contract deploy \
               --wasm "$wasm_opt" \
               --source ci-deployer \
-              --network local
+              --network local | grep -oE 'C[A-Z0-9]{55}' | tail -1
           }
 
           REG_ID=$(deploy_one registration)
@@ -299,4 +307,3 @@ jobs:
           name: contract-abis-${{ github.sha }}
           path: abi/*.json
           if-no-files-found: error
-

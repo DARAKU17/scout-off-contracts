@@ -94,4 +94,5 @@ pub enum DataKey {
     /// Evidence hash → bool for global uniqueness check.
     EvidenceUsed(String),
     ValidatorMilestones(Address),
+    ActiveDisputesCount,
 }

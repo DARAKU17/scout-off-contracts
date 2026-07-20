@@ -72,6 +72,7 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 
 - [ ] Call `version()` on each upgraded contract to confirm the expected new version
 - [ ] Re-verify instance storage (fee config, contract links) — re-apply if values were wiped
+- [ ] Verify cross-contract wiring: `./scripts/verify-cross-contract-wiring.sh <network>`
 - [ ] Re-run cross-contract wiring if any contract was re-deployed from scratch: `./scripts/initialize.sh <network>`
 - [ ] Regenerate TypeScript bindings: `./scripts/generate-bindings.sh <network>`
 - [ ] Update backend and frontend repos with the new bindings
@@ -96,10 +97,22 @@ All persistent-storage keys in v0.1.0 use the `DataKey` enum defined in each con
 
 Error code assignments for v0.1.0 are fixed as documented in [docs/CONTRACT_REFERENCE.md](docs/CONTRACT_REFERENCE.md). Future minor releases may only **append** new error codes at the end of each enum. SDK consumers should handle unknown error codes gracefully (treat them as unexpected errors and surface to the user).
 
+> **Known gap:** `ScoutAccessError` code 13 is intentionally reserved and will never be assigned. See `contracts/scout_access/src/errors.rs` for the inline explanation.
+
 ---
 
 ## Version History
 
-| Version | Date | Summary |
-|---------|------|---------|
-| v0.1.0 | 2025 | Initial release — all four contracts with full test coverage |
+### Format & Entry Guidelines
+
+When adding new entries to the Version History table:
+- **Contract Scope**: All four contracts (`registration`, `verification`, `progress`, `scout_access`) were initially released together at `v0.1.0`. Future releases may update all contracts in lockstep or target specific contracts individually. Specify the scope in the **Version** column (e.g., `v0.2.0 (all)` or `v0.2.0 (verification)`).
+- **SemVer Bump Type**: Explicitly classify each change as `MAJOR` (breaking storage/API change), `MINOR` (backward-compatible feature/event/error addition), or `PATCH` (backward-compatible bug fix/gas optimization) in the **Type** column.
+- **Summary**: Provide a concise summary of changes, explicitly calling out breaking changes if `MAJOR`.
+
+| Version | Date | Type | Summary |
+|---------|------|------|---------|
+| v0.1.0 (all) | 2025 | MINOR | Initial release — all four contracts with full test coverage |
+<!-- Template / Example for future entries: -->
+<!-- | v0.2.0 (verification) | YYYY-MM-DD | MINOR | Added batch verification helper functions | -->
+<!-- | v1.0.0 (all) | YYYY-MM-DD | MAJOR | BREAKING: Updated storage key layout across all contracts | -->

@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contracttype, String};
+use soroban_sdk::{contracttype, Address, Env, IntoVal, String};
 
 /// Four-tier progress level for a player profile
 #[contracttype]
@@ -34,6 +34,59 @@ impl ProgressLevel {
     }
 }
 
+/// Trait for contract-specific error enums that can produce admin-related
+/// errors. Each contract implements this trait on its own error type so the
+/// shared `require_admin` helper can return the correct per-contract error.
+pub trait AdminError {
+    /// Return the "contract not initialized" error variant for this contract.
+    fn not_initialized() -> Self;
+}
+
+/// Shared admin-authorization helper.
+///
+/// Reads the stored admin `Address` from persistent storage using `admin_key`,
+/// calls [`Address::require_auth`] on it, extends the key's TTL by
+/// `admin_bump_ledgers`, and returns the admin address.
+///
+/// # Generic parameters
+/// - `K` — the storage key type (each contract defines its own `DataKey` enum;
+///   pass `&DataKey::Admin`).
+/// - `E` — the contract-specific error type, which must implement
+///   [`AdminError`].
+///
+/// # Errors
+/// Returns `E::not_initialized()` when the admin key is absent from
+/// persistent storage.
+///
+/// # Usage
+///
+/// ```ignore
+/// use scoutchain_shared_types::require_admin;
+///
+/// // Inside a contract function returning Result<(), MyError>:
+/// let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+/// ```
+pub fn require_admin<K, E>(
+    env: &Env,
+    admin_key: &K,
+    admin_bump_ledgers: u32,
+) -> Result<Address, E>
+where
+    K: IntoVal<Env, soroban_sdk::Val>,
+    E: AdminError,
+{
+    let admin: Address = env
+        .storage()
+        .persistent()
+        .get(admin_key)
+        .ok_or_else(|| E::not_initialized())?;
+    admin.require_auth();
+    env.storage()
+        .persistent()
+        .extend_ttl(admin_key, admin_bump_ledgers, admin_bump_ledgers);
+    Ok(admin)
+}
+
 /// Validate that a string is a plausible IPFS/Arweave CID.
 ///
 /// Rules:
@@ -66,13 +119,34 @@ pub fn validate_cid(hash: &String) -> Result<(), &'static str> {
             }
         }
         Ok(())
-    } else if starts_with_bafy {
-        // CIDv1 (base32): 59–128 chars
+   } else if starts_with_bafy {
+        // CIDv1 (base32): 59–128 chars.
+        //
+        // Unlike CIDv0, this branch does NOT perform per-character base32
+        // charset validation. This is intentional, not an oversight:
+        //   1. CIDv0 has a fixed length (46 chars), so an exhaustive
+        //      charset scan is cheap and catches every malformed input.
+        //      CIDv1's length is variable (59–128 chars) across different
+        //      multihash/codec combinations, so a charset scan here is
+        //      comparatively more expensive for proportionally less
+        //      certainty that the CID is well-formed.
+        //   2. This function is a lightweight format sanity check, not a
+        //      full CID decoder — it does not parse the multibase prefix,
+        //      multicodec, or multihash the way a real CID library would.
+        //      Doing that properly on-chain would add meaningful
+        //      complexity for marginal benefit.
+        //   3. Any CID that passes this check but is still malformed will
+        //      simply fail to resolve against the downstream IPFS/Arweave
+        //      gateway, which acts as the real source of truth for CID
+        //      validity. This function only needs to catch obviously
+        //      wrong input (wrong prefix, wrong length), not guarantee
+        //      byte-for-byte correctness.
         if !(59..=128).contains(&hash_len) {
             return Err("invalid cid: CIDv1 must be 59–128 characters");
         }
         Ok(())
-    } else {
+    }
+    else {
         Err("invalid cid: must start with 'Qm' (CIDv0) or 'bafy' (CIDv1)")
     }
 }
