@@ -1092,7 +1092,7 @@ impl VerificationContract {
 
     /// Return every milestone approved by `wallet`.
     ///
-    /// This legacy method is unbounded. High-volume callers should use
+    /// > **Deprecated**: this legacy method is unbounded. High-volume callers should use
     /// `get_validator_milestones_page` to keep response sizes bounded.
     pub fn get_validator_milestones(env: Env, wallet: Address) -> Vec<MilestoneRef> {
         let key = DataKey::ValidatorMilestones(wallet);
