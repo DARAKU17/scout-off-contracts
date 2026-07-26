@@ -49,6 +49,7 @@ cargo test --workspace          # all tests must pass
 cargo clippy --workspace        # zero warnings
 cargo fmt --all -- --check      # formatting must be clean
 bash scripts/check-docs.sh      # documentation completeness check
+bash scripts/check-event-topic-consistency.sh  # event-topic / docs consistency
 ```
 
 ## CI checks
