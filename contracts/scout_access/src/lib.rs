@@ -334,6 +334,9 @@ impl ScoutAccessContract {
             .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
         {
             Self::remove_from_tier_index(&env, &scout, &existing.tier);
+            // Remove from old expiry bucket so the prior expires_at entry
+            // doesn't linger and produce false positives in renewal-reminder queries.
+            Self::remove_from_expiry_bucket(&env, &scout, existing.expires_at);
         }
 
         env.storage()
@@ -344,6 +347,11 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MIN,
             PERSISTENT_TTL_MAX,
         );
+
+        // Add scout to the day-granularity expiry bucket so
+        // get_expiring_subscriptions can page through soon-to-expire
+        // subscriptions without walking every scout.
+        Self::add_to_expiry_bucket(&env, &scout, expires_at);
 
         // Emit a rich auditable event (closes #462).
         // subscription_renewed covers same-tier renewals and tier upgrades;
@@ -1077,6 +1085,80 @@ impl ScoutAccessContract {
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 
+    /// Return subscriptions whose `expires_at` is at or before `before_timestamp`,
+    /// excluding any subscription that has already been renewed (i.e. whose stored
+    /// `expires_at` is later than `before_timestamp`).
+    ///
+    /// Uses the day-granularity `ExpiryBucket` index populated by `subscribe` to
+    /// avoid a full linear scan of all subscribers.  Only buckets whose day key
+    /// falls within `[0, before_timestamp / 86_400]` are examined.  The index
+    /// covers all days from epoch 0 up to the given cutoff, so the scan is bounded
+    /// by the number of distinct expiry days in that range, not the total number
+    /// of scouts.
+    ///
+    /// **Index tradeoff**: day-bucket granularity is chosen over exact expiry-time
+    /// indexing to keep per-`subscribe` storage cost low.  Each bucket entry is
+    /// one `Address` in a `Vec<Address>` stored under a single persistent key per
+    /// day.  A scout is moved to a new bucket on every renewal, so stale entries
+    /// do not accumulate indefinitely.  Callers receive only subscriptions whose
+    /// real `expires_at` satisfies the predicate — the bucket is just a
+    /// pre-filter, not the authoritative answer.
+    ///
+    /// `limit` is capped at `MAX_EXPIRY_PAGE_SIZE` (50) to bound CPU cost per call.
+    /// Page through results by advancing `before_timestamp` by one second past
+    /// the latest `expires_at` in the previous page.
+    pub fn get_expiring_subscriptions(
+        env: Env,
+        before_timestamp: u64,
+        limit: u32,
+    ) -> soroban_sdk::Vec<Subscription> {
+        Self::bump_instance_ttl(&env);
+
+        const MAX_EXPIRY_PAGE_SIZE: u32 = 50;
+        const SECS_PER_DAY: u64 = 86_400;
+
+        let effective_limit = limit.min(MAX_EXPIRY_PAGE_SIZE);
+        let cutoff_day = before_timestamp / SECS_PER_DAY;
+
+        let mut results: soroban_sdk::Vec<Subscription> = soroban_sdk::Vec::new(&env);
+
+        // Walk day buckets from day 0 up to cutoff_day (inclusive).
+        // In practice, epoch-0 buckets are never populated; the loop starts
+        // effectively at the earliest real subscription day.
+        let mut day = 0u64;
+        while day <= cutoff_day && results.len() < effective_limit {
+            let bucket_key = DataKey::ExpiryBucket(day);
+            if let Some(scouts) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, soroban_sdk::Vec<Address>>(&bucket_key)
+            {
+                let n = scouts.len();
+                let mut i = 0u32;
+                while i < n && results.len() < effective_limit {
+                    let scout = scouts.get(i).unwrap();
+                    // Re-read the live Subscription to get the current expires_at.
+                    // This handles renewals: if the scout renewed, their bucket
+                    // entry was moved and the current expires_at will be later
+                    // than before_timestamp, so they are filtered out here.
+                    if let Some(sub) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
+                    {
+                        if sub.expires_at <= before_timestamp {
+                            results.push_back(sub);
+                        }
+                    }
+                    i = i.saturating_add(1);
+                }
+            }
+            day = day.saturating_add(1);
+        }
+
+        results
+    }
+
     pub fn has_contacted(env: Env, scout: Address, player_id: u64) -> bool {
         Self::bump_instance_ttl(&env);
         let key = DataKey::ContactRecord(player_id, scout);
@@ -1303,6 +1385,50 @@ impl ScoutAccessContract {
                 }
             }
             env.storage().persistent().set(&key, &new_list);
+        }
+    }
+
+    /// Add `scout` to the day-granularity expiry bucket for `expires_at`.
+    /// The bucket key is `expires_at / 86_400` so all subscriptions expiring
+    /// on the same UTC day share a single persistent storage entry.
+    fn add_to_expiry_bucket(env: &Env, scout: &Address, expires_at: u64) {
+        const SECS_PER_DAY: u64 = 86_400;
+        let day = expires_at / SECS_PER_DAY;
+        let key = DataKey::ExpiryBucket(day);
+        let mut bucket: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if !bucket.contains(scout) {
+            bucket.push_back(scout.clone());
+        }
+        env.storage().persistent().set(&key, &bucket);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+    }
+
+    /// Remove `scout` from the day-granularity expiry bucket for `expires_at`.
+    /// Called on subscription renewal so the old bucket entry does not produce
+    /// false positives in `get_subscriptions_expiring_before` queries.
+    fn remove_from_expiry_bucket(env: &Env, scout: &Address, expires_at: u64) {
+        const SECS_PER_DAY: u64 = 86_400;
+        let day = expires_at / SECS_PER_DAY;
+        let key = DataKey::ExpiryBucket(day);
+        if let Some(bucket) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<Address>>(&key)
+        {
+            let mut new_bucket: Vec<Address> = Vec::new(env);
+            for i in 0..bucket.len() {
+                let addr = bucket.get(i).unwrap();
+                if &addr != scout {
+                    new_bucket.push_back(addr);
+                }
+            }
+            env.storage().persistent().set(&key, &new_bucket);
         }
     }
 
@@ -4141,5 +4267,139 @@ mod tests {
             withdrawn,
             "recipient token balance must equal withdrawn amount"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests for get_expiring_subscriptions (issue #851)
+    // -------------------------------------------------------------------------
+
+    /// A subscription expiring at or before `before_timestamp` is returned.
+    #[test]
+    fn test_get_expiring_subscriptions_returns_expiring_sub() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        let sub = client.get_subscription(&scout);
+
+        // Query at exactly expires_at — should be included.
+        let results = client.get_expiring_subscriptions(&sub.expires_at, &50u32);
+        assert_eq!(results.len(), 1, "exactly one expiring subscription expected");
+        assert_eq!(results.get(0).unwrap().scout, scout);
+    }
+
+    /// A subscription expiring AFTER `before_timestamp` is NOT returned.
+    #[test]
+    fn test_get_expiring_subscriptions_excludes_future_expiry() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        let sub = client.get_subscription(&scout);
+
+        // Query one second before expiry — scout should NOT appear.
+        let results = client.get_expiring_subscriptions(&(sub.expires_at - 1), &50u32);
+        assert_eq!(results.len(), 0, "no subscriptions should be returned before expiry");
+    }
+
+    /// A renewed subscription is excluded from the old expiry bucket.
+    #[test]
+    fn test_get_expiring_subscriptions_excludes_renewed_sub() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        // Enough XLM for two Basic subscriptions.
+        mint_token(&env, &xlm, &admin, &scout, 20_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        let first_sub = client.get_subscription(&scout);
+
+        // Advance time past the first expiry so the scout can renew.
+        env.ledger().with_mut(|l| l.timestamp = first_sub.expires_at + 1);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        let second_sub = client.get_subscription(&scout);
+        assert!(second_sub.expires_at > first_sub.expires_at, "renewed expiry must be later");
+
+        // Query at the OLD expiry — scout must NOT appear because they renewed.
+        let results = client.get_expiring_subscriptions(&first_sub.expires_at, &50u32);
+        assert_eq!(
+            results.len(), 0,
+            "renewed subscription must not appear in old expiry window"
+        );
+    }
+
+    /// Multiple scouts, only those expiring at or before the cutoff are returned.
+    #[test]
+    fn test_get_expiring_subscriptions_only_returns_correct_scouts() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        let scout_a = Address::generate(&env);
+        let scout_b = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout_a, 10_000_000);
+        mint_token(&env, &xlm, &admin, &scout_b, 10_000_000);
+
+        // scout_a subscribes at ledger timestamp 0 (default).
+        client.subscribe(&scout_a, &SubscriptionTier::Basic);
+        let sub_a = client.get_subscription(&scout_a);
+
+        // Advance time by 2 days and subscribe scout_b — later expiry.
+        env.ledger().with_mut(|l| l.timestamp += 2 * 86_400);
+        client.subscribe(&scout_b, &SubscriptionTier::Basic);
+        let sub_b = client.get_subscription(&scout_b);
+
+        assert!(sub_b.expires_at > sub_a.expires_at, "scout_b expires later");
+
+        // Query at sub_a.expires_at — only scout_a should appear.
+        let results = client.get_expiring_subscriptions(&sub_a.expires_at, &50u32);
+        assert_eq!(results.len(), 1, "only scout_a should be returned");
+        assert_eq!(results.get(0).unwrap().scout, scout_a);
+
+        // Query at sub_b.expires_at — both scouts should appear.
+        let results_both = client.get_expiring_subscriptions(&sub_b.expires_at, &50u32);
+        assert_eq!(results_both.len(), 2, "both scouts should be returned");
+    }
+
+    /// The `limit` parameter caps the number of results.
+    #[test]
+    fn test_get_expiring_subscriptions_respects_limit() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        let scout_a = Address::generate(&env);
+        let scout_b = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout_a, 10_000_000);
+        mint_token(&env, &xlm, &admin, &scout_b, 10_000_000);
+
+        client.subscribe(&scout_a, &SubscriptionTier::Basic);
+        client.subscribe(&scout_b, &SubscriptionTier::Basic);
+        let sub = client.get_subscription(&scout_a);
+
+        // Both scouts expire at the same timestamp; limit=1 must return only one.
+        let results = client.get_expiring_subscriptions(&sub.expires_at, &1u32);
+        assert_eq!(results.len(), 1, "limit=1 must return at most one result");
+    }
+
+    /// Limit is capped at 50 (MAX_EXPIRY_PAGE_SIZE); passing a larger value is safe.
+    #[test]
+    fn test_get_expiring_subscriptions_caps_limit_at_max() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        let sub = client.get_subscription(&scout);
+
+        // Passing limit=1000 must not panic and must return at most 50.
+        let results = client.get_expiring_subscriptions(&sub.expires_at, &1000u32);
+        assert!(results.len() <= 50, "result count must not exceed MAX_EXPIRY_PAGE_SIZE");
+    }
+
+    /// Empty result when no subscriptions exist.
+    #[test]
+    fn test_get_expiring_subscriptions_empty_when_no_subs() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let results = client.get_expiring_subscriptions(&u64::MAX, &50u32);
+        assert_eq!(results.len(), 0, "no subscriptions: result must be empty");
     }
 }

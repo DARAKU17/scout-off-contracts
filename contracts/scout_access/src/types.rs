@@ -141,4 +141,15 @@ pub enum DataKey {
     /// (push on creation) and `confirm_trial_offer` (remove on cleanup) so
     /// `expire_trial_offers` can sweep stale escrows without an off-chain index.
     OutstandingTrialEscrows,
+    /// Day-granularity expiry bucket: (expires_at / 86_400) → Vec<Address>.
+    ///
+    /// Maintained by `subscribe` alongside `Subscription(scout)` so that
+    /// `get_expiring_subscriptions` can page through soon-to-expire
+    /// subscriptions in O(days_covered) without walking every scout.
+    ///
+    /// Tradeoff: coarse day-bucket granularity keeps index storage cost low
+    /// (one Vec per day with at least one subscriber) at the cost of requiring
+    /// the caller to re-check `Subscription.expires_at` for exact filtering,
+    /// which `get_subscriptions_expiring_before` already does.
+    ExpiryBucket(u64),
 }
