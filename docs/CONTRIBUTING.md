@@ -97,6 +97,13 @@ between existing variants and never renumbered.** This matches the
 consumers, on-chain event listeners, and off-chain indexers key off the
 numeric code.
 
+`scripts/check-error-code-continuity.sh` is the automated backstop for this
+policy. It compares every `errors.rs` in the PR branch against `origin/main`
+and fails if any numeric code present in both has a different variant name, or
+if a code that existed in `main` disappears without an explicit `// reserved`
+comment in the new version. This script runs in the CI `lint` job — a PR that
+renames or silently removes an error code will not pass CI.
+
 When adding a new variant:
 
 - Append it after the last existing variant. Do not "fill gaps" in the
