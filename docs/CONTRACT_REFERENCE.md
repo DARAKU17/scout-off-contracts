@@ -736,6 +736,37 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_validator_statuses(wallets: Vec<Address>) -> Vec<ValidatorStatus>`
+
+Batch-fetch the status of up to 20 validator wallets in a single call.
+Returns one `ValidatorStatus` entry per input wallet **in the same order as the input**,
+including `NotRegistered` for wallets that have never been registered.
+
+**Batch-size cap**: the first 20 entries are processed; wallets beyond that are silently
+ignored. Call again with the remainder for larger sets. This is consistent with the 20-item
+cap used by `registration.get_players`.
+
+**Semantics**: unlike `registration.get_players` (which silently skips missing IDs), this
+function always returns one entry per input wallet — including `NotRegistered` — because
+`ValidatorStatus` already has a `NotRegistered` variant that makes the unregistered case
+unambiguously representable. Callers always receive exactly N results for N inputs (up to the
+cap), making it impossible to confuse "skipped" with "not registered".
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_statuses \
+  --wallets '["$WALLET_1","$WALLET_2","$WALLET_3"]'
+```
+
+Compare with [`get_players`](#get_playersids-vecu64---resultvecplayersummary-scoutchainerror) in the registration contract for the equivalent batch-fetch pattern.
+
+---
+
 #### `get_validator_milestone_count(wallet: Address) -> u32`
 
 Return the total number of milestones approved by a specific validator across
