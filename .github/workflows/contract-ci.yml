@@ -95,8 +95,11 @@ jobs:
           shellcheck scripts/migrate-contract-smoke-test.sh
           shellcheck scripts/git-hooks/pre-push
           shellcheck testnet/seed.sh
+          shellcheck scripts/check-error-code-continuity.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
+      - name: Error-code continuity check
+        run: bash scripts/check-error-code-continuity.sh
       - name: Validate bindings package.json templates
         run: bash scripts/check-bindings.sh
 
