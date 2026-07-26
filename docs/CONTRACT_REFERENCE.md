@@ -2230,11 +2230,28 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- get_scout_contacts --scout $SCOUT_ADDRESS
 ```
 
+Direction check for the same contact relationship:
+
+```bash
+# Scout -> players contacted by this scout.
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+
+# Player -> scouts that contacted this player.
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_contacts --player_id 1
+```
+
 ---
 
 #### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
 
 Return all trial offers for a player in a single call. Bounded at 20 to prevent gas exhaustion. Returns an empty `Vec` when no offers exist.
+
+| Function | Behavior | Recommended use |
+|---|---|---|
+| `get_all_trial_offers` | Returns at most 20 offers. | Bounded UI previews or low-cost reads. |
+| `get_player_trial_offers` | Reads the complete per-player offer range. | Full history views or audits that must include entries beyond the first 20. |
 
 | | |
 |---|---|

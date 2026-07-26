@@ -1236,6 +1236,36 @@ mod tests {
     }
 
     #[test]
+    fn test_get_player_summary_exposes_no_wallet_or_ipfs_hashes_fields() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes: soroban_sdk::Vec<String> = vec![&env, String::from_str(&env, "QmTest123")];
+
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let profile = client.get_player(&player_id);
+        let summary = client.get_player_summary(&player_id);
+
+        let PlayerSummary {
+            player_id: summary_player_id,
+            vitals: summary_vitals,
+            level,
+            updated_at,
+        } = summary;
+
+        assert_eq!(summary_player_id, player_id);
+        assert_eq!(summary_vitals.age, vitals.age);
+        assert_eq!(summary_vitals.position, vitals.position);
+        assert_eq!(summary_vitals.region, vitals.region);
+        assert_eq!(summary_vitals.nationality, vitals.nationality);
+        assert_eq!(level, ProgressLevel::Unverified);
+        assert_eq!(updated_at, profile.updated_at);
+    }
+
+    #[test]
     #[should_panic]
     fn test_duplicate_registration_fails() {
         let (env, client) = setup();
