@@ -982,6 +982,46 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_active_disputes_co
 
 ---
 
+#### `list_disputes_page(offset: u32, limit: u32) -> Vec<(u64, u32)>`
+
+Return a bounded, paginated page of currently-unresolved
+`(player_id, milestone_index)` dispute keys, platform-wide.
+
+The underlying index (`DataKey::OpenDisputeIndex`) is maintained at write-time:
+`dispute_milestone` appends an entry when a new dispute is filed, and
+`resolve_dispute` removes it when the dispute is resolved. This means the index
+always reflects exactly the set of open disputes with no full-scan required at
+query time — making it possible to build an admin "disputes needing attention"
+dashboard from on-chain queries alone.
+
+- `limit` is capped at **50** per page, consistent with `get_global_milestone_index`
+  and `get_validator_milestones_page`.
+- `offset` is a zero-based item offset (e.g. `offset=0, limit=50` → first page;
+  `offset=50, limit=50` → second page).
+- Entries are returned **oldest-first** (insertion order).
+- The index tracks **only unresolved disputes** — resolved disputes are removed
+  immediately, so the index stays naturally bounded in size.
+
+Use `get_active_disputes_count` to get the total count for building pagination UI
+without fetching the full list.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+# First page of open disputes (up to 50)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 0 --limit 50
+
+# Second page
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 50 --limit 50
+```
+
+---
+
 #### `get_global_milestone_index(offset: u32, limit: u32) -> GlobalMilestoneIndexPage`
 
 Return a page of the global milestone index — a rolling log of the most

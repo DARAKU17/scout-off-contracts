@@ -1024,6 +1024,38 @@ impl VerificationContract {
             .unwrap_or(0u32)
     }
 
+    /// Return a bounded, paginated page of currently-unresolved
+    /// `(player_id, milestone_index)` dispute keys, platform-wide.
+    ///
+    /// The underlying index (`DataKey::OpenDisputeIndex`) is maintained at
+    /// write-time: `dispute_milestone` appends an entry and `resolve_dispute`
+    /// removes it, so the index always reflects exactly the set of open
+    /// disputes — no full scan is required at query time.
+    ///
+    /// **Pagination**: `offset` is a zero-based item offset into the index;
+    /// `limit` is capped at 50 per page, matching the established pagination
+    /// convention used by `get_global_milestone_index` and
+    /// `get_validator_milestones_page`.
+    ///
+    /// **Ordering**: entries are returned in insertion order (oldest first).
+    pub fn list_disputes_page(env: Env, offset: u32, limit: u32) -> Vec<(u64, u32)> {
+        let open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OpenDisputeIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = open_index.len();
+        let cap = limit.min(50);
+        let mut page: Vec<(u64, u32)> = Vec::new(&env);
+        let mut i = offset;
+        while i < total && page.len() < cap {
+            page.push_back(open_index.get(i).unwrap());
+            i += 1;
+        }
+        page
+    }
+
     pub fn get_global_milestone_index(
         env: Env,
         offset: u32,
@@ -1256,6 +1288,24 @@ impl VerificationContract {
             &count.checked_add(1).ok_or(VerificationError::Overflow)?,
         );
 
+        // Maintain the global open-dispute index so list_disputes_page can
+        // enumerate unresolved disputes without knowing every (player_id, index) pair.
+        let open_index_key = DataKey::OpenDisputeIndex;
+        let mut open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&open_index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        open_index.push_back((player_id, milestone_index));
+        env.storage()
+            .persistent()
+            .set(&open_index_key, &open_index);
+        env.storage().persistent().extend_ttl(
+            &open_index_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         events::milestone_disputed(&env, &player_wallet, player_id, milestone_index, &reason);
         Ok(())
     }
@@ -1299,6 +1349,32 @@ impl VerificationContract {
             &DataKey::ActiveDisputesCount,
             &count.checked_sub(1).ok_or(VerificationError::Overflow)?,
         );
+
+        // Remove this dispute from the global open-dispute index so it no
+        // longer appears in list_disputes_page results.
+        let open_index_key = DataKey::OpenDisputeIndex;
+        let open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&open_index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_index: Vec<(u64, u32)> = Vec::new(&env);
+        for i in 0..open_index.len() {
+            let entry = open_index.get(i).unwrap();
+            if entry != (player_id, milestone_index) {
+                new_index.push_back(entry);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&open_index_key, &new_index);
+        if !new_index.is_empty() {
+            env.storage().persistent().extend_ttl(
+                &open_index_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+        }
 
         events::dispute_resolved(&env, &admin, player_id, milestone_index, upheld);
         Ok(())
@@ -3229,5 +3305,111 @@ mod tests {
         assert_eq!(client.get_validator_status(&wallet_cause), types::ValidatorStatus::Active);
         let milestone_restored = client.get_milestone_with_status(&1u64, &1u32);
         assert_eq!(milestone_restored.validator_status, types::ValidatorStatus::Active);
+    }
+
+    // -------------------------------------------------------------------------
+    // list_disputes_page tests (#848)
+    // -------------------------------------------------------------------------
+
+    /// An empty index returns an empty page before any disputes are filed.
+    #[test]
+    fn test_list_disputes_page_empty_before_disputes() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let page = client.list_disputes_page(&0u32, &10u32);
+        assert_eq!(page.len(), 0);
+    }
+
+    /// Filing a dispute adds it to the index; resolving it removes it.
+    /// The index count must always agree with get_active_disputes_count.
+    #[test]
+    fn test_list_disputes_page_agrees_with_active_disputes_count() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+
+        // Approve two milestones for the same player
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "M1"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "M2"),
+            &String::from_str(&env, VALID_CID_V0_2),
+        );
+
+        // File two disputes
+        client.dispute_milestone(&player_wallet, &1u64, &1u32,
+            &String::from_str(&env, "Wrong attribution"));
+        client.dispute_milestone(&player_wallet, &1u64, &2u32,
+            &String::from_str(&env, "Incorrect milestone"));
+
+        // Index must contain 2 entries matching get_active_disputes_count
+        let page = client.list_disputes_page(&0u32, &50u32);
+        assert_eq!(page.len(), 2);
+        assert_eq!(client.get_active_disputes_count(), 2);
+
+        // Resolve one dispute — it must be pruned from the index
+        client.resolve_dispute(&1u64, &1u32, &true);
+        let page_after = client.list_disputes_page(&0u32, &50u32);
+        assert_eq!(page_after.len(), 1);
+        assert_eq!(client.get_active_disputes_count(), 1);
+
+        // The remaining entry must be the second dispute
+        let remaining = page_after.get(0).unwrap();
+        assert_eq!(remaining, (1u64, 2u32));
+
+        // Resolve the last dispute — index must now be empty
+        client.resolve_dispute(&1u64, &2u32, &false);
+        let page_empty = client.list_disputes_page(&0u32, &50u32);
+        assert_eq!(page_empty.len(), 0);
+        assert_eq!(client.get_active_disputes_count(), 0);
+    }
+
+    /// limit is capped at 50 per page.
+    #[test]
+    fn test_list_disputes_page_limit_capped_at_50() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+
+        // Approve and dispute 3 milestones
+        let cids = [VALID_CID_V0, VALID_CID_V0_2, VALID_CID_V0_3];
+        for (i, cid) in cids.iter().enumerate() {
+            let idx = (i + 1) as u64;
+            client.approve_milestone(
+                &validator, &idx,
+                &String::from_str(&env, "M"),
+                &String::from_str(&env, cid),
+            );
+            client.dispute_milestone(
+                &player_wallet, &idx, &1u32,
+                &String::from_str(&env, "reason"),
+            );
+        }
+
+        // Requesting limit=100 returns at most 50 (here 3 since there are only 3)
+        let page = client.list_disputes_page(&0u32, &100u32);
+        assert_eq!(page.len(), 3); // fewer than 50, so all returned
+
+        // offset pagination: page 1 with limit 2 should return 2 entries
+        let page1 = client.list_disputes_page(&0u32, &2u32);
+        assert_eq!(page1.len(), 2);
+
+        // page 2 (offset 2, limit 2) should return 1 entry
+        let page2 = client.list_disputes_page(&2u32, &2u32);
+        assert_eq!(page2.len(), 1);
     }
 }
