@@ -309,6 +309,8 @@ cp .env.example .env
 
 This runs all five steps automatically: build → deploy → initialize → generate bindings → seed demo data. Contract IDs are saved to `.env.contracts`, TypeScript bindings to `bindings/`, and test account addresses to `testnet/.accounts`.
 
+If `setup-testnet.sh` fails partway through, keep the generated `.env.contracts` file from the deploy step and resume manually from the failed step below. For example, if initialization failed after deployment, run `./scripts/initialize.sh testnet`, then continue with `./scripts/generate-bindings.sh testnet` and `./testnet/seed.sh`.
+
 ### Manual setup
 
 #### 1. Prerequisites
@@ -355,7 +357,7 @@ cp .env.example .env
 
 ```bash
 ./testnet/seed.sh
-# Creates funded test player, scout, and validator on testnet
+# Creates funded test player, two scouts, and two validators on testnet
 ```
 
 > **Note on Funding**: Seeded demo accounts require a minimum balance of ~15 XLM to cover Stellar base reserves, registration, subscription purchases (up to 7 XLM for Elite tier), and pay-to-contact fees (0.1 XLM). Friendbot's standard testnet funding of 10,000 XLM per account is comfortably sufficient for the full demo flow.
@@ -542,7 +544,7 @@ Secondary features (fractionalized sponsorship, oracle integrations, advanced fi
 - [x] Network config files (testnet + mainnet)
 - [x] Cross-repo `ai.md` integration guide
 - [ ] Scout subscription and pay-to-contact flow (backend + frontend)
-- [ ] Trial offer logging UI and Level 3 advancement (backend + frontend)
+- [ ] Trial offer logging UI and Level 3 advancement (backend + frontend) — contract-side trial-offer escrow/confirmation is already shipped; remaining work is the backend/frontend UI layer.
 - [ ] Decentralized oracle integration for physical stats
 - [ ] Fractionalized Player Token sponsorship model
 - [ ] Mobile-first Flutter frontend

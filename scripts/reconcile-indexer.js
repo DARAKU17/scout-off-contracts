@@ -267,9 +267,10 @@ async function reconcileScouts(pg, cfg, report) {
     report.check("scouts", key, "wallet", s.wallet, dbRow.wallet);
     report.check("scouts", key, "region", s.region, dbRow.region);
     report.check("scouts", key, "registered_at", asBigIntString(s.registered_at), asBigIntString(dbRow.registered_at));
-    // Note: `scouts.verified` (contract) has no column in the current
-    // migration — not a comparison gap this tool can close, but worth
-    // flagging to whoever owns the indexer schema (see docs/INDEXER.md).
+    // scouts.verified: added in the fix for issue #836 — the column now exists
+    // in migrations/001_initial_schema.sql and is checked here against the
+    // on-chain value returned by registration.get_scout(...).verified.
+    report.check("scouts", key, "verified", Boolean(s.verified), Boolean(dbRow.verified));
   }
 }
 

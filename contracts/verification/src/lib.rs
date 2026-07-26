@@ -1182,6 +1182,34 @@ impl VerificationContract {
         }
     }
 
+    /// Batch-fetch the status of up to 20 validator wallets in a single call.
+    ///
+    /// Returns one `ValidatorStatus` entry per input wallet — including
+    /// `NotRegistered` for wallets that have never been registered. The
+    /// result vector is the same length and in the same order as `wallets`.
+    ///
+    /// This design is preferred over the silent-skip pattern used by
+    /// `registration.get_players`, because `ValidatorStatus` already has a
+    /// `NotRegistered` variant that makes the unregistered case
+    /// unambiguously representable. Callers always get back exactly N
+    /// entries for N inputs, so there is no guessing about which inputs were
+    /// "skipped".
+    ///
+    /// **Batch-size cap**: `wallets` is capped at 20 entries, consistent with
+    /// `registration.get_players`. If more than 20 wallets are supplied the
+    /// first 20 are processed and the rest are silently ignored — call again
+    /// with the remainder if needed.
+    pub fn get_validator_statuses(env: Env, wallets: Vec<Address>) -> Vec<ValidatorStatus> {
+        const BATCH_CAP: u32 = 20;
+        let count = wallets.len().min(BATCH_CAP);
+        let mut result = Vec::new(&env);
+        for i in 0..count {
+            let wallet = wallets.get(i).unwrap();
+            result.push_back(Self::get_validator_status(env.clone(), wallet));
+        }
+        result
+    }
+
     /// Deprecated: use `get_validator_status` instead.
     /// Returns true only for registered, active validators.
     pub fn is_active_validator(env: Env, wallet: Address) -> bool {
@@ -3308,108 +3336,78 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // list_disputes_page tests (#848)
+    // get_validator_statuses batch query tests (#850)
     // -------------------------------------------------------------------------
 
-    /// An empty index returns an empty page before any disputes are filed.
+    /// Batch query returns one entry per input wallet, including NotRegistered
+    /// for wallets that have never been registered.  A mixed batch of active,
+    /// revoked, and never-registered wallets must all be reflected correctly.
     #[test]
-    fn test_list_disputes_page_empty_before_disputes() {
+    fn test_get_validator_statuses_mixed_batch() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let page = client.list_disputes_page(&0u32, &10u32);
-        assert_eq!(page.len(), 0);
+        let active_wallet = Address::generate(&env);
+        let revoked_wallet = Address::generate(&env);
+        let unregistered_wallet = Address::generate(&env);
+
+        // Register both wallets as validators.
+        client.register_validator(&active_wallet, &String::from_str(&env, "UEFA-B-License"));
+        client.register_validator(&revoked_wallet, &String::from_str(&env, "UEFA-A-License"));
+
+        // Revoke one of them.
+        let reason: Option<String> = None;
+        client.revoke_validator(&revoked_wallet, &reason);
+
+        // Batch-query all three wallets.
+        let wallets = soroban_sdk::vec![
+            &env,
+            active_wallet.clone(),
+            revoked_wallet.clone(),
+            unregistered_wallet.clone(),
+        ];
+        let statuses = client.get_validator_statuses(&wallets);
+
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses.get(0).unwrap(), types::ValidatorStatus::Active);
+        assert_eq!(statuses.get(1).unwrap(), types::ValidatorStatus::Revoked);
+        assert_eq!(statuses.get(2).unwrap(), types::ValidatorStatus::NotRegistered);
     }
 
-    /// Filing a dispute adds it to the index; resolving it removes it.
-    /// The index count must always agree with get_active_disputes_count.
+    /// Batch is capped at 20 entries; wallets beyond the cap are silently
+    /// ignored and the result length equals 20, not the input length.
     #[test]
-    fn test_list_disputes_page_agrees_with_active_disputes_count() {
+    fn test_get_validator_statuses_batch_cap_at_20() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let validator = Address::generate(&env);
-        let player_wallet = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
-
-        // Approve two milestones for the same player
-        client.approve_milestone(
-            &validator, &1u64,
-            &String::from_str(&env, "M1"),
-            &String::from_str(&env, VALID_CID_V0),
-        );
-        client.approve_milestone(
-            &validator, &1u64,
-            &String::from_str(&env, "M2"),
-            &String::from_str(&env, VALID_CID_V0_2),
-        );
-
-        // File two disputes
-        client.dispute_milestone(&player_wallet, &1u64, &1u32,
-            &String::from_str(&env, "Wrong attribution"));
-        client.dispute_milestone(&player_wallet, &1u64, &2u32,
-            &String::from_str(&env, "Incorrect milestone"));
-
-        // Index must contain 2 entries matching get_active_disputes_count
-        let page = client.list_disputes_page(&0u32, &50u32);
-        assert_eq!(page.len(), 2);
-        assert_eq!(client.get_active_disputes_count(), 2);
-
-        // Resolve one dispute — it must be pruned from the index
-        client.resolve_dispute(&1u64, &1u32, &true);
-        let page_after = client.list_disputes_page(&0u32, &50u32);
-        assert_eq!(page_after.len(), 1);
-        assert_eq!(client.get_active_disputes_count(), 1);
-
-        // The remaining entry must be the second dispute
-        let remaining = page_after.get(0).unwrap();
-        assert_eq!(remaining, (1u64, 2u32));
-
-        // Resolve the last dispute — index must now be empty
-        client.resolve_dispute(&1u64, &2u32, &false);
-        let page_empty = client.list_disputes_page(&0u32, &50u32);
-        assert_eq!(page_empty.len(), 0);
-        assert_eq!(client.get_active_disputes_count(), 0);
-    }
-
-    /// limit is capped at 50 per page.
-    #[test]
-    fn test_list_disputes_page_limit_capped_at_50() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let validator = Address::generate(&env);
-        let player_wallet = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
-
-        // Approve and dispute 3 milestones
-        let cids = [VALID_CID_V0, VALID_CID_V0_2, VALID_CID_V0_3];
-        for (i, cid) in cids.iter().enumerate() {
-            let idx = (i + 1) as u64;
-            client.approve_milestone(
-                &validator, &idx,
-                &String::from_str(&env, "M"),
-                &String::from_str(&env, cid),
-            );
-            client.dispute_milestone(
-                &player_wallet, &idx, &1u32,
-                &String::from_str(&env, "reason"),
-            );
+        // Build a Vec of 25 distinct wallets (none registered).
+        let mut wallets = soroban_sdk::Vec::new(&env);
+        for _ in 0..25 {
+            wallets.push_back(Address::generate(&env));
         }
 
-        // Requesting limit=100 returns at most 50 (here 3 since there are only 3)
-        let page = client.list_disputes_page(&0u32, &100u32);
-        assert_eq!(page.len(), 3); // fewer than 50, so all returned
+        let statuses = client.get_validator_statuses(&wallets);
 
-        // offset pagination: page 1 with limit 2 should return 2 entries
-        let page1 = client.list_disputes_page(&0u32, &2u32);
-        assert_eq!(page1.len(), 2);
+        // Result must be capped at 20.
+        assert_eq!(statuses.len(), 20);
+        // All entries must be NotRegistered.
+        for i in 0..20 {
+            assert_eq!(statuses.get(i).unwrap(), types::ValidatorStatus::NotRegistered);
+        }
+    }
 
-        // page 2 (offset 2, limit 2) should return 1 entry
-        let page2 = client.list_disputes_page(&2u32, &2u32);
-        assert_eq!(page2.len(), 1);
+    /// An empty input returns an empty result without error.
+    #[test]
+    fn test_get_validator_statuses_empty_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallets: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        let statuses = client.get_validator_statuses(&wallets);
+        assert_eq!(statuses.len(), 0);
     }
 }

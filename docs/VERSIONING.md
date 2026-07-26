@@ -60,7 +60,7 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 
 - [ ] Read all BREAKING CHANGES listed in the release notes for the target version
 - [ ] Snapshot current on-chain state that lives in **instance** storage (fee config, initialized flag, contract links) — these survive the WASM swap but must be re-verified
-- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade
+- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade. For a v0.1.0 deployment, each contract should return exactly `0.1.0` (from the workspace `CARGO_PKG_VERSION`, with no `v` prefix).
 - [ ] Run `cargo test --workspace` against the new code locally
 - [ ] Rehearse the upgrade locally with the storage-survival harness — **no testnet fees required.** For each contract it deploys v1, seeds representative state, calls `upgrade()`, and asserts every row of the "What survives an upgrade" table in `docs/DEPLOYMENT.md` (persistent state unchanged; instance `Initialized`/`Paused` flags intact; cross-contract links re-wirable), including the `verification` `AlreadyConfigured` re-wire quirk. Run:
   - `cargo test -p scoutchain-registration  --test upgrade_rehearsal`
