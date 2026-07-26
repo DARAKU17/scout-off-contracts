@@ -49,7 +49,7 @@ cargo test --workspace          # all tests must pass
 cargo clippy --workspace        # zero warnings
 cargo fmt --all -- --check      # formatting must be clean
 bash scripts/check-docs.sh      # documentation completeness check
-bash scripts/check-error-code-continuity.sh  # error-code append-only policy
+bash scripts/check-event-topic-consistency.sh  # event-topic / docs consistency
 ```
 
 ## CI checks
@@ -60,8 +60,8 @@ The repository defines five CI jobs across `.github/workflows/ci.yml` and `.gith
 |-----|------|----------------|----------|
 | `check-todos` | `ci.yml` | Scans `contracts/` for `TODO`/`FIXME`/`HACK`/`XXX` markers — fails if any are found | Yes |
 | `test` | `contract-ci.yml` | Runs `cargo test --workspace` (including each contract's `tests/cost_budget.rs` CPU-instruction cost budget), tests `scoutchain-progress`, uploads a `cpu-cost-budget-<sha>` report artifact, builds WASM release | Yes |
-| `lint` | `contract-ci.yml` | Clippy (deny warnings), `rustfmt` check, shellcheck on shell scripts, docs completeness (`scripts/check-docs.sh`), error-code continuity (`scripts/check-error-code-continuity.sh`), bindings template validation (`scripts/check-bindings.sh`) | Yes |
-| `bindings-smoke-test` | `contract-ci.yml` | Deploys all contracts to a local Soroban sandbox, generates TypeScript bindings, verifies their structure, and builds each binding package | Yes |
+| `lint` | `contract-ci.yml` | Clippy (deny warnings), `rustfmt` check, shellcheck on shell scripts, docs completeness (`scripts/check-docs.sh`), bindings template validation (`scripts/check-bindings.sh`) | Yes |
+| `bindings-smoke-test` | `contract-ci.yml` | Deploys all contracts to a local Soroban sandbox, generates TypeScript bindings, verifies their structure, builds each binding package, and runs `scripts/migrate-contract-smoke-test.sh` against the already-running sandbox to continuously verify the deploy-old→seed→migrate→replay→before/after-comparison path | Yes |
 | `abi-export` | `contract-ci.yml` | Exports contract ABIs to `abi/*.json` using `stellar contract info interface`, validates JSON parseability, measures each contract's optimized WASM size against `ci/wasm-size-budget.json`, and uploads the artifacts; per `docs/VERSIONING.md` the ABI diff is how breaking changes are detected | Yes |
 
 > **Note on the audit:** The required-status configuration above reflects the actual branch-protection rules on `main` at the time of writing. Because changing branch-protection settings requires repository admin access, any future update to the required checks must be performed by a maintainer in the repository settings (`Settings > Branches > main > Require status checks`).

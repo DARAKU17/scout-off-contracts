@@ -19,6 +19,22 @@ That keeps the command copy-paste-runnable in a standard `bash`/`zsh` shell.
 - [progress](#progress)
 - [scout_access](#scout_access)
 - [Shared Types](#shared-types)
+  - [`ProgressLevel`](#progresslevel)
+  - [`ContractHealth`](#contracthealth)
+  - [`PlayerVitals`](#playervitals)
+  - [`PlayerProfile`](#playerprofile)
+  - [`ScoutProfile`](#scoutprofile)
+  - [`Validator`](#validator)
+  - [`ValidatorStatus`](#validatorstatus)
+  - [`Milestone`](#milestone)
+  - [`MilestoneDispute`](#milestonedispute)
+  - [`ProgressEntry`](#progressentry)
+  - [`SubscriptionTier`](#subscriptiontier)
+  - [`Subscription`](#subscription)
+  - [`ContactRecord`](#contactrecord)
+  - [`FeeConfig`](#feeconfig)
+  - [`ProContactPeriod`](#procontactperiod)
+  - [`TrialOffer`](#trialoffer)
 - [Error Codes](#error-codes)
 - [Events](#events)
 - [Design Discussion: Check-Ordering Follow-ups](#design-discussion-check-ordering-follow-ups)
@@ -736,6 +752,37 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_validator_statuses(wallets: Vec<Address>) -> Vec<ValidatorStatus>`
+
+Batch-fetch the status of up to 20 validator wallets in a single call.
+Returns one `ValidatorStatus` entry per input wallet **in the same order as the input**,
+including `NotRegistered` for wallets that have never been registered.
+
+**Batch-size cap**: the first 20 entries are processed; wallets beyond that are silently
+ignored. Call again with the remainder for larger sets. This is consistent with the 20-item
+cap used by `registration.get_players`.
+
+**Semantics**: unlike `registration.get_players` (which silently skips missing IDs), this
+function always returns one entry per input wallet — including `NotRegistered` — because
+`ValidatorStatus` already has a `NotRegistered` variant that makes the unregistered case
+unambiguously representable. Callers always receive exactly N results for N inputs (up to the
+cap), making it impossible to confuse "skipped" with "not registered".
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_statuses \
+  --wallets '["$WALLET_1","$WALLET_2","$WALLET_3"]'
+```
+
+Compare with [`get_players`](#get_playersids-vecu64---resultvecplayersummary-scoutchainerror) in the registration contract for the equivalent batch-fetch pattern.
+
+---
+
 #### `get_validator_milestone_count(wallet: Address) -> u32`
 
 Return the total number of milestones approved by a specific validator across
@@ -978,6 +1025,46 @@ call and decremented when `resolve_dispute` marks a dispute resolved.
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_active_disputes_count
+```
+
+---
+
+#### `list_disputes_page(offset: u32, limit: u32) -> Vec<(u64, u32)>`
+
+Return a bounded, paginated page of currently-unresolved
+`(player_id, milestone_index)` dispute keys, platform-wide.
+
+The underlying index (`DataKey::OpenDisputeIndex`) is maintained at write-time:
+`dispute_milestone` appends an entry when a new dispute is filed, and
+`resolve_dispute` removes it when the dispute is resolved. This means the index
+always reflects exactly the set of open disputes with no full-scan required at
+query time — making it possible to build an admin "disputes needing attention"
+dashboard from on-chain queries alone.
+
+- `limit` is capped at **50** per page, consistent with `get_global_milestone_index`
+  and `get_validator_milestones_page`.
+- `offset` is a zero-based item offset (e.g. `offset=0, limit=50` → first page;
+  `offset=50, limit=50` → second page).
+- Entries are returned **oldest-first** (insertion order).
+- The index tracks **only unresolved disputes** — resolved disputes are removed
+  immediately, so the index stays naturally bounded in size.
+
+Use `get_active_disputes_count` to get the total count for building pagination UI
+without fetching the full list.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+# First page of open disputes (up to 50)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 0 --limit 50
+
+# Second page
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 50 --limit 50
 ```
 
 ---
@@ -1643,9 +1730,9 @@ See the [Glossary](GLOSSARY.md#feeconfig) for a plain-language description of ea
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
-> The `scout_access` contract only stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`). There is no on-chain fee configuration history. Due to the very low frequency of administrative fee adjustments, an on-chain history vector is not implemented to avoid unnecessary storage costs and complexity.
+> The `scout_access` contract stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`) and a bounded on-chain trail of the **last 5 previous configs** (retrievable via `get_fee_config_history`). The history list is maintained oldest-first and is capped at 5 entries; when the cap is reached the oldest entry is evicted on the next `update_fee_config` call.
 >
-> Instead, historical fee configurations must be reconstructed off-chain by replaying `fee_config_updated` event logs. The off-chain indexer database maintains a complete audit trail in the `fee_config_history` table (see [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)) which serves as the actual source of truth for auditing historical transactions (e.g. verifying that a contact fee or subscription payment matched the rate in effect at that time).
+> This lightweight on-chain trail lets you read the immediately-previous fee configuration without depending on the off-chain indexer, making it suitable for quick audits or on-chain fee-change verification. For a *complete*, unbounded audit trail — including all historical fee rates for verifying that a contact fee or subscription payment matched the rate in effect at that time — replay the `fee_config_updated` event logs via the off-chain indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
 
 ### Functions
 
@@ -1762,7 +1849,7 @@ Adjust subscription and contact fee rates. Same validation rules as
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
-> Adjusting the fee config emits the `fee_config_updated` event log containing both the old and new `FeeConfig` values. Since the contract does not maintain an on-chain fee history vector, historical fee rates must be reconstructed off-chain by replaying these events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)).
+> Adjusting the fee config emits the `fee_config_updated` event containing both the old and new `FeeConfig` values and also pushes the previous config into the bounded on-chain history (last 5 entries, oldest-first, accessible via `get_fee_config_history`). For a complete unbounded audit trail, replay events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
 
 | | |
 |---|---|
@@ -2120,6 +2207,31 @@ Return the current fee configuration.
 
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- get_fee_config
+```
+
+---
+
+#### `get_fee_config_history() -> Vec<FeeConfigHistoryEntry>`
+
+Return the bounded on-chain history of the last (up to 5) `FeeConfig` values, **oldest-first**.
+
+Each `FeeConfigHistoryEntry` contains:
+- `config: FeeConfig` — the fee configuration that was active *before* a particular `update_fee_config` call.
+- `updated_at: u64` — the Unix-seconds ledger timestamp when that change was made.
+
+The *current* config is not included — retrieve it with `get_fee_config`. The history grows by
+one entry per `update_fee_config` call and is capped at 5 entries; when the cap is reached the
+oldest entry is evicted. This provides a lightweight middle-ground between the indexer-only
+design (full history via `fee_config_updated` events) and an unbounded on-chain ring-buffer,
+keeping the immediately-previous configs readable on-chain without additional indexer dependency.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- get_fee_config_history
 ```
 
 ---

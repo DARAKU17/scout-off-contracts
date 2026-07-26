@@ -1024,6 +1024,38 @@ impl VerificationContract {
             .unwrap_or(0u32)
     }
 
+    /// Return a bounded, paginated page of currently-unresolved
+    /// `(player_id, milestone_index)` dispute keys, platform-wide.
+    ///
+    /// The underlying index (`DataKey::OpenDisputeIndex`) is maintained at
+    /// write-time: `dispute_milestone` appends an entry and `resolve_dispute`
+    /// removes it, so the index always reflects exactly the set of open
+    /// disputes — no full scan is required at query time.
+    ///
+    /// **Pagination**: `offset` is a zero-based item offset into the index;
+    /// `limit` is capped at 50 per page, matching the established pagination
+    /// convention used by `get_global_milestone_index` and
+    /// `get_validator_milestones_page`.
+    ///
+    /// **Ordering**: entries are returned in insertion order (oldest first).
+    pub fn list_disputes_page(env: Env, offset: u32, limit: u32) -> Vec<(u64, u32)> {
+        let open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OpenDisputeIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = open_index.len();
+        let cap = limit.min(50);
+        let mut page: Vec<(u64, u32)> = Vec::new(&env);
+        let mut i = offset;
+        while i < total && page.len() < cap {
+            page.push_back(open_index.get(i).unwrap());
+            i += 1;
+        }
+        page
+    }
+
     pub fn get_global_milestone_index(
         env: Env,
         offset: u32,
@@ -1060,7 +1092,7 @@ impl VerificationContract {
 
     /// Return every milestone approved by `wallet`.
     ///
-    /// This legacy method is unbounded. High-volume callers should use
+    /// > **Deprecated**: this legacy method is unbounded. High-volume callers should use
     /// `get_validator_milestones_page` to keep response sizes bounded.
     pub fn get_validator_milestones(env: Env, wallet: Address) -> Vec<MilestoneRef> {
         let key = DataKey::ValidatorMilestones(wallet);
@@ -1148,6 +1180,34 @@ impl VerificationContract {
                 }
             }
         }
+    }
+
+    /// Batch-fetch the status of up to 20 validator wallets in a single call.
+    ///
+    /// Returns one `ValidatorStatus` entry per input wallet — including
+    /// `NotRegistered` for wallets that have never been registered. The
+    /// result vector is the same length and in the same order as `wallets`.
+    ///
+    /// This design is preferred over the silent-skip pattern used by
+    /// `registration.get_players`, because `ValidatorStatus` already has a
+    /// `NotRegistered` variant that makes the unregistered case
+    /// unambiguously representable. Callers always get back exactly N
+    /// entries for N inputs, so there is no guessing about which inputs were
+    /// "skipped".
+    ///
+    /// **Batch-size cap**: `wallets` is capped at 20 entries, consistent with
+    /// `registration.get_players`. If more than 20 wallets are supplied the
+    /// first 20 are processed and the rest are silently ignored — call again
+    /// with the remainder if needed.
+    pub fn get_validator_statuses(env: Env, wallets: Vec<Address>) -> Vec<ValidatorStatus> {
+        const BATCH_CAP: u32 = 20;
+        let count = wallets.len().min(BATCH_CAP);
+        let mut result = Vec::new(&env);
+        for i in 0..count {
+            let wallet = wallets.get(i).unwrap();
+            result.push_back(Self::get_validator_status(env.clone(), wallet));
+        }
+        result
     }
 
     /// Deprecated: use `get_validator_status` instead.
@@ -1256,6 +1316,24 @@ impl VerificationContract {
             &count.checked_add(1).ok_or(VerificationError::Overflow)?,
         );
 
+        // Maintain the global open-dispute index so list_disputes_page can
+        // enumerate unresolved disputes without knowing every (player_id, index) pair.
+        let open_index_key = DataKey::OpenDisputeIndex;
+        let mut open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&open_index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        open_index.push_back((player_id, milestone_index));
+        env.storage()
+            .persistent()
+            .set(&open_index_key, &open_index);
+        env.storage().persistent().extend_ttl(
+            &open_index_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         events::milestone_disputed(&env, &player_wallet, player_id, milestone_index, &reason);
         Ok(())
     }
@@ -1299,6 +1377,32 @@ impl VerificationContract {
             &DataKey::ActiveDisputesCount,
             &count.checked_sub(1).ok_or(VerificationError::Overflow)?,
         );
+
+        // Remove this dispute from the global open-dispute index so it no
+        // longer appears in list_disputes_page results.
+        let open_index_key = DataKey::OpenDisputeIndex;
+        let open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&open_index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_index: Vec<(u64, u32)> = Vec::new(&env);
+        for i in 0..open_index.len() {
+            let entry = open_index.get(i).unwrap();
+            if entry != (player_id, milestone_index) {
+                new_index.push_back(entry);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&open_index_key, &new_index);
+        if !new_index.is_empty() {
+            env.storage().persistent().extend_ttl(
+                &open_index_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+        }
 
         events::dispute_resolved(&env, &admin, player_id, milestone_index, upheld);
         Ok(())
@@ -3229,5 +3333,81 @@ mod tests {
         assert_eq!(client.get_validator_status(&wallet_cause), types::ValidatorStatus::Active);
         let milestone_restored = client.get_milestone_with_status(&1u64, &1u32);
         assert_eq!(milestone_restored.validator_status, types::ValidatorStatus::Active);
+    }
+
+    // -------------------------------------------------------------------------
+    // get_validator_statuses batch query tests (#850)
+    // -------------------------------------------------------------------------
+
+    /// Batch query returns one entry per input wallet, including NotRegistered
+    /// for wallets that have never been registered.  A mixed batch of active,
+    /// revoked, and never-registered wallets must all be reflected correctly.
+    #[test]
+    fn test_get_validator_statuses_mixed_batch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let active_wallet = Address::generate(&env);
+        let revoked_wallet = Address::generate(&env);
+        let unregistered_wallet = Address::generate(&env);
+
+        // Register both wallets as validators.
+        client.register_validator(&active_wallet, &String::from_str(&env, "UEFA-B-License"));
+        client.register_validator(&revoked_wallet, &String::from_str(&env, "UEFA-A-License"));
+
+        // Revoke one of them.
+        let reason: Option<String> = None;
+        client.revoke_validator(&revoked_wallet, &reason);
+
+        // Batch-query all three wallets.
+        let wallets = soroban_sdk::vec![
+            &env,
+            active_wallet.clone(),
+            revoked_wallet.clone(),
+            unregistered_wallet.clone(),
+        ];
+        let statuses = client.get_validator_statuses(&wallets);
+
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses.get(0).unwrap(), types::ValidatorStatus::Active);
+        assert_eq!(statuses.get(1).unwrap(), types::ValidatorStatus::Revoked);
+        assert_eq!(statuses.get(2).unwrap(), types::ValidatorStatus::NotRegistered);
+    }
+
+    /// Batch is capped at 20 entries; wallets beyond the cap are silently
+    /// ignored and the result length equals 20, not the input length.
+    #[test]
+    fn test_get_validator_statuses_batch_cap_at_20() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Build a Vec of 25 distinct wallets (none registered).
+        let mut wallets = soroban_sdk::Vec::new(&env);
+        for _ in 0..25 {
+            wallets.push_back(Address::generate(&env));
+        }
+
+        let statuses = client.get_validator_statuses(&wallets);
+
+        // Result must be capped at 20.
+        assert_eq!(statuses.len(), 20);
+        // All entries must be NotRegistered.
+        for i in 0..20 {
+            assert_eq!(statuses.get(i).unwrap(), types::ValidatorStatus::NotRegistered);
+        }
+    }
+
+    /// An empty input returns an empty result without error.
+    #[test]
+    fn test_get_validator_statuses_empty_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallets: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        let statuses = client.get_validator_statuses(&wallets);
+        assert_eq!(statuses.len(), 0);
     }
 }

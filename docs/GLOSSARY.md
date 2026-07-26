@@ -160,6 +160,14 @@ The smallest unit of XLM. 1 XLM = 10 000 000 stroops. All fee fields in
 `FeeConfig` and all fee-related return values in the `scout_access` contract
 are expressed in stroops (Rust type `i128`).
 
+Worked example: the documented `contact_fee_stroops` value `100000` equals
+0.01 XLM (`100000 / 10 000 000`). Keep fee amounts in stroops when comparing
+or tuning cost-sensitive calls such as `subscribe`, `pay_to_contact`, and
+`batch_contact_players`; their CPU guardrails are tracked in
+[`ci/cpu-cost-budget.md`](../ci/cpu-cost-budget.md). If a fee is too low or fee
+arithmetic exceeds safe bounds, see the `scout_access` [`InsufficientFee` and
+`Overflow` error codes](CONTRACT_REFERENCE.md#scoutaccesserror-scout_access-contract).
+
 ---
 
 ## Subscription Tier
