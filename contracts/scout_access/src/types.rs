@@ -98,6 +98,18 @@ pub struct FeeConfig {
     pub trial_offer_expiry_secs: u64,
 }
 
+/// A single entry in the bounded on-chain fee configuration history.
+/// Stored in `DataKey::FeeConfigHistory` as a `Vec<FeeConfigHistoryEntry>`,
+/// oldest-first, capped at `FEE_CONFIG_HISTORY_CAP` entries.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigHistoryEntry {
+    /// The fee configuration that was active before this change.
+    pub config: FeeConfig,
+    /// Ledger timestamp (Unix seconds) when this config was set via `update_fee_config`.
+    pub updated_at: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -141,4 +153,7 @@ pub enum DataKey {
     /// (push on creation) and `confirm_trial_offer` (remove on cleanup) so
     /// `expire_trial_offers` can sweep stale escrows without an off-chain index.
     OutstandingTrialEscrows,
+    /// Bounded on-chain history of the last N FeeConfig values, oldest-first.
+    /// Updated by `update_fee_config`. Exposed via `get_fee_config_history`.
+    FeeConfigHistory,
 }
