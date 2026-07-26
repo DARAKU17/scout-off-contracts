@@ -3165,6 +3165,60 @@ mod tests {
         assert!(!client.has_dispute(&999u64, &1u32));
     }
 
+    /// `has_dispute` is a thin boolean wrapper around `get_dispute`: it returns
+    /// true exactly when `get_dispute` can load a dispute, and false exactly
+    /// when `get_dispute` reports `MilestoneNotFound`.
+    #[test]
+    fn test_has_dispute_matches_get_dispute_ok_and_milestone_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+
+        let player_wallet = Address::generate(&env);
+        let disputed_player_id = 1u64;
+        let disputed_milestone_index = 1u32;
+        let undisputed_milestone_index = 2u32;
+
+        client.approve_milestone(
+            &validator,
+            &disputed_player_id,
+            &String::from_str(&env, "Disputed milestone"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        client.approve_milestone(
+            &validator,
+            &disputed_player_id,
+            &String::from_str(&env, "Never-disputed milestone"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+
+        client.dispute_milestone(
+            &player_wallet,
+            &disputed_player_id,
+            &disputed_milestone_index,
+            &String::from_str(&env, "Dispute reason"),
+        );
+
+        let existing_dispute =
+            client.try_get_dispute(&disputed_player_id, &disputed_milestone_index);
+        assert!(existing_dispute.is_ok());
+        assert!(client.has_dispute(
+            &disputed_player_id,
+            &disputed_milestone_index
+        ));
+
+        let missing_dispute =
+            client.try_get_dispute(&disputed_player_id, &undisputed_milestone_index);
+        assert_eq!(missing_dispute, Err(Ok(VerificationError::MilestoneNotFound)));
+        assert!(!client.has_dispute(
+            &disputed_player_id,
+            &undisputed_milestone_index
+        ));
+    }
+
     /// Test that register_validator fails when called with an already-registered wallet.
     ///
     /// Steps:
