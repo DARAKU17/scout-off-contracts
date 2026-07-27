@@ -36,6 +36,37 @@ mod progress_contract {
     }
 }
 
+// Cross-contract client for registration contract, used to verify scout identities
+mod registration_contract {
+    use soroban_sdk::{contractclient, contracterror, contracttype, Address, Env, String};
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct ScoutProfile {
+        pub scout_id: u64,
+        pub wallet: Address,
+        pub region: String,
+        pub verified: bool,
+        pub registered_at: u64,
+    }
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        ScoutNotFound = 12,
+    }
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn get_scout_by_wallet(
+            env: Env,
+            wallet: Address,
+        ) -> Result<ScoutProfile, Error>;
+    }
+}
+
 // Instance TTL bump
 const INSTANCE_TTL_MIN: u32 = 100;
 const INSTANCE_TTL_MAX: u32 = 500;
@@ -311,6 +342,18 @@ impl ScoutAccessContract {
         Self::set_progress_contract(env, addr)
     }
 
+    /// Wire the registration contract address for Pro-tier scout verification gating.
+    /// Admin only. Can be re-invoked to re-wire the link.
+    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &addr);
+        events::registration_contract_updated(&env, &admin, &addr);
+        Ok(())
+    }
+
     /// Emergency refund: admin returns `amount` XLM (stroops) from the
     /// contract balance to `scout`.  Use when a scout is accidentally
     /// double-charged (e.g. by the race condition this interval guard
@@ -406,6 +449,26 @@ impl ScoutAccessContract {
                     }
                 }
             }
+        }
+
+        // Sybil resistance: gate Pro-tier subscriptions to verified scouts only.
+        // Basic and Elite tiers remain unrestricted.
+        if tier == SubscriptionTier::Pro {
+            if let Ok(reg_contract_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::RegistrationContract) {
+                let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
+                match reg_client.try_get_scout_by_wallet(&scout) {
+                    Ok(scout_profile) => {
+                        if !scout_profile.verified {
+                            return Err(ScoutAccessError::ScoutNotVerified);
+                        }
+                    }
+                    Err(_) => {
+                        // Scout not found in registration contract; deny Pro-tier access
+                        return Err(ScoutAccessError::ScoutNotVerified);
+                    }
+                }
+            }
+            // If registration contract is not wired, allow Pro-tier subscription (graceful degradation)
         }
 
         let config = Self::fee_config(&env);

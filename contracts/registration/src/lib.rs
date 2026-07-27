@@ -639,6 +639,19 @@ impl RegistrationContract {
         Ok(profile)
     }
 
+    /// Get a scout profile by wallet address. Used by scout_access contract for Pro-tier verification gating.
+    pub fn get_scout_by_wallet(
+        env: Env,
+        wallet: Address,
+    ) -> Result<ScoutProfile, ScoutChainError> {
+        let scout_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ScoutByWallet(wallet.clone()))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        Self::get_scout(env, scout_id)
+    }
+
     /// Verify a scout profile (admin only).
     pub fn verify_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;

@@ -78,6 +78,10 @@ pub enum ScoutAccessError {
     FeeConfigProposalNotReady = 25,
     /// A fee config proposal already exists; must activate or replace it.
     PendingFeeConfigAlreadyExists = 26,
+
+    // ── Sybil resistance ──
+    /// Scout is not verified; cannot subscribe to Pro tier.
+    ScoutNotVerified = 27,
 }
 
 impl AdminError for ScoutAccessError {
