@@ -3,7 +3,7 @@ mod errors;
 mod events;
 mod types;
 use errors::ScoutAccessError;
-use types::{ContactRecord, DataKey, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
+use types::{ContactRecord, DataKey, FeeConfigProposal, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
@@ -72,6 +72,11 @@ const TRIAL_OFFER_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 // that would effectively remove the monetization model.
 const MIN_CONTACT_FEE_STROOPS: i128 = 100_000; // 0.01 XLM
 const MIN_SUB_FEE_STROOPS: i128 = 1_000_000; // 0.1 XLM
+
+// Fee config proposal activation delay: 7 days (604,800 seconds) at average
+// 5s/ledger ≈ 120,960 ledgers. Scouts have one full week to react to a
+// proposed fee increase before it takes effect.
+const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -142,6 +147,102 @@ impl ScoutAccessContract {
             .set(&DataKey::FeeConfig, &fee_config);
 
         events::fee_config_updated(&env, &admin, &old_config, &fee_config);
+        Ok(())
+    }
+
+    /// Propose a new fee configuration. If all fees are ≤ current fees (decreases only),
+    /// the config is immediately activated. Otherwise, it is stored as pending and requires
+    /// `activate_fee_config` after a 7-day delay to take effect.
+    pub fn propose_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::validate_fee_config(&fee_config)?;
+
+        // Check if a pending proposal already exists
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingFeeConfig)
+        {
+            return Err(ScoutAccessError::PendingFeeConfigAlreadyExists);
+        }
+
+        let current_config = Self::fee_config(&env);
+        let now = env.ledger().timestamp();
+
+        // Check if this is a pure decrease (all fees lower or equal)
+        let is_decrease_or_no_change = fee_config.contact_fee_stroops <= current_config.contact_fee_stroops
+            && fee_config.basic_sub_stroops <= current_config.basic_sub_stroops
+            && fee_config.pro_sub_stroops <= current_config.pro_sub_stroops
+            && fee_config.elite_sub_stroops <= current_config.elite_sub_stroops;
+
+        if is_decrease_or_no_change {
+            // Immediate activation for decreases
+            env.storage()
+                .instance()
+                .set(&DataKey::FeeConfig, &fee_config);
+
+            // Emit both events in the same transaction
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+            events::fee_config_updated(&env, &admin, &current_config, &fee_config);
+        } else {
+            // Store as pending for increases
+            let proposal = FeeConfigProposal {
+                config: fee_config.clone(),
+                proposed_at: now,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingFeeConfig, &proposal);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingFeeConfig,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+        }
+
+        Ok(())
+    }
+
+    /// Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+    pub fn activate_fee_config(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        // Retrieve the pending proposal
+        let proposal: FeeConfigProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingFeeConfig)
+            .ok_or(ScoutAccessError::NoPendingFeeConfig)?;
+
+        let now = env.ledger().timestamp();
+        let activation_time = proposal
+            .proposed_at
+            .checked_add(FEE_CONFIG_PROPOSAL_DELAY_SECS)
+            .ok_or(ScoutAccessError::Overflow)?;
+
+        // Check that the delay has elapsed
+        if now < activation_time {
+            return Err(ScoutAccessError::FeeConfigProposalNotReady);
+        }
+
+        // Get the currently active config for the event
+        let old_config = Self::fee_config(&env);
+
+        // Move pending to active
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeConfig, &proposal.config);
+
+        // Clear pending state
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingFeeConfig);
+
+        events::fee_config_updated(&env, &admin, &old_config, &proposal.config);
         Ok(())
     }
 

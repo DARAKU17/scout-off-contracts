@@ -65,6 +65,16 @@ pub struct TrialEscrow {
     pub expires_at: u64,
 }
 
+/// Proposed fee configuration awaiting activation after a delay
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigProposal {
+    /// The proposed fee configuration
+    pub config: FeeConfig,
+    /// Ledger timestamp when the proposal was created
+    pub proposed_at: u64,
+}
+
 /// Platform fee configuration
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -95,6 +105,8 @@ pub enum DataKey {
     Initialized,
     Paused,
     FeeConfig,
+    /// Proposed fee configuration awaiting activation after a 7-day delay
+    PendingFeeConfig,
     AccumulatedFees,
     /// Native XLM token contract address
     XlmToken,
