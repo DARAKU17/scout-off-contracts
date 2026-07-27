@@ -644,6 +644,7 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed | Call `propose_admin` first, then have the proposed address call `accept_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same offer | No action; the offer was already confirmed |
 | 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's expiry window | Log a new trial offer |
+| 24 | `AutoRenewNotEnabled` | `renew_if_due` called but the scout has not opted in to auto-renewal | Call `set_auto_renew` with `enabled = true` first |
 
 ## Events
 

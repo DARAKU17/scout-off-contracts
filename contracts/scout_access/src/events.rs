@@ -182,3 +182,33 @@ pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
         error_code,
     );
 }
+
+pub const AUTO_RENEW_SET: &str = "auto_renew_set";
+pub const SUBSCRIPTION_AUTO_RENEWED: &str = "subscription_auto_renewed";
+
+/// topics: (event_name, scout)  data: enabled
+pub fn auto_renew_set(env: &Env, scout: &Address, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, AUTO_RENEW_SET), scout.clone()),
+        enabled,
+    );
+}
+
+/// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
+///
+/// Emitted when `renew_if_due` successfully renews a scout's subscription.
+pub fn subscription_auto_renewed(
+    env: &Env,
+    scout: &Address,
+    tier: &SubscriptionTier,
+    subscribed_at: u64,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, SUBSCRIPTION_AUTO_RENEWED),
+            scout.clone(),
+        ),
+        (tier.clone(), subscribed_at, expires_at),
+    );
+}

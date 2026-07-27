@@ -156,4 +156,7 @@ pub enum DataKey {
     /// Bounded on-chain history of the last N FeeConfig values, oldest-first.
     /// Updated by `update_fee_config`. Exposed via `get_fee_config_history`.
     FeeConfigHistory,
+    /// scout wallet → bool; true if the scout has opted in to auto-renewal.
+    /// Set by `set_auto_renew`, consumed by `renew_if_due`.
+    AutoRenew(Address),
 }

@@ -70,6 +70,8 @@ pub enum ScoutAccessError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 21,
+    /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
+    AutoRenewNotEnabled = 24,
 }
 
 impl AdminError for ScoutAccessError {
