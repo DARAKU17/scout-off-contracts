@@ -344,6 +344,33 @@ impl RegistrationContract {
             .ok_or(ScoutChainError::ScoutNotFound)
     }
 
+    /// Batch-fetch scout profiles for up to 20 IDs in a single call.
+    /// Missing IDs are silently skipped (partial-hit semantics, identical to
+    /// `get_players`). The returned vec contains only the profiles that were
+    /// found, preserving input order among hits.
+    ///
+    /// Capped at `MAX_BATCH_SIZE` (20) to bound gas usage per call.
+    /// Pass more than 20 IDs → `InvalidInput`.
+    pub fn get_scouts(env: Env, ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let mut profiles = Vec::new(&env);
+        for i in 0..ids.len() {
+            if let Some(id) = ids.get(i) {
+                if let Some(profile) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, ScoutProfile>(&DataKey::Scout(id))
+                {
+                    profiles.push_back(profile);
+                }
+            }
+        }
+        Ok(profiles)
+    }
+
     /// Verify a scout profile (admin only).
     pub fn verify_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
         Self::require_admin(&env)?;
@@ -1556,5 +1583,97 @@ fn test_upgrade_preserves_admin() {
         let profile = client.get_player(&player_id);
         assert_eq!(profile.wallet, wallet);
         assert_eq!(profile.level, ProgressLevel::Unverified);
+    }
+
+    // -------------------------------------------------------------------------
+    // #870: get_scouts — batch query, mirrors get_players semantics
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_scouts_returns_all_found_profiles() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        let id1 = client.register_scout(&w1, &String::from_str(&env, "West Africa"));
+        let id2 = client.register_scout(&w2, &String::from_str(&env, "South America"));
+        let id3 = client.register_scout(&w3, &String::from_str(&env, "Europe"));
+
+        let ids = soroban_sdk::vec![&env, id1, id2, id3];
+        let profiles = client.get_scouts(&ids);
+        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles.get(0).unwrap().scout_id, id1);
+        assert_eq!(profiles.get(1).unwrap().scout_id, id2);
+        assert_eq!(profiles.get(2).unwrap().scout_id, id3);
+    }
+
+    #[test]
+    fn test_get_scouts_skips_nonexistent_ids() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        let id1 = client.register_scout(&w1, &String::from_str(&env, "West Africa"));
+        let id2 = client.register_scout(&w2, &String::from_str(&env, "Europe"));
+
+        // 999 and 1000 are nonexistent — must be silently skipped.
+        let ids = soroban_sdk::vec![&env, id1, 999u64, id2, 1000u64];
+        let profiles = client.get_scouts(&ids);
+
+        // Only the two registered scouts should be returned.
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles.get(0).unwrap().scout_id, id1);
+        assert_eq!(profiles.get(1).unwrap().scout_id, id2);
+    }
+
+    #[test]
+    fn test_get_scouts_empty_ids_returns_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+        let profiles = client.get_scouts(&ids);
+        assert_eq!(profiles.len(), 0);
+    }
+
+    #[test]
+    fn test_get_scouts_max_batch_size_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let mut ids = soroban_sdk::Vec::new(&env);
+        for _ in 0..20 {
+            let wallet = Address::generate(&env);
+            let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Region"));
+            ids.push_back(scout_id);
+        }
+
+        let profiles = client.get_scouts(&ids);
+        assert_eq!(profiles.len(), 20);
+    }
+
+    #[test]
+    fn test_get_scouts_exceeds_batch_cap_returns_invalid_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Build a vec of 21 IDs (none need to exist — the cap check fires first).
+        let mut ids = soroban_sdk::Vec::new(&env);
+        for i in 1u64..=21 {
+            ids.push_back(i);
+        }
+
+        let result = client.try_get_scouts(&ids);
+        assert_eq!(result, Err(Ok(ScoutChainError::InvalidInput)));
     }
 }
