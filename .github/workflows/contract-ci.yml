@@ -93,9 +93,13 @@ jobs:
           shellcheck scripts/migrate-contract.sh
           shellcheck scripts/replay-state.sh
           shellcheck scripts/migrate-contract-smoke-test.sh
+          shellcheck scripts/git-hooks/pre-push
           shellcheck testnet/seed.sh
+          shellcheck scripts/check-event-topic-consistency.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
+      - name: Event-topic consistency check
+        run: bash scripts/check-event-topic-consistency.sh
       - name: Validate bindings package.json templates
         run: bash scripts/check-bindings.sh
 
@@ -300,6 +304,29 @@ jobs:
               || { echo "ERROR: bindings/$pkg/dist/index.js not produced"; exit 1; }
             echo "  OK: dist/index.js present"
           done
+
+      - name: Run migration smoke test against local sandbox
+        # Reuses the already-running stellar/quickstart:testing sandbox set up
+        # earlier in this job. The script's 'skips cleanly if docker/stellar
+        # unavailable' guards will NOT trigger here — both are present. This
+        # step provides continuous verification of the deploy-old→seed→migrate→
+        # replay→before/after-comparison path on every PR. See
+        # scripts/migrate-contract-smoke-test.sh for what is exercised.
+        #
+        # Runtime note: the migration smoke test adds roughly 2–3 min to this
+        # job (one extra deploy+seed+migrate cycle against the already-warm
+        # sandbox). If this meaningfully slows down the overall PR gate,
+        # consider restricting execution to pushes to main/develop or to paths
+        # touching migration-related scripts (paths-filter), and document that
+        # tradeoff in this comment.
+        run: |
+          set -euo pipefail
+          export DEPLOYER_SECRET="$(stellar keys show ci-deployer 2>/dev/null || true)"
+          # The smoke test spins its own container internally; signal it to
+          # reuse the already-running network registration rather than
+          # re-registering, by exporting the passphrase so the script can
+          # skip the `stellar network add` step if the network is already known.
+          bash scripts/migrate-contract-smoke-test.sh
 
       - name: Stop local sandbox
         if: always()

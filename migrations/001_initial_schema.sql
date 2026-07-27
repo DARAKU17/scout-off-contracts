@@ -49,9 +49,16 @@ CREATE TABLE IF NOT EXISTS scouts (
     scout_id        BIGINT PRIMARY KEY,
     wallet          VARCHAR(56)  NOT NULL UNIQUE,
     region          VARCHAR(128) NOT NULL,
+    verified        BOOLEAN      NOT NULL DEFAULT FALSE, -- mirrors registration.get_scout(...).verified
     registered_at   BIGINT       NOT NULL,
     created_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Companion migration for already-deployed databases
+-- (CREATE TABLE IF NOT EXISTS does not add columns to an existing table):
+--
+--   ALTER TABLE scouts
+--     ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_scouts_wallet ON scouts (wallet);
 
@@ -189,17 +196,27 @@ CREATE TABLE IF NOT EXISTS fee_withdrawals (
 );
 
 -- -----------------------------------------------------------------------
--- Admin transfers (progress.admin_transferred / scout_access.admin_transferred)
--- Both contracts emit the same event name, so contract_name disambiguates
--- the source when both are indexed into one database.
+-- Admin transfers (registration.admin_transferred / verification.admin_transferred /
+-- progress.admin_transferred / scout_access.admin_transferred)
+-- All four contracts implement propose_admin/accept_admin and emit the
+-- admin_transferred event, so contract_name must cover all four.
 -- -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS admin_transfers (
     id              SERIAL       PRIMARY KEY,
-    contract_name   VARCHAR(32)  NOT NULL CHECK (contract_name IN ('progress', 'scout_access')),
+    contract_name   VARCHAR(32)  NOT NULL CHECK (contract_name IN ('registration', 'verification', 'progress', 'scout_access')),
     old_admin       VARCHAR(56)  NOT NULL,
     new_admin       VARCHAR(56)  NOT NULL,
     created_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Companion migration for already-deployed databases
+-- (CREATE TABLE IF NOT EXISTS does not modify constraints on existing tables):
+--
+--   ALTER TABLE admin_transfers
+--     DROP CONSTRAINT IF EXISTS admin_transfers_contract_name_check;
+--   ALTER TABLE admin_transfers
+--     ADD CONSTRAINT admin_transfers_contract_name_check
+--       CHECK (contract_name IN ('registration', 'verification', 'progress', 'scout_access'));
 
 CREATE INDEX IF NOT EXISTS idx_admin_transfers_contract ON admin_transfers (contract_name);
 

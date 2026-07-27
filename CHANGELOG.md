@@ -34,6 +34,9 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 - Release date: `2025`
 - Contracts affected: `progress`, `registration`, `scout_access`, `verification`
 - Summary: Initial release — all four contracts with full test coverage
+  - Baseline includes milestone disputes, batch contact operations, escrow-backed
+    trial offers, and Pro-tier contact quotas; these were part of v0.1.0
+    rather than later unversioned additions.
 - Classification: `Non-breaking (initial release baseline)`
 
 This entry is treated as the baseline for the initial public release rather than a change from an earlier public version.

@@ -20,6 +20,8 @@ if [[ "$NETWORK" == "mainnet" ]]; then
   fi
 fi
 
+# Keep WASM_DIR assigned exactly once; a duplicate legacy-target assignment can
+# make deploys look in the wrong build directory.
 WASM_DIR="target/wasm32v1-none/release"  # wasm32v1-none replaced the legacy wasm32-unknown-unknown target (soroban-sdk 25.x+)
 
 # Save a pre-deploy snapshot so rollback.sh can restore the last known good state
