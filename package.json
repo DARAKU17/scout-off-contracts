@@ -1,0 +1,23 @@
+{
+  "name": "@scoutchain/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ScoutChain Soroban smart contracts — decentralized football talent scouting on Stellar",
+  "homepage": "https://github.com/scout-off/scout-off-contracts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "cargo build --workspace --target wasm32v1-none --release",
+    "test": "cargo test --workspace",
+    "lint": "cargo clippy --workspace -- -D warnings && cargo fmt --all -- --check"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "scoutchain",
+    "smart-contracts",
+    "blockchain"
+  ]
+}
