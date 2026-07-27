@@ -507,6 +507,7 @@ When the progress contract is not wired, a `progress_contract_not_set` event is 
    ```bash
    ./scripts/verify-cross-contract-wiring.sh testnet
    ```
+   It checks all five documented wiring links: `verification.set_progress_contract`, `registration.set_progress_contract`, `progress.set_verification_contract`, `progress.set_registration_contract`, and `scout_access.set_progress_contract`.
 2. Re-wire if any link shows ❌:
    ```bash
    ./scripts/initialize.sh testnet

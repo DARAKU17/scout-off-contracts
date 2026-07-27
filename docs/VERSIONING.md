@@ -60,7 +60,7 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 
 - [ ] Read all BREAKING CHANGES listed in the release notes for the target version
 - [ ] Snapshot current on-chain state that lives in **instance** storage (fee config, initialized flag, contract links) — these survive the WASM swap but must be re-verified
-- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade
+- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade. For a v0.1.0 deployment, each contract should return exactly `0.1.0` (from the workspace `CARGO_PKG_VERSION`, with no `v` prefix).
 - [ ] Run `cargo test --workspace` against the new code locally
 - [ ] Rehearse the upgrade locally with the storage-survival harness — **no testnet fees required.** For each contract it deploys v1, seeds representative state, calls `upgrade()`, and asserts every row of the "What survives an upgrade" table in `docs/DEPLOYMENT.md` (persistent state unchanged; instance `Initialized`/`Paused` flags intact; cross-contract links re-wirable), including the `verification` `AlreadyConfigured` re-wire quirk. Run:
   - `cargo test -p scoutchain-registration  --test upgrade_rehearsal`
@@ -118,6 +118,10 @@ When adding new entries to the Version History table:
 - **SemVer Bump Type**: Explicitly classify each change as `MAJOR` (breaking storage/API change), `MINOR` (backward-compatible feature/event/error addition), or `PATCH` (backward-compatible bug fix/gas optimization) in the **Type** column.
 - **Summary**: Provide a concise summary of changes, explicitly calling out breaking changes if `MAJOR`.
 - **Cross-reference**: Every entry must mirror the corresponding entry in [CHANGELOG.md](CHANGELOG.md) — keep both files in sync.
+
+> **Current enforcement gap:** Keeping this Version History table current is
+> currently a convention-only process that relies on contributor discipline; no
+> CI check enforces that MAJOR or MINOR version changes add a corresponding row.
 
 | Version | Date | Type | Summary |
 |---------|------|------|---------|
