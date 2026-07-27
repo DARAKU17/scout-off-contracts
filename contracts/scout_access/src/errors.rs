@@ -77,3 +77,56 @@ impl AdminError for ScoutAccessError {
         ScoutAccessError::NotInitialized
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scout_access_error_code_13_remains_reserved() {
+        let mut in_error_enum = false;
+        let mut next_implicit_code: Option<u32> = None;
+
+        for raw_line in include_str!("errors.rs").lines() {
+            let line = raw_line.trim();
+
+            if line.starts_with("pub enum ScoutAccessError") {
+                in_error_enum = true;
+                continue;
+            }
+
+            if !in_error_enum {
+                continue;
+            }
+
+            if line.starts_with('}') {
+                break;
+            }
+
+            if line.is_empty()
+                || line.starts_with("//")
+                || line.starts_with("///")
+                || !line.ends_with(',')
+            {
+                continue;
+            }
+
+            let assigned_code = if let Some((_, discriminant)) = line.split_once('=') {
+                discriminant
+                    .trim_end_matches(',')
+                    .trim()
+                    .parse::<u32>()
+                    .expect("ScoutAccessError discriminants must be u32 literals")
+            } else {
+                next_implicit_code.expect("first ScoutAccessError variant must be explicit")
+            };
+
+            assert_ne!(
+                assigned_code, 13,
+                "ScoutAccessError code 13 is intentionally reserved and must not be assigned"
+            );
+
+            next_implicit_code = Some(assigned_code + 1);
+        }
+    }
+}

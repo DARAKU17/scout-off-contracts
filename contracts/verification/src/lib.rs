@@ -2514,6 +2514,56 @@ mod tests {
     }
 
     #[test]
+    fn test_active_validator_count_matches_active_validator_statuses() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let assert_active_count_matches_statuses = || {
+            let validators = client.get_validators();
+            let mut active_by_status = 0u32;
+            for wallet in validators.iter() {
+                if client.get_validator_status(&wallet) == types::ValidatorStatus::Active {
+                    active_by_status += 1;
+                }
+            }
+
+            assert_eq!(client.get_active_validator_count(), active_by_status);
+        };
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        let reason: Option<String> = None;
+
+        assert_active_count_matches_statuses();
+
+        client.register_validator(&v1, &String::from_str(&env, "Credentials 1"));
+        assert_active_count_matches_statuses();
+
+        client.register_validator(&v2, &String::from_str(&env, "Credentials 2"));
+        assert_active_count_matches_statuses();
+
+        client.register_validator(&v3, &String::from_str(&env, "Credentials 3"));
+        assert_active_count_matches_statuses();
+
+        client.revoke_validator(&v2, &reason);
+        assert_active_count_matches_statuses();
+
+        client.revoke_validator(&v3, &reason);
+        assert_active_count_matches_statuses();
+
+        client.restore_validator(&v2);
+        assert_active_count_matches_statuses();
+
+        client.revoke_validator(&v1, &reason);
+        assert_active_count_matches_statuses();
+
+        client.restore_validator(&v3);
+        assert_active_count_matches_statuses();
+    }
+
+    #[test]
     fn test_get_validator_count() {
         let (env, client) = setup();
         let admin = Address::generate(&env);

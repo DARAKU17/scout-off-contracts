@@ -42,6 +42,8 @@ cp .env.example .env
 git config core.hooksPath scripts/git-hooks
 ```
 
+Reminder: `core.hooksPath` is a per-clone git config setting, so re-apply it after every fresh clone or when working from a new machine.
+
 ## Before opening a PR
 
 ```bash
