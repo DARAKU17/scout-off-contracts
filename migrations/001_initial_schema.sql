@@ -5,6 +5,9 @@
 
 -- -----------------------------------------------------------------------
 -- Players
+-- Known gap: player deactivation status is not tracked here.
+-- registration.deactivate_player / reactivate_player have no corresponding
+-- column in this table.  See docs/INDEXER.md — "Known gaps" for details.
 -- -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS players (
     player_id       BIGINT PRIMARY KEY,
@@ -44,6 +47,10 @@ CREATE INDEX IF NOT EXISTS idx_player_level_history_player ON player_level_histo
 
 -- -----------------------------------------------------------------------
 -- Scouts
+-- Known gap: the `verified` column below is not yet populated by the
+-- indexer — registration.get_scout(...).verified exists on-chain but
+-- the event stream currently has no field to drive this column.
+-- See docs/INDEXER.md — "Known gaps" for details.
 -- -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS scouts (
     scout_id        BIGINT PRIMARY KEY,
