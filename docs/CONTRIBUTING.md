@@ -47,3 +47,12 @@ cargo fmt --all -- --check      # formatting must be clean
 
 Changes to validator registration, revocation, or milestone approval logic require explicit
 review from a second team member before merge — these are the trust anchors of the platform.
+
+This applies to:
+- `/contracts/verification/` — validator registry and milestone approval
+- `/contracts/progress/` — level advancement caller-whitelist and cross-contract trust
+- `/contracts/scout_access/` — subscription tier enforcement and fee settlement
+
+All three paths are mapped in `.github/CODEOWNERS`. Confirm with your repository admin that
+'Require review from Code Owners' is enabled in branch protection settings for these rules
+to take effect automatically.
