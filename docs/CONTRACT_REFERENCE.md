@@ -234,6 +234,39 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- get_player_count
 
 ---
 
+#### `get_player_summary(player_id: u64) -> Result<PlayerSummary, ScoutChainError>`
+
+Return a lightweight player summary (vitals + level, no IPFS hashes or wallet)
+for efficient list rendering on the scout discovery dashboard.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_player_summary --player_id 1
+```
+
+---
+
+#### `get_players(ids: Vec<u64>) -> Result<Vec<PlayerSummary>, ScoutChainError>`
+
+Batch-fetch player summaries for a list of IDs. Unknown IDs are skipped.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `NotInitialized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_players --ids '[1,2,3]'
+```
+
+---
+
 #### `get_scout_count() -> u64`
 
 Return the total number of registered scouts. Returns `0` before the contract
@@ -320,6 +353,21 @@ Return the contract's initialization and pause status.
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- health
 ```
 
+---
+
+#### `version() -> String`
+
+Return the contract's deployed crate version string (from `Cargo.toml`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- version
+```
+
 ### Dual-Role Wallet Policy
 
 A single wallet may register as both a player and a scout. Cross-role
@@ -388,23 +436,76 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `register_validator(wallet: Address, credentials: String) -> Result<(), VerificationError>`
+#### `set_min_region_quorum(min_regions: u32) -> Result<(), VerificationError>`
+
+Set the minimum number of distinct validator geographic regions required before
+`approve_milestone` may call `advance_level` for Level-2 (PerformanceMilestones)
+and Level-3 (EliteTier) transitions.
+
+A value of `0` (the default) disables the region-quorum check entirely.
+A value of `2` means a player's approving validators must collectively span
+at least 2 distinct regions before the Level-2/3 advance is allowed.
+
+The quorum check is **not** applied to the first milestone per player
+(Level 0 → 1 identity verification), which intentionally requires only a
+single trusted local validator.
+
+**Region-quorum requirement in the Progress Level Model:**
+
+| Transition | Region-quorum required? |
+|-----------|------------------------|
+| Level 0 → 1 (VerifiedIdentity) | No |
+| Level 1 → 2 (PerformanceMilestones) | Yes, if `min_region_quorum` ≥ 2 |
+| Level 2 → 3 (EliteTier) | Yes, if `min_region_quorum` ≥ 2 |
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_min_region_quorum --min_regions 2
+```
+
+---
+
+#### `get_min_region_quorum() -> u32`
+
+Return the current minimum-distinct-region quorum for Level-2/3 advances.
+Returns `0` if never configured (quorum check disabled).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_min_region_quorum
+```
+
+---
+
+#### `register_validator(wallet: Address, credentials: String, region: String) -> Result<(), VerificationError>`
 
 Onboard a new trusted validator (coach, academy director, certified trainer).
 `credentials` is a human-readable label (max 256 bytes, e.g. `"UEFA B License"`).
+`region` is the validator's geographic region (max 128 bytes, e.g. `"West Africa"`).
+Used by the region-quorum check to ensure milestone attestations span distinct geographies.
 
 The contract enforces a cap of **100 simultaneously registered validators**. This limit exists because all validator addresses are stored in a single persistent entry; exceeding Soroban's 64 KB per-entry limit would cause the entry to become unreadable. Raising the cap requires a contract upgrade.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
+| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes or region >128 bytes) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- register_validator \
   --wallet $VALIDATOR_ADDRESS \
-  --credentials "UEFA B License"
+  --credentials "UEFA B License" \
+  --region "West Africa"
 ```
 
 ---
@@ -441,7 +542,8 @@ the milestone index.
 | | |
 |---|---|
 | **Auth** | `validator_wallet` must sign |
-| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `Overflow` · `ProgressCallFailed` |
+| **Cross-contract calls:** | `progress.advance_level` |
+| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `Overflow` · `ProgressCallFailed` · `InsufficientRegionDiversity` (if region quorum not met for Level-2/3 advances) |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -604,6 +706,39 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), VerificationError>`
+
+Upgrade the contract WASM to a new hash. Admin auth required. Persistent
+storage (including the admin key) survives the upgrade.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_total_milestone_count() -> u32`
+
+Return the global total number of milestones approved across all players and
+validators since contract initialization.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_count
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -615,6 +750,21 @@ Return the contract's initialization and pause status.
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- health
+```
+
+---
+
+#### `version() -> String`
+
+Return the contract's deployed crate version string (from `Cargo.toml`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- version
 ```
 
 ### Events
@@ -699,6 +849,7 @@ appended. `milestone_ref` is `0` for admin resets.
 | | |
 |---|---|
 | **Auth** | Admin must sign |
+| **Cross-contract calls:** | `registration.set_player_level` |
 | **Errors** | `NotInitialized` · `Unauthorized` · `ContractPaused` · `Overflow` |
 
 ```bash
@@ -722,6 +873,7 @@ without a full cross-contract deployment).
 | | |
 |---|---|
 | **Auth** | Verification contract (production) or `caller` directly (test/unconfigured) |
+| **Cross-contract calls:** | `registration.set_player_level` |
 | **Errors** | `NotInitialized` · `ContractPaused` · `AlreadyAtMaxLevel` · `Overflow` · `Unauthorized` |
 
 _Called atomically by `verification.approve_milestone`. Prefer that path in production._
@@ -845,6 +997,91 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `set_verification_contract(addr: Address) -> Result<(), ProgressError>`
+
+Register the verification contract address so `advance_level` can authenticate
+authorized callers (admin only). Must be called before any `advance_level` call.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_verification_contract --addr $VERIFICATION_CONTRACT_ID
+```
+
+---
+
+#### `set_registration_contract(addr: Address) -> Result<(), ProgressError>`
+
+Register the registration contract address so `advance_level` can sync the
+player's level into the registration contract (admin only).
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_registration_contract --addr $REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `set_scout_access_contract(addr: Address) -> Result<(), ProgressError>`
+
+Whitelist the scout_access contract as a secondary authorized caller of
+`advance_level` (for trial-offer Level-3 advances). Admin only.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_scout_access_contract --addr $SCOUT_ACCESS_CONTRACT_ID
+```
+
+---
+
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ProgressError>`
+
+Upgrade the contract WASM. Admin auth required. Persistent storage survives.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_progress_history_page(player_id: u64, offset: u32, limit: u32) -> Vec<ProgressEntry>`
+
+Paginated history retrieval. Returns entries from `offset+1` to
+`offset+limit`. `limit` is capped at 50. Returns an empty Vec when `offset`
+≥ total count.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_progress_history_page --player_id 1 --offset 0 --limit 10
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -856,6 +1093,21 @@ Return the contract's initialization and pause status.
 
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID -- health
+```
+
+---
+
+#### `version() -> String`
+
+Return the contract's deployed crate version string (from `Cargo.toml`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID -- version
 ```
 
 ### Events
@@ -1064,6 +1316,7 @@ trial offer index.
 | | |
 |---|---|
 | **Auth** | `scout` must sign (Elite subscription required) |
+| **Cross-contract calls:** | `progress.advance_level` |
 | **Errors** | `ContractPaused` · `ScoutNotSubscribed` · `SubscriptionExpired` · `Unauthorized` (non-Elite tier) · `Overflow` · `ProgressCallFailed` |
 
 ```bash
@@ -1203,6 +1456,56 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
+
+Upgrade the contract WASM. Admin auth required. Persistent storage survives.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_scout_contacts(scout: Address) -> Vec<u64>`
+
+Return the list of player IDs that a scout has unlocked via `pay_to_contact`
+or `batch_contact_players`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers logged for a player in index order. Returns an
+empty Vec if none exist.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_all_trial_offers --player_id 1
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -1214,6 +1517,21 @@ Return the contract's initialization and pause status.
 
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- health
+```
+
+---
+
+#### `version() -> String`
+
+Return the contract's deployed crate version string (from `Cargo.toml`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 ```
 
 ### Events
@@ -1302,6 +1620,7 @@ pub struct Validator {
     pub credentials: String, // max 256 bytes
     pub registered_at: u64,
     pub active: bool,
+    pub region: String,      // max 128 bytes — geographic region for quorum checks
 }
 ```
 
@@ -1420,13 +1739,16 @@ pub struct TrialOffer {
 | 6 | `ValidatorInactive` | Validator has been revoked |
 | 7 | `ValidatorAlreadyRegistered` | Wallet already registered as validator |
 | 8 | `PlayerNotFound` | Invalid `player_id` |
-| 9 | `InvalidInput` | Bad evidence hash or credentials too long |
+| 9 | `InvalidInput` | Bad evidence hash, credentials too long, or region too long |
 | 10 | `ReasonTooLong` | Revocation reason exceeds 128 bytes |
 | 11 | `AlreadyConfigured` | `set_progress_contract` called twice |
 | 12 | `ProgressCallFailed` | Cross-contract `advance_level` failed |
 | 13 | `Overflow` | Milestone counter overflowed |
 | 14 | `MilestoneNotFound` | Index out of range |
 | 15 | `ValidatorCapReached` | 100-validator limit reached; contract upgrade required to raise the cap |
+| 16 | `InsufficientRegionDiversity` | Level-2/3 advance blocked: approving validators do not span the required minimum number of distinct regions |
+| 17 | `MissingValidatorRegion` | Reserved for future use |
+| 18 | `MilestoneLimitExceeded` | Single validator has reached the per-player milestone approval limit |
 
 ### `ProgressError` (progress contract)
 
@@ -1440,6 +1762,7 @@ pub struct TrialOffer {
 | 6 | `AlreadyAtMaxLevel` | Player is already at `EliteTier` |
 | 7 | `PlayerNotFound` | History index out of range |
 | 8 | `Overflow` | History counter overflowed |
+| 9 | `RegistrationCallFailed` | Cross-contract `set_player_level` on registration contract failed |
 
 ### `ScoutAccessError` (scout_access contract)
 

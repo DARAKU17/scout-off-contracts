@@ -33,6 +33,10 @@ pub struct Validator {
     pub credentials: String,
     pub registered_at: u64,
     pub active: bool,
+    /// Geographic region of this validator (e.g. "West Africa", "South America").
+    /// Used by the region-quorum check to ensure milestone diversity.
+    /// Max 128 bytes, same limit as ScoutProfile.region.
+    pub region: String,
 }
 
 #[contracttype]
@@ -46,8 +50,11 @@ pub enum DataKey {
     MilestoneCounter(u64),
     Milestone(u64, u32),
     ValidatorMilestoneCount(Address),
-    /// progress contract address (cross-contract calls)
-    ProgressContract,
+    ValidatorPlayerMilestoneCount(Address, u64),
     ValidatorVector,
     TotalMilestoneCount,
+    /// Minimum number of distinct validator regions required before approve_milestone
+    /// may call advance_level for Level-2 (PerformanceMilestones) and Level-3
+    /// (EliteTier) transitions. Default 0 means the check is disabled.
+    MinRegionQuorum,
 }

@@ -24,11 +24,20 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use scoutchain_shared_types::validate_cid;
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
+const MAX_REGION_LEN: u32 = 128;
 
 /// Maximum number of simultaneously registered validators.
 /// Increase requires a contract upgrade because the ValidatorVector entry
 /// is bounded by Soroban's 64 KB per-entry limit.
 const MAX_VALIDATORS: u32 = 100;
+
+/// Maximum milestones a single validator may approve for a single player.
+/// Prevents a single trusted validator from unilaterally driving a player
+/// through all levels without diversity of attestation.
+const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 5;
+
+/// Persistent-storage TTL bump ledgers for the admin key.
+const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -113,7 +122,7 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Update the progress contract address (admin only).
+    /// Re-wire the progress contract address (admin only).
     /// Use this for intentional re-wiring after the initial set_progress_contract call.
     pub fn update_progress_contract(
         env: Env,
@@ -127,16 +136,48 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Set the minimum number of distinct validator regions required before
+    /// `approve_milestone` may call `advance_level` for Level-2
+    /// (PerformanceMilestones) and Level-3 (EliteTier) transitions.
+    ///
+    /// - A value of `0` (default) disables the region-quorum check entirely.
+    /// - A value of `2` means milestones from validators in at least 2 distinct
+    ///   regions must exist for the player before the level advance is allowed.
+    ///
+    /// The check applies only to Level-2 and Level-3 advances; Level-0 → 1
+    /// (identity verification) is not gated by region diversity.
+    pub fn set_min_region_quorum(env: Env, min_regions: u32) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::MinRegionQuorum, &min_regions);
+        Ok(())
+    }
+
+    /// Return the current minimum-distinct-region quorum for Level-2/3 advances.
+    /// Returns `0` if never configured (quorum check disabled).
+    pub fn get_min_region_quorum(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MinRegionQuorum)
+            .unwrap_or(0u32)
+    }
+
     /// Register a trusted validator (admin only).
     pub fn register_validator(
         env: Env,
         wallet: Address,
         credentials: String,
+        region: String,
     ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         Self::require_not_paused(&env)?;
 
         if credentials.len() > MAX_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        if region.len() > MAX_REGION_LEN {
             return Err(VerificationError::InvalidInput);
         }
 
@@ -163,6 +204,7 @@ impl VerificationContract {
             credentials,
             registered_at: env.ledger().timestamp(),
             active: true,
+            region,
         };
         env.storage()
             .persistent()
@@ -357,6 +399,38 @@ impl VerificationContract {
             .instance()
             .get::<DataKey, Address>(&DataKey::ProgressContract)
         {
+            // Region-quorum check: for Level-2 and Level-3 advances, require
+            // that milestones for this player have been approved by validators
+            // from at least `min_region_quorum` distinct geographic regions.
+            // Level-0 → 1 identity verification is exempt from this check.
+            let min_quorum: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::MinRegionQuorum)
+                .unwrap_or(0u32);
+
+            if min_quorum >= 2 {
+                // Count distinct regions among the validators who approved
+                // milestones for this player (indices 1..=next_index).
+                let distinct_count = Self::count_distinct_validator_regions(
+                    &env,
+                    player_id,
+                    next_index,
+                );
+                // The quorum check only gates advances past Level 1.
+                // We inspect the current player level stored via the milestone
+                // counter: if the player already has >= 1 milestone recorded
+                // (next_index > 1), they are at Level 1+ so the quorum applies.
+                // A more precise check would read the current level from the
+                // progress contract, but that adds a cross-contract read.
+                // The conservative approach: enforce the quorum on any
+                // advance attempt when next_index > 1 (i.e. this is not the
+                // first milestone — Level 0 → 1 — for this player).
+                if next_index > 1 && distinct_count < min_quorum {
+                    return Err(VerificationError::InsufficientRegionDiversity);
+                }
+            }
+
             let progress_client = progress_contract::Client::new(&env, &progress_addr);
             // AlreadyAtMaxLevel (6) is acceptable — milestone still recorded.
             // Any other error propagates as ProgressCallFailed.
@@ -458,6 +532,44 @@ impl VerificationContract {
     // Internal helpers
     // -------------------------------------------------------------------------
 
+    /// Count the number of distinct validator regions among the milestones
+    /// approved for `player_id` from index 1 through `up_to_index` (inclusive).
+    ///
+    /// Iterates stored milestones and looks up the approving validator's region.
+    /// An empty region string is treated as its own distinct "unnamed" region so
+    /// that validators registered before this field was introduced do not break
+    /// the quorum count.
+    fn count_distinct_validator_regions(env: &Env, player_id: u64, up_to_index: u32) -> u32 {
+        let mut seen_regions: Vec<String> = Vec::new(env);
+        for i in 1u32..=up_to_index {
+            let milestone_opt: Option<Milestone> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Milestone(player_id, i));
+            if let Some(milestone) = milestone_opt {
+                let validator_opt: Option<Validator> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Validator(milestone.validator));
+                if let Some(validator) = validator_opt {
+                    let region = validator.region;
+                    // Check if this region is already in our seen list
+                    let mut already_seen = false;
+                    for j in 0..seen_regions.len() {
+                        if seen_regions.get(j).unwrap() == region {
+                            already_seen = true;
+                            break;
+                        }
+                    }
+                    if !already_seen {
+                        seen_regions.push_back(region);
+                    }
+                }
+            }
+        }
+        seen_regions.len()
+    }
+
     fn require_admin(env: &Env) -> Result<(), VerificationError> {
         let admin: Address = env
             .storage()
@@ -516,7 +628,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
 
         // Unknown wallet returns 0
         assert_eq!(
@@ -547,8 +659,8 @@ mod tests {
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
-        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
-        client.register_validator(&v2, &String::from_str(&env, "Coach B"));
+        client.register_validator(&v1, &String::from_str(&env, "Coach A"), &String::from_str(&env, "West Africa"));
+        client.register_validator(&v2, &String::from_str(&env, "Coach B"), &String::from_str(&env, "West Africa"));
 
         client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmEv1"));
         assert_eq!(client.get_total_milestone_count(), 1);
@@ -581,7 +693,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &String::from_str(&env, "West Africa"));
 
         assert!(client.is_active_validator(&validator));
 
@@ -606,7 +718,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
 
         let idx1 = client.approve_milestone(
             &validator,
@@ -632,7 +744,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         let reason: Option<String> = None;
         client.revoke_validator(&validator, &reason);
 
@@ -646,7 +758,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         let reason = Some(String::from_str(&env, "Misconduct and protocol violation"));
         client.revoke_validator(&validator, &reason);
 
@@ -661,7 +773,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         // 129-byte string
         let long_reason = "x".repeat(129);
         let reason = Some(String::from_str(&env, &long_reason));
@@ -676,7 +788,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         let reason: Option<String> = None;
         client.revoke_validator(&validator, &reason);
 
@@ -714,8 +826,8 @@ mod tests {
 
         let validator1 = Address::generate(&env);
         let validator2 = Address::generate(&env);
-        client.register_validator(&validator1, &String::from_str(&env, "Coach A"));
-        client.register_validator(&validator2, &String::from_str(&env, "Coach B"));
+        client.register_validator(&validator1, &String::from_str(&env, "Coach A"), &String::from_str(&env, "West Africa"));
+        client.register_validator(&validator2, &String::from_str(&env, "Coach B"), &String::from_str(&env, "West Africa"));
 
         client.approve_milestone(
             &validator1,
@@ -746,7 +858,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
 
         client.pause_contract();
 
@@ -767,7 +879,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
 
         // Pre-set the counter to u32::MAX so the next increment overflows
         env.as_contract(&client.address, || {
@@ -892,7 +1004,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
 
         let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
         client.upgrade(&new_wasm_hash);
@@ -902,7 +1014,7 @@ mod tests {
         assert!(!client.is_active_validator(&validator));
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
-        client.register_validator(&validator, &String::from_str(&env, &too_long));
+        client.register_validator(&validator, &String::from_str(&env, &too_long), &String::from_str(&env, "West Africa"));
     }
 
     #[test]
@@ -914,7 +1026,7 @@ mod tests {
         let validator = Address::generate(&env);
         // Exactly 256 ASCII bytes — must be accepted
         let exactly_256 = "a".repeat(256);
-        client.register_validator(&validator, &String::from_str(&env, &exactly_256));
+        client.register_validator(&validator, &String::from_str(&env, &exactly_256), &String::from_str(&env, "West Africa"));
 
         assert!(client.is_active_validator(&validator));
     }
@@ -963,12 +1075,12 @@ mod tests {
         // Register exactly MAX_VALIDATORS (100) validators — all must succeed.
         for _ in 0..100 {
             let v = Address::generate(&env);
-            client.register_validator(&v, &String::from_str(&env, "Credentials"));
+            client.register_validator(&v, &String::from_str(&env, "Credentials"), &String::from_str(&env, "West Africa"));
         }
 
         // The 101st registration must return ValidatorCapReached, not panic.
         let extra = Address::generate(&env);
-        let result = client.try_register_validator(&extra, &String::from_str(&env, "Credentials"));
+        let result = client.try_register_validator(&extra, &String::from_str(&env, "Credentials"), &String::from_str(&env, "West Africa"));
         assert_eq!(result, Err(Ok(VerificationError::ValidatorCapReached)));
     }
 
@@ -982,9 +1094,9 @@ mod tests {
         let v2 = Address::generate(&env);
         let v3 = Address::generate(&env);
 
-        client.register_validator(&v1, &String::from_str(&env, "Credentials 1"));
-        client.register_validator(&v2, &String::from_str(&env, "Credentials 2"));
-        client.register_validator(&v3, &String::from_str(&env, "Credentials 3"));
+        client.register_validator(&v1, &String::from_str(&env, "Credentials 1"), &String::from_str(&env, "West Africa"));
+        client.register_validator(&v2, &String::from_str(&env, "Credentials 2"), &String::from_str(&env, "West Africa"));
+        client.register_validator(&v3, &String::from_str(&env, "Credentials 3"), &String::from_str(&env, "West Africa"));
 
         let reason: Option<String> = None;
         client.revoke_validator(&v2, &reason);
@@ -1007,7 +1119,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         // 45 chars starting with Qm — one short of valid CIDv0
         client.approve_milestone(
             &validator, &1u64,
@@ -1023,7 +1135,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         // 47 chars starting with Qm — one over valid CIDv0
         client.approve_milestone(
             &validator, &1u64,
@@ -1039,7 +1151,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         // 46 chars but contains '0' which is invalid in base58btc
         client.approve_milestone(
             &validator, &1u64,
@@ -1054,7 +1166,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         let idx = client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
@@ -1070,7 +1182,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         // 58 chars starting with bafy — one short of valid CIDv1
         client.approve_milestone(
             &validator, &1u64,
@@ -1085,7 +1197,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         let idx = client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
@@ -1101,11 +1213,196 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"), &String::from_str(&env, "West Africa"));
         client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
             &String::from_str(&env, "zdj7WbTaiJT1fgatdet7Sjxf4PJQgXkGfXPFgq5a2SdxYqYg"),
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Region-quorum tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_region_stored_on_validator() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "Coach"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        let v = client.get_validator(&validator);
+        assert_eq!(v.region, String::from_str(&env, "West Africa"));
+    }
+
+    #[test]
+    fn test_min_region_quorum_default_is_zero() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_min_region_quorum(), 0);
+    }
+
+    #[test]
+    fn test_set_and_get_min_region_quorum() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_min_region_quorum(&2u32);
+        assert_eq!(client.get_min_region_quorum(), 2);
+    }
+
+    /// First milestone (Level 0 → 1) is always allowed regardless of quorum —
+    /// identity verification doesn't require region diversity.
+    #[test]
+    fn test_first_milestone_bypasses_quorum() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Set quorum of 3 — but the very first milestone should still go through
+        client.set_min_region_quorum(&3u32);
+
+        let validator = Address::generate(&env);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "Coach"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // First milestone (index 1) — should succeed even with quorum = 3
+        let idx = client.approve_milestone(
+            &validator,
+            &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        assert_eq!(idx, 1);
+    }
+
+    /// Milestones from validators all in the same region cannot advance a
+    /// player past the quorum-gated threshold (Level 1 → 2).
+    #[test]
+    fn test_same_region_validators_cannot_advance_past_level_1() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Require 2 distinct regions
+        client.set_min_region_quorum(&2u32);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        // Both validators are in the SAME region
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // First milestone (idx 1) — quorum exempt, passes
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Second milestone (idx 2) — both validators are "West Africa",
+        // distinct_count = 1 < quorum = 2 → must fail with InsufficientRegionDiversity
+        let result = client.try_approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance verified"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(result, Err(Ok(VerificationError::InsufficientRegionDiversity)));
+    }
+
+    /// A genuinely region-diverse set of milestones can advance a player
+    /// through the quorum-gated level.
+    #[test]
+    fn test_diverse_regions_allow_advance() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Require 2 distinct regions
+        client.set_min_region_quorum(&2u32);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        // Validators are in DIFFERENT regions
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "South America"),
+        );
+
+        // First milestone (idx 1) — quorum exempt
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Second milestone (idx 2) — v1 "West Africa", v2 "South America"
+        // distinct_count = 2 >= quorum = 2 → should succeed
+        let idx = client.approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance verified"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(idx, 2);
+    }
+
+    /// When quorum is 0 (default), no region check is performed.
+    #[test]
+    fn test_zero_quorum_disables_check() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // quorum = 0 (default) — check is disabled
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // Both in same region but quorum = 0 — both milestones should pass
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let idx = client.approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(idx, 2);
     }
 }

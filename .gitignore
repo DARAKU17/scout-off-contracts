@@ -18,6 +18,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # Kiro IDE
 .kiro/
@@ -30,3 +31,11 @@ pr-*.md
 bindings/*/src/
 bindings/*/dist/
 bindings/*/node_modules/
+
+# Soroban test snapshots — generated automatically, not reviewed in PRs.
+# Re-generated on next test run.
+**/test_snapshots/
+
+# Temporary files
+*.tmp
+*.bak

@@ -61,9 +61,26 @@ jobs:
           shellcheck scripts/setup-testnet.sh
           shellcheck scripts/generate-bindings.sh
           shellcheck scripts/check-bindings.sh
+          shellcheck scripts/check-storage-layout-compat.sh
+          shellcheck scripts/upgrade.sh
           shellcheck testnet/seed.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
+      - name: Storage-layout safe-fixture check (must pass)
+        run: |
+          bash scripts/check-storage-layout-compat.sh \
+            scripts/fixtures/storage_compat_safe/old_types.rs \
+            scripts/fixtures/storage_compat_safe/new_types.rs
+      - name: Storage-layout breaking-fixture check (must detect breaking change)
+        run: |
+          if bash scripts/check-storage-layout-compat.sh \
+              scripts/fixtures/storage_compat_breaking/old_types.rs \
+              scripts/fixtures/storage_compat_breaking/new_types.rs; then
+            echo "ERROR: breaking fixture was NOT flagged — checker is broken"
+            exit 1
+          else
+            echo "OK: breaking fixture correctly flagged by checker"
+          fi
       - name: Validate bindings package.json templates
         run: bash scripts/check-bindings.sh
 

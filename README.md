@@ -97,8 +97,8 @@ Progress levels are configured per player and enforced on-chain by authorized va
 |-------|------|-------------|
 | 0 | Unverified | Player creates profile and uploads data |
 | 1 | Verified Identity | KYC passed or academy confirms active club membership |
-| 2 | Performance Milestones | Match footage or physical stats verified by approved third party |
-| 3 | Elite Tier | Scout feedback or trial offers logged on-chain |
+| 2 | Performance Milestones | Match footage or physical stats verified by approved third party; if `min_region_quorum` ≥ 2 is configured, approving validators must span at least that many distinct geographic regions |
+| 3 | Elite Tier | Scout feedback or trial offers logged on-chain; same region-quorum requirement applies if configured |
 
 ## Tech Stack
 
