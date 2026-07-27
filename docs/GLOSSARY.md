@@ -31,6 +31,19 @@ field in [`FeeConfig`](#feeconfig).
 
 ---
 
+## ContactRecord
+
+A record of a paid contact attempt from a scout to a player, stored by the
+`scout_access` contract after successful payment of the configured contact fee.
+A `ContactRecord` links the paying scout, the contacted player, and the paid
+fee amount, and enables the platform to enforce repeated-contact and contact
+history checks.
+
+- Relevant functions: `pay_to_contact`, `get_contact_record`, `has_contacted`
+  — see [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
+
+---
+
 ## FeeConfig
 
 The primary configuration struct for the `scout_access` contract. Controls all
@@ -69,6 +82,30 @@ Examples: "Scored 5 goals in Local Cup", "Top speed clocked at 32 km/h".
 
 - Relevant functions: `approve_milestone`, `get_milestone`,
   `get_milestone_count` — see
+  [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
+
+---
+
+## Milestone Dispute
+
+A formal on-chain challenge raised by a player against a specific milestone
+that was approved for their profile. Only the affected player may file a
+dispute — validators and scouts have no standing to do so.
+
+A dispute record carries two outcome fields that are set when the platform
+admin resolves it:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `resolved` | `false` / `true` | Whether the admin has acted on the dispute |
+| `upheld` | `false` / `true` | `true` if the admin agreed the milestone was invalid; `false` if the milestone stands |
+
+When a dispute is upheld the admin is expected to revoke or correct the
+offending milestone through the standard validator-management flow; the
+dispute mechanism itself only records the outcome on-chain.
+
+- Relevant functions: `dispute_milestone`, `resolve_dispute`, `get_dispute`,
+  `has_dispute` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
 
 ---
@@ -123,6 +160,14 @@ The smallest unit of XLM. 1 XLM = 10 000 000 stroops. All fee fields in
 `FeeConfig` and all fee-related return values in the `scout_access` contract
 are expressed in stroops (Rust type `i128`).
 
+Worked example: the documented `contact_fee_stroops` value `100000` equals
+0.01 XLM (`100000 / 10 000 000`). Keep fee amounts in stroops when comparing
+or tuning cost-sensitive calls such as `subscribe`, `pay_to_contact`, and
+`batch_contact_players`; their CPU guardrails are tracked in
+[`ci/cpu-cost-budget.md`](../ci/cpu-cost-budget.md). If a fee is too low or fee
+arithmetic exceeds safe bounds, see the `scout_access` [`InsufficientFee` and
+`Overflow` error codes](CONTRACT_REFERENCE.md#scoutaccesserror-scout_access-contract).
+
 ---
 
 ## Subscription Tier
@@ -157,6 +202,11 @@ ledger timestamp. This applies to fields such as `registered_at`, `updated_at`,
 `ledger_sequence` is not a timestamp; it is the Soroban ledger sequence number
 recorded alongside an event. `sub_duration_secs` is a duration in seconds, not
 an absolute Unix timestamp.
+
+Example: a `ProgressEntry` might record `updated_at: 1_735_689_600` and
+`ledger_sequence: 12_345_678` for the same level change. The first value is a
+Unix-second wall-clock time; the second is the Soroban ledger number that
+included the change.
 
 ---
 

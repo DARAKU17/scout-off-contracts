@@ -142,6 +142,24 @@ impl ScoutAccessContract {
 
         let old_config = Self::fee_config(&env);
 
+        // Append the outgoing config to the bounded on-chain history (oldest-first,
+        // capped at FEE_CONFIG_HISTORY_CAP). When the cap is reached the oldest
+        // entry is evicted so the list never grows beyond the fixed capacity.
+        let history_key = DataKey::FeeConfigHistory;
+        let mut history: Vec<FeeConfigHistoryEntry> = env
+            .storage()
+            .instance()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if history.len() >= FEE_CONFIG_HISTORY_CAP {
+            history.remove(0);
+        }
+        history.push_back(FeeConfigHistoryEntry {
+            config: old_config.clone(),
+            updated_at: env.ledger().timestamp(),
+        });
+        env.storage().instance().set(&history_key, &history);
+
         env.storage()
             .instance()
             .set(&DataKey::FeeConfig, &fee_config);
@@ -780,6 +798,7 @@ impl ScoutAccessContract {
     ) -> Result<u32, ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         scout.require_auth();
 
         validate_cid(&details_hash).map_err(|_| ScoutAccessError::InvalidInput)?;
@@ -1160,6 +1179,28 @@ impl ScoutAccessContract {
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::bump_instance_ttl(&env);
         Self::fee_config(&env)
+    }
+
+    /// Return the bounded on-chain history of the last (up to 5) `FeeConfig`
+    /// values **oldest-first**.
+    ///
+    /// Each entry contains the config that was active *before* a particular
+    /// `update_fee_config` call, together with the timestamp at which that
+    /// change was made. The *current* config is not included — retrieve it
+    /// with `get_fee_config`.
+    ///
+    /// This is a lightweight middle-ground between the indexer-only design
+    /// (full history replayed from `fee_config_updated` events) and a fuller
+    /// unbounded ring-buffer: it makes the immediately-previous configs
+    /// cheaply readable on-chain without depending on the off-chain indexer.
+    /// The cap is fixed at 5 entries. When the cap is reached the oldest
+    /// entry is evicted on the next `update_fee_config` call.
+    pub fn get_fee_config_history(env: Env) -> Vec<FeeConfigHistoryEntry> {
+        Self::bump_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeConfigHistory)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn get_accumulated_fees(env: Env) -> i128 {
@@ -4241,5 +4282,92 @@ mod tests {
             withdrawn,
             "recipient token balance must equal withdrawn amount"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // get_fee_config_history tests (#849)
+    // -------------------------------------------------------------------------
+
+    /// History is empty before any update_fee_config call.
+    #[test]
+    fn test_fee_config_history_empty_before_any_update() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 0);
+    }
+
+    /// Each update_fee_config call appends the old config to history, oldest-first.
+    #[test]
+    fn test_fee_config_history_records_previous_configs_oldest_first() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        let fees_v2 = FeeConfig {
+            contact_fee_stroops: 200_000,
+            basic_sub_stroops: 2_000_000,
+            pro_sub_stroops: 5_000_000,
+            elite_sub_stroops: 10_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 15,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
+        };
+        let fees_v3 = FeeConfig {
+            contact_fee_stroops: 300_000,
+            basic_sub_stroops: 3_000_000,
+            pro_sub_stroops: 6_000_000,
+            elite_sub_stroops: 11_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 20,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
+        };
+
+        // First update: moves v1 (default) → history[0], sets v2 as current.
+        client.update_fee_config(&fees_v2);
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 100_000);
+
+        // Second update: moves v2 → history[1], sets v3 as current.
+        client.update_fee_config(&fees_v3);
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 2);
+        // Oldest-first: history[0] is v1, history[1] is v2.
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 100_000);
+        assert_eq!(history.get(1).unwrap().config.contact_fee_stroops, 200_000);
+
+        // Current config should be v3.
+        assert_eq!(client.get_fee_config().contact_fee_stroops, 300_000);
+    }
+
+    /// After 5 updates the cap (5 entries) is reached; the 6th update evicts
+    /// the oldest entry so the list never exceeds 5 items.
+    #[test]
+    fn test_fee_config_history_capped_at_five_entries() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        // Perform 6 updates; each one bumps the contact_fee by 100_000.
+        for i in 1u32..=6 {
+            let new_fees = FeeConfig {
+                contact_fee_stroops: 100_000 * (i as i128 + 1),
+                basic_sub_stroops: 1_000_000,
+                pro_sub_stroops: 3_000_000,
+                elite_sub_stroops: 7_000_000,
+                sub_duration_secs: 30 * 24 * 60 * 60,
+                pro_contact_limit: 10,
+                trial_offer_escrow_stroops: 500_000,
+                trial_offer_expiry_secs: 3_600,
+            };
+            client.update_fee_config(&new_fees);
+        }
+
+        // History must be capped at 5 even though 6 updates were made.
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 5);
+
+        // The very first config (contact_fee=100_000) was evicted.
+        // The oldest retained entry is the config set on the 2nd update
+        // (contact_fee=200_000), which had contact_fee_stroops=100_000*2.
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 200_000);
     }
 }

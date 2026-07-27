@@ -122,15 +122,21 @@ DEPLOYER="${DEPLOYER_SECRET:?Set DEPLOYER_SECRET in .env or environment}"
 echo "==> Ensuring test keypairs exist..."
 ensure_key player-test
 ensure_key scout-test
+ensure_key scout-test-2
 ensure_key validator-test
+ensure_key validator-test-2
 
 PLAYER_ADDRESS=$(stellar keys address player-test)
 SCOUT_ADDRESS=$(stellar keys address scout-test)
+SCOUT_2_ADDRESS=$(stellar keys address scout-test-2)
 VALIDATOR_ADDRESS=$(stellar keys address validator-test)
+VALIDATOR_2_ADDRESS=$(stellar keys address validator-test-2)
 
 echo "    Player:    $PLAYER_ADDRESS"
 echo "    Scout:     $SCOUT_ADDRESS"
+echo "    Scout 2:   $SCOUT_2_ADDRESS"
 echo "    Validator: $VALIDATOR_ADDRESS"
+echo "    Validator 2: $VALIDATOR_2_ADDRESS"
 
 # ---------------------------------------------------------------------------
 # Fund via Friendbot (safe to call multiple times — already-funded accounts
@@ -147,7 +153,9 @@ fund_account() {
 
 fund_account "$PLAYER_ADDRESS"
 fund_account "$SCOUT_ADDRESS"
+fund_account "$SCOUT_2_ADDRESS"
 fund_account "$VALIDATOR_ADDRESS"
+fund_account "$VALIDATOR_2_ADDRESS"
 
 # ---------------------------------------------------------------------------
 # Wait for accounts to be active on the ledger before invoking contracts.
@@ -158,7 +166,9 @@ fund_account "$VALIDATOR_ADDRESS"
 echo "==> Waiting for funded accounts to appear on the ledger..."
 wait_for_account "$PLAYER_ADDRESS"
 wait_for_account "$SCOUT_ADDRESS"
+wait_for_account "$SCOUT_2_ADDRESS"
 wait_for_account "$VALIDATOR_ADDRESS"
+wait_for_account "$VALIDATOR_2_ADDRESS"
 
 # ---------------------------------------------------------------------------
 # Seed contract state (idempotent — each call is safe to re-run)
@@ -174,6 +184,17 @@ invoke_idempotent \
     -- register_validator \
     --wallet "$VALIDATOR_ADDRESS" \
     --credentials "UEFA B License — Test Validator"
+
+invoke_idempotent \
+  "Registering second validator" \
+  "AlreadyRegistered" \
+  stellar contract invoke \
+    --id "$VERIFICATION_CONTRACT_ID" \
+    --source "$DEPLOYER" \
+    --network "$NETWORK" \
+    -- register_validator \
+    --wallet "$VALIDATOR_2_ADDRESS" \
+    --credentials "FIFA Talent ID — Test Validator 2"
 
 invoke_idempotent \
   "Registering test player" \
@@ -198,6 +219,17 @@ invoke_idempotent \
     --wallet "$SCOUT_ADDRESS" \
     --region "Europe"
 
+invoke_idempotent \
+  "Registering second test scout" \
+  "AlreadyRegistered" \
+  stellar contract invoke \
+    --id "$REGISTRATION_CONTRACT_ID" \
+    --source scout-test-2 \
+    --network "$NETWORK" \
+    -- register_scout \
+    --wallet "$SCOUT_2_ADDRESS" \
+    --region "North America"
+
 # ---------------------------------------------------------------------------
 # Write .accounts file
 # ---------------------------------------------------------------------------
@@ -206,12 +238,16 @@ ACCOUNTS_FILE="testnet/.accounts"
 {
   echo "PLAYER_ADDRESS=$PLAYER_ADDRESS"
   echo "SCOUT_ADDRESS=$SCOUT_ADDRESS"
+  echo "SCOUT_2_ADDRESS=$SCOUT_2_ADDRESS"
   echo "VALIDATOR_ADDRESS=$VALIDATOR_ADDRESS"
+  echo "VALIDATOR_2_ADDRESS=$VALIDATOR_2_ADDRESS"
 } > "$ACCOUNTS_FILE"
 
 echo ""
 echo "==> Seed complete."
 echo "    Player address:    $PLAYER_ADDRESS"
 echo "    Scout address:     $SCOUT_ADDRESS"
+echo "    Scout 2 address:   $SCOUT_2_ADDRESS"
 echo "    Validator address: $VALIDATOR_ADDRESS"
+echo "    Validator 2 address: $VALIDATOR_2_ADDRESS"
 echo "    Saved to $ACCOUNTS_FILE"

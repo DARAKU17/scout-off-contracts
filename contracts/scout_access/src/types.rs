@@ -16,9 +16,13 @@ pub enum SubscriptionTier {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Subscription {
+    /// Scout wallet that owns this subscription.
     pub scout: Address,
+    /// Active subscription tier for authorization and fee checks.
     pub tier: SubscriptionTier,
+    /// Ledger timestamp when the subscription expires, in Unix seconds.
     pub expires_at: u64,
+    /// Ledger timestamp when the subscription started, in Unix seconds.
     pub subscribed_at: u64,
 }
 
@@ -26,7 +30,9 @@ pub struct Subscription {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContactRecord {
+    /// Player identifier that the scout contacted.
     pub player_id: u64,
+    /// Scout wallet that initiated the contact.
     pub scout: Address,
     /// Ledger timestamp at the moment the contact was recorded
     pub contacted_at: u64,
@@ -36,10 +42,13 @@ pub struct ContactRecord {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrialOffer {
+    /// Player identifier receiving the trial offer.
     pub player_id: u64,
+    /// Scout wallet that logged the trial offer.
     pub scout: Address,
     /// IPFS/Arweave CID of the offer details document
     pub details_hash: String,
+    /// Ledger timestamp when the trial offer was logged, in Unix seconds.
     pub logged_at: u64,
 }
 
@@ -61,7 +70,9 @@ pub struct ProContactPeriod {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrialEscrow {
+    /// Escrowed trial-offer amount in stroops.
     pub amount: i128,
+    /// Ledger timestamp after which the escrow may be expired, in Unix seconds.
     pub expires_at: u64,
 }
 
@@ -95,6 +106,18 @@ pub struct FeeConfig {
     pub trial_offer_escrow_stroops: i128,
     /// Expiry window for trial offers (seconds)
     pub trial_offer_expiry_secs: u64,
+}
+
+/// A single entry in the bounded on-chain fee configuration history.
+/// Stored in `DataKey::FeeConfigHistory` as a `Vec<FeeConfigHistoryEntry>`,
+/// oldest-first, capped at `FEE_CONFIG_HISTORY_CAP` entries.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigHistoryEntry {
+    /// The fee configuration that was active before this change.
+    pub config: FeeConfig,
+    /// Ledger timestamp (Unix seconds) when this config was set via `update_fee_config`.
+    pub updated_at: u64,
 }
 
 #[contracttype]
@@ -142,4 +165,7 @@ pub enum DataKey {
     /// (push on creation) and `confirm_trial_offer` (remove on cleanup) so
     /// `expire_trial_offers` can sweep stale escrows without an off-chain index.
     OutstandingTrialEscrows,
+    /// Bounded on-chain history of the last N FeeConfig values, oldest-first.
+    /// Updated by `update_fee_config`. Exposed via `get_fee_config_history`.
+    FeeConfigHistory,
 }

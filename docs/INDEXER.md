@@ -75,7 +75,7 @@ too, not only value-level drift on rows both sides already agree exist.
 | Table | On-chain source | Compared fields |
 |-------|-----------------|------------------|
 | `players` | `registration.get_player_count` + `get_player`, `progress.get_level` | age, position, region, nationality, ipfs_hashes, level, registered_at, updated_at |
-| `scouts` | `registration.get_scout_count` + `get_scout` | wallet, region, registered_at |
+| `scouts` | `registration.get_scout_count` + `get_scout` | wallet, region, registered_at, verified |
 | `validators` | DB-driven `verification.get_validator`, cross-checked against `get_validators` (active list) | credentials, active, registered_at, existence |
 | `milestones` | `verification.get_milestone_count` + `get_milestone`, per player | validator, description, evidence_hash, approved_at |
 | `milestone_disputes` | `verification.has_dispute` / `get_dispute`, tied to the milestone loop | reason, disputed_at, resolved, upheld |
@@ -99,8 +99,6 @@ track a field the contract exposes, discovered while building this tool.
 Worth fixing in a future migration if this class of on-chain state is used
 by any actual query:
 
-- `scouts.verified` (`registration.get_scout`) has no column in
-  `scout_subscriptions`/`scouts`.
 - Player deactivation (`registration.deactivate_player` /
   `reactivate_player`) has no column in `players`.
 
