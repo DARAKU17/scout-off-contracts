@@ -63,6 +63,9 @@ The platform admin can:
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the full emergency-pause procedure.
 
+For admin key-loss incidents specifically, also see
+[`docs/RUNBOOK.md#emergency-admin-key-loss--compromise`](docs/RUNBOOK.md#emergency-admin-key-loss--compromise).
+
 ---
 
 ## Responsible Disclosure Policy

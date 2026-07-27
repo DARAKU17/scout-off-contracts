@@ -436,10 +436,11 @@ fn test_batch_contact_players_check_precedence_exhaustive() {
 // log_trial_offer — check-precedence table
 //
 // Priority 1: paused              → ContractPaused
-// Priority 2: no subscription     → ScoutNotSubscribed
-// Priority 3: subscription expired→ SubscriptionExpired
-// Priority 4: non-Elite tier      → Unauthorized
-// Priority 5: rate limited        → TrialOfferRateLimited
+// Priority 2: not initialized     → NotInitialized
+// Priority 3: no subscription     → ScoutNotSubscribed
+// Priority 4: subscription expired→ SubscriptionExpired
+// Priority 5: non-Elite tier      → Unauthorized
+// Priority 6: rate limited        → TrialOfferRateLimited
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -611,5 +612,59 @@ fn test_non_elite_beats_rate_limit() {
         r.expect_err("err").expect("contract err"),
         ScoutAccessError::Unauthorized,
         "non-Elite should return Unauthorized, not TrialOfferRateLimited"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression test: #840 — log_trial_offer must return NotInitialized (not
+// ScoutNotSubscribed) when called on an uninitialized contract.
+//
+// Before the fix, log_trial_offer did not call require_initialized, so the
+// first guard it hit on an uninitialized contract was the subscription lookup
+// (require_active_subscription), which returned ScoutNotSubscribed because no
+// storage had ever been written.  The fix adds require_initialized immediately
+// after require_not_paused, matching the ordering of subscribe, pay_to_contact,
+// and batch_contact_players.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Uninitialized contract must return NotInitialized from log_trial_offer,
+/// not the misleading ScoutNotSubscribed it returned before issue #840 was fixed.
+#[test]
+fn test_log_trial_offer_returns_not_initialized_before_initialize() {
+    use scoutchain_scout_access::ScoutAccessError;
+
+    let h = setup_uninitialized();
+    let scout = Address::generate(&h.env);
+
+    let result = h
+        .contract
+        .try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
+
+    assert_eq!(
+        result.expect_err("expected error").expect("contract error"),
+        ScoutAccessError::NotInitialized,
+        "log_trial_offer on an uninitialized contract must return NotInitialized, \
+         not ScoutNotSubscribed — regression guard for issue #840"
+    );
+}
+
+/// Confirm the fix doesn't break the normal (initialized) path: log_trial_offer
+/// still returns ScoutNotSubscribed when the contract IS initialized but the
+/// scout has no subscription (the pre-existing, expected behavior).
+#[test]
+fn test_log_trial_offer_returns_scout_not_subscribed_when_initialized_no_sub() {
+    use scoutchain_scout_access::ScoutAccessError;
+
+    let h = setup_initialized();
+    let scout = Address::generate(&h.env);
+
+    let result = h
+        .contract
+        .try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
+
+    assert_eq!(
+        result.expect_err("expected error").expect("contract error"),
+        ScoutAccessError::ScoutNotSubscribed,
+        "initialized contract with no subscription should still return ScoutNotSubscribed"
     );
 }

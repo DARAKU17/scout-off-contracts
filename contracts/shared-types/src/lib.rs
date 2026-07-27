@@ -18,7 +18,9 @@ pub enum ProgressLevel {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContractHealth {
+    /// Whether the contract has completed its one-time initialization.
     pub initialized: bool,
+    /// Whether state-changing operations are currently paused.
     pub paused: bool,
 }
 
@@ -34,9 +36,12 @@ impl ProgressLevel {
     }
 }
 
-/// Trait for contract-specific error enums that can produce admin-related
-/// errors. Each contract implements this trait on its own error type so the
-/// shared `require_admin` helper can return the correct per-contract error.
+/// Adapter trait for contract-specific error enums used by the shared
+/// admin-authorization helpers.
+///
+/// Implementing this trait lets each contract's error enum plug into the
+/// common `require_admin`, `propose_admin`, and `accept_admin` helper pattern
+/// while still returning that contract's own error type.
 pub trait AdminError {
     /// Return the "contract not initialized" error variant for this contract.
     fn not_initialized() -> Self;
