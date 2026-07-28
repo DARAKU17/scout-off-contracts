@@ -464,6 +464,30 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 ---
 
+#### `get_scouts(ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError>`
+
+Batch-fetch full scout profiles for up to 20 IDs in a single call. Mirrors
+`get_players` semantics exactly: missing IDs are silently skipped with partial
+hits returned successfully, and the same 20-ID cap applies.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `InvalidInput` (more than 20 IDs provided) |
+
+**Examples**:
+```bash
+# Fetch three scouts by ID
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,2,3]'
+
+# Mixed batch with one nonexistent ID — returns two profiles only
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,999,2]'
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
