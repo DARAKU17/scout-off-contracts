@@ -1029,6 +1029,35 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_validator_activity_report(wallet: Address) -> Result<ValidatorActivityReport, VerificationError>`
+
+Convenience aggregate query — bundles the data from four individual queries into
+one call, reducing round-trips for admin dashboards and monitoring tools.
+
+Internally aggregates exactly:
+1. `get_validator(wallet)` → `credentials`, `registered_at`, `active`
+2. `get_validator_status(wallet)` → `status`
+3. `get_validator_milestone_count(wallet)` → `milestone_count`
+4. `get_validator_players(wallet)` → `distinct_players` (and `distinct_player_count`)
+
+This is a **pure read-only aggregation** — no new storage, no new business logic.
+The returned values are byte-for-byte identical to calling the four individual
+queries separately.
+
+Returns `ValidatorNotFound` if the wallet has never been registered.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ValidatorNotFound` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_activity_report --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
 #### `get_active_validator_count() -> u32`
 
 Return the number of currently active (non-revoked) validators.
@@ -2921,6 +2950,36 @@ pub enum ValidatorStatus {
     NotRegistered,
     Active,
     Revoked,
+    RevokedForCause,
+}
+```
+
+### `ValidatorActivityReport`
+
+Convenience aggregate struct returned by `get_validator_activity_report`.
+Bundles the fields from four individual queries into one response:
+
+| Field | Source query | Description |
+|---|---|---|
+| `wallet` | — | Validator wallet address |
+| `credentials` | `get_validator` | Human-readable credential label |
+| `registered_at` | `get_validator` | Unix timestamp of registration |
+| `active` | `get_validator` | Whether the validator is currently active |
+| `status` | `get_validator_status` | Richer status (Active / Revoked / RevokedForCause / NotRegistered) |
+| `milestone_count` | `get_validator_milestone_count` | Total milestones approved across all players |
+| `distinct_player_count` | `get_validator_players` | Number of distinct players with at least one milestone |
+| `distinct_players` | `get_validator_players` | List of distinct player IDs |
+
+```rust
+pub struct ValidatorActivityReport {
+    pub wallet: Address,
+    pub credentials: String,
+    pub registered_at: u64,
+    pub active: bool,
+    pub status: ValidatorStatus,
+    pub milestone_count: u32,
+    pub distinct_player_count: u32,
+    pub distinct_players: Vec<u64>,
 }
 ```
 

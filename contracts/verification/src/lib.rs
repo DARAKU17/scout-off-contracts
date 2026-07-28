@@ -18,7 +18,7 @@ mod types;
 use errors::VerificationError;
 use types::{
     ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone,
-    MilestoneDispute, MilestoneRef, Validator, ValidatorStatus,
+    MilestoneDispute, MilestoneRef, Validator, ValidatorActivityReport, ValidatorStatus,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
@@ -1285,6 +1285,64 @@ impl VerificationContract {
     pub fn is_active_validator(env: Env, wallet: Address) -> bool {
         Self::get_validator_status(env, wallet) == ValidatorStatus::Active
     }
+
+    /// Convenience aggregate query — bundles the data from four individual
+    /// queries into one call, reducing round-trips for admin dashboards.
+    ///
+    /// Equivalent to calling:
+    /// 1. `get_validator(wallet)`          → credentials, registered_at, active
+    /// 2. `get_validator_status(wallet)`   → ValidatorStatus
+    /// 3. `get_validator_milestone_count(wallet)` → milestone_count
+    /// 4. `get_validator_players(wallet)`  → distinct_players list
+    ///
+    /// Returns `ValidatorNotFound` if the wallet has never been registered.
+    /// This is a pure read-only aggregation — no new storage or business logic.
+    pub fn get_validator_activity_report(
+        env: Env,
+        wallet: Address,
+    ) -> Result<ValidatorActivityReport, VerificationError> {
+        // 1. Fetch the full Validator record (errors if not registered)
+        let validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+        // Keep-alive: same as get_validator
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        // 2. Compute status (same logic as get_validator_status)
+        let status = Self::get_validator_status(env.clone(), wallet.clone());
+
+        // 3. Milestone count (same logic as get_validator_milestone_count)
+        let milestone_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(wallet.clone()))
+            .unwrap_or(0u32);
+
+        // 4. Distinct players (same logic as get_validator_players)
+        let distinct_players: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorPlayers(wallet.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let distinct_player_count = distinct_players.len();
+
+        Ok(ValidatorActivityReport {
+            wallet,
+            credentials: validator.credentials,
+            registered_at: validator.registered_at,
+            active: validator.active,
+            status,
+            milestone_count,
+            distinct_player_count,
+            distinct_players,
+        })
+    }
+
 
     pub fn health(env: Env) -> ContractHealth {
         let initialized = env
@@ -3674,5 +3732,96 @@ mod tests {
 
         let result = client.get_milestones_since(&999u64, &0u64);
         assert_eq!(result.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // #865: get_validator_activity_report aggregate query
+    // -------------------------------------------------------------------------
+
+    /// The aggregate report's fields exactly match what the four individual
+    /// queries return for the same validator.
+    #[test]
+    fn test_get_validator_activity_report_matches_individual_queries() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id: u64 = 1;
+        let player_id_2: u64 = 2;
+
+        // Register the validator with specializations
+        let mut specs = Vec::new(&env);
+        specs.push_back(String::from_str(&env, "physical-stats"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), specs);
+
+        // Approve milestones for two distinct players
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Scored 5 goals"),
+            &String::from_str(&env, VALID_CID_V0),
+            &None,
+        );
+        client.approve_milestone(
+            &validator,
+            &player_id_2,
+            &String::from_str(&env, "Speed test passed"),
+            &String::from_str(&env, VALID_CID_V0_2),
+            &None,
+        );
+
+        // Get individual query results
+        let individual_validator = client.get_validator(&validator).unwrap();
+        let individual_status   = client.get_validator_status(&validator);
+        let individual_count    = client.get_validator_milestone_count(&validator);
+        let individual_players  = client.get_validator_players(&validator);
+
+        // Get aggregate report
+        let report = client.get_validator_activity_report(&validator).unwrap();
+
+        // Verify the aggregate matches every individual query exactly
+        assert_eq!(report.wallet, validator, "wallet mismatch");
+        assert_eq!(report.credentials, individual_validator.credentials, "credentials mismatch");
+        assert_eq!(report.registered_at, individual_validator.registered_at, "registered_at mismatch");
+        assert_eq!(report.active, individual_validator.active, "active mismatch");
+        assert_eq!(report.status, individual_status, "status mismatch");
+        assert_eq!(report.milestone_count, individual_count, "milestone_count mismatch");
+        assert_eq!(report.distinct_player_count, individual_players.len(), "distinct_player_count mismatch");
+        assert_eq!(report.distinct_players, individual_players, "distinct_players mismatch");
+
+        // Sanity-check expected values
+        assert_eq!(report.milestone_count, 2);
+        assert_eq!(report.distinct_player_count, 2);
+        assert_eq!(report.status, types::ValidatorStatus::Active);
+    }
+
+    /// Report for an unregistered wallet returns ValidatorNotFound.
+    #[test]
+    fn test_get_validator_activity_report_unregistered_returns_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let result = client.try_get_validator_activity_report(&unknown);
+        assert_eq!(result, Err(Ok(VerificationError::ValidatorNotFound)));
+    }
+
+    /// Report for a validator with no milestones has zero counts.
+    #[test]
+    fn test_get_validator_activity_report_zero_milestones() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "KYC Cert"), Vec::new(&env));
+
+        let report = client.get_validator_activity_report(&validator).unwrap();
+        assert_eq!(report.milestone_count, 0);
+        assert_eq!(report.distinct_player_count, 0);
+        assert_eq!(report.distinct_players.len(), 0);
+        assert_eq!(report.status, types::ValidatorStatus::Active);
     }
 }
