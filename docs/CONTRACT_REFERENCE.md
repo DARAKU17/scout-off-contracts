@@ -341,6 +341,39 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- get_player_count
 
 ---
 
+#### `get_player_summary(player_id: u64) -> Result<PlayerSummary, ScoutChainError>`
+
+Return a lightweight player summary (vitals + level, no IPFS hashes or wallet)
+for efficient list rendering on the scout discovery dashboard.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_player_summary --player_id 1
+```
+
+---
+
+#### `get_players(ids: Vec<u64>) -> Result<Vec<PlayerSummary>, ScoutChainError>`
+
+Batch-fetch player summaries for a list of IDs. Unknown IDs are skipped.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `NotInitialized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_players --ids '[1,2,3]'
+```
+
+---
+
 #### `get_scout_count() -> u64`
 
 Return the total number of registered scouts. Returns `0` before the contract
@@ -1037,6 +1070,39 @@ Resume normal operations after a pause.
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- unpause_contract
+```
+
+---
+
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), VerificationError>`
+
+Upgrade the contract WASM to a new hash. Admin auth required. Persistent
+storage (including the admin key) survives the upgrade.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_total_milestone_count() -> u32`
+
+Return the global total number of milestones approved across all players and
+validators since contract initialization.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_count
 ```
 
 ---
@@ -2688,6 +2754,56 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
+
+Upgrade the contract WASM. Admin auth required. Persistent storage survives.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_scout_contacts(scout: Address) -> Vec<u64>`
+
+Return the list of player IDs that a scout has unlocked via `pay_to_contact`
+or `batch_contact_players`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers logged for a player in index order. Returns an
+empty Vec if none exist.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_all_trial_offers --player_id 1
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -3219,7 +3335,7 @@ pub struct TrialOffer {
 | 6 | `ValidatorInactive` | Validator has been revoked |
 | 7 | `ValidatorAlreadyRegistered` | Wallet already registered as validator |
 | 8 | `PlayerNotFound` | Invalid `player_id` |
-| 9 | `InvalidInput` | Bad evidence hash or credentials too long |
+| 9 | `InvalidInput` | Bad evidence hash, credentials too long, or region too long |
 | 10 | `ReasonTooLong` | Revocation reason exceeds 128 bytes |
 | 11 | `AlreadyConfigured` | `set_progress_contract` called twice |
 | 12 | `ProgressCallFailed` | Cross-contract `advance_level` failed |

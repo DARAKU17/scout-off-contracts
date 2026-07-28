@@ -174,7 +174,7 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Update the progress contract address (admin only).
+    /// Re-wire the progress contract address (admin only).
     /// Use this for intentional re-wiring after the initial set_progress_contract call.
     pub fn update_progress_contract(
         env: Env,
@@ -186,6 +186,33 @@ impl VerificationContract {
             .set(&DataKey::ProgressContract, &progress_contract);
         events::progress_contract_updated(&env, &admin, &progress_contract);
         Ok(())
+    }
+
+    /// Set the minimum number of distinct validator regions required before
+    /// `approve_milestone` may call `advance_level` for Level-2
+    /// (PerformanceMilestones) and Level-3 (EliteTier) transitions.
+    ///
+    /// - A value of `0` (default) disables the region-quorum check entirely.
+    /// - A value of `2` means milestones from validators in at least 2 distinct
+    ///   regions must exist for the player before the level advance is allowed.
+    ///
+    /// The check applies only to Level-2 and Level-3 advances; Level-0 → 1
+    /// (identity verification) is not gated by region diversity.
+    pub fn set_min_region_quorum(env: Env, min_regions: u32) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::MinRegionQuorum, &min_regions);
+        Ok(())
+    }
+
+    /// Return the current minimum-distinct-region quorum for Level-2/3 advances.
+    /// Returns `0` if never configured (quorum check disabled).
+    pub fn get_min_region_quorum(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MinRegionQuorum)
+            .unwrap_or(0u32)
     }
 
     /// Register a trusted validator (admin only).
@@ -4056,6 +4083,191 @@ mod tests {
         // Out-of-range offset returns empty
         let page3 = client.get_disputes_for_validator(&validator, &10u32, &50u32);
         assert_eq!(page3.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Region-quorum tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_region_stored_on_validator() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "Coach"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        let v = client.get_validator(&validator);
+        assert_eq!(v.region, String::from_str(&env, "West Africa"));
+    }
+
+    #[test]
+    fn test_min_region_quorum_default_is_zero() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_min_region_quorum(), 0);
+    }
+
+    #[test]
+    fn test_set_and_get_min_region_quorum() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_min_region_quorum(&2u32);
+        assert_eq!(client.get_min_region_quorum(), 2);
+    }
+
+    /// First milestone (Level 0 → 1) is always allowed regardless of quorum —
+    /// identity verification doesn't require region diversity.
+    #[test]
+    fn test_first_milestone_bypasses_quorum() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Set quorum of 3 — but the very first milestone should still go through
+        client.set_min_region_quorum(&3u32);
+
+        let validator = Address::generate(&env);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "Coach"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // First milestone (index 1) — should succeed even with quorum = 3
+        let idx = client.approve_milestone(
+            &validator,
+            &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        assert_eq!(idx, 1);
+    }
+
+    /// Milestones from validators all in the same region cannot advance a
+    /// player past the quorum-gated threshold (Level 1 → 2).
+    #[test]
+    fn test_same_region_validators_cannot_advance_past_level_1() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Require 2 distinct regions
+        client.set_min_region_quorum(&2u32);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        // Both validators are in the SAME region
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // First milestone (idx 1) — quorum exempt, passes
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Second milestone (idx 2) — both validators are "West Africa",
+        // distinct_count = 1 < quorum = 2 → must fail with InsufficientRegionDiversity
+        let result = client.try_approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance verified"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(result, Err(Ok(VerificationError::InsufficientRegionDiversity)));
+    }
+
+    /// A genuinely region-diverse set of milestones can advance a player
+    /// through the quorum-gated level.
+    #[test]
+    fn test_diverse_regions_allow_advance() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Require 2 distinct regions
+        client.set_min_region_quorum(&2u32);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        // Validators are in DIFFERENT regions
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "South America"),
+        );
+
+        // First milestone (idx 1) — quorum exempt
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Second milestone (idx 2) — v1 "West Africa", v2 "South America"
+        // distinct_count = 2 >= quorum = 2 → should succeed
+        let idx = client.approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance verified"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(idx, 2);
+    }
+
+    /// When quorum is 0 (default), no region check is performed.
+    #[test]
+    fn test_zero_quorum_disables_check() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // quorum = 0 (default) — check is disabled
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        client.register_validator(
+            &v1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "West Africa"),
+        );
+        client.register_validator(
+            &v2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "West Africa"),
+        );
+
+        // Both in same region but quorum = 0 — both milestones should pass
+        client.approve_milestone(
+            &v1, &1u64,
+            &String::from_str(&env, "Identity"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let idx = client.approve_milestone(
+            &v2, &1u64,
+            &String::from_str(&env, "Performance"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(idx, 2);
     }
 }
 
