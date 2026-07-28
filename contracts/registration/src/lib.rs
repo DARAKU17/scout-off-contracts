@@ -153,6 +153,124 @@ impl RegistrationContract {
         Ok(())
     }
 
+    /// Admin-only migration seeding: recreate a player profile from exported data.
+    ///
+    /// # Migration use case
+    /// This function exists solely to replay previously exported state onto a
+    /// freshly deployed contract.  It bypasses `wallet.require_auth()` because
+    /// the operator holds only the admin key, not the player's wallet.
+    ///
+    /// # Safety
+    /// - Re-seeding an existing `player_id` is rejected to prevent accidental
+    ///   double-seeding.
+    /// - This function should only be invoked before the contract has served
+    ///   any real wallet-signed registrations; after that point it becomes a
+    ///   backdoor for creating fraudulent profiles.
+    pub fn admin_seed_player(
+        env: Env,
+        player_id: u64,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        registered_at: u64,
+        level: ProgressLevel,
+    ) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Player(player_id))
+        {
+            return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        if vitals.position.len() > MAX_STRING_LEN
+            || vitals.region.len() > MAX_STRING_LEN
+            || vitals.nationality.len() > MAX_STRING_LEN
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile = StoredPlayerProfile {
+            player_id,
+            wallet: wallet.clone(),
+            vitals,
+            ipfs_hashes,
+            registered_at,
+            updated_at: registered_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Player(player_id), &profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerByWallet(wallet), &player_id);
+
+        let mut player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        player_ids.push_back(player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerIndex, &player_ids);
+
+        Self::composite_index_add(&env, &level, &profile.vitals.region, player_id);
+
+        events::player_registered(&env, player_id, &wallet);
+        Ok(())
+    }
+
+    /// Admin-only migration seeding: recreate a scout profile from exported data.
+    ///
+    /// # Migration use case
+    /// Same as `admin_seed_player` but for scouts.  Preserves the original
+    /// `scout_id` and `registered_at` timestamp so cross-references remain valid.
+    pub fn admin_seed_scout(
+        env: Env,
+        scout_id: u64,
+        wallet: Address,
+        region: String,
+        verified: bool,
+        registered_at: u64,
+    ) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id))
+        {
+            return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        if region.len() > MAX_REGION_LEN {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile = ScoutProfile {
+            scout_id,
+            wallet: wallet.clone(),
+            region,
+            verified,
+            registered_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Scout(scout_id), &profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutByWallet(wallet), &scout_id);
+
+        events::scout_registered(&env, scout_id, &wallet);
     /// Upgrade the contract WASM. Admin auth required.
     /// Persistent storage (including Admin) survives this call.
     pub fn upgrade(
@@ -2720,6 +2838,93 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Issue #820: admin_seed_player / admin_seed_scout tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_admin_seed_player_preserves_exact_ids_and_timestamps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmEvidence")];
+        let original_id = 42u64;
+        let original_ts = 1_600_000_000u64;
+
+        client.admin_seed_player(
+            &original_id,
+            &wallet,
+            &vitals,
+            &hashes,
+            &original_ts,
+            &ProgressLevel::Unverified,
+        );
+
+        let profile = client.get_player(original_id);
+        assert_eq!(profile.player_id, original_id);
+        assert_eq!(profile.wallet, wallet);
+        assert_eq!(profile.vitals.age, vitals.age);
+        assert_eq!(profile.registered_at, original_ts);
+    }
+
+    #[test]
+    fn test_admin_seed_player_rejects_duplicate_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmEvidence")];
+
+        client.admin_seed_player(
+            &1u64,
+            &wallet,
+            &vitals,
+            &hashes,
+            &1_600_000_000u64,
+            &ProgressLevel::Unverified,
+        );
+
+        let result = client.try_admin_seed_player(
+            &1u64,
+            &wallet,
+            &vitals,
+            &hashes,
+            &1_600_000_001u64,
+            &ProgressLevel::Unverified,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_admin_seed_scout_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let non_admin = Address::generate(&env);
+        let wallet = Address::generate(&env);
+
+        let result = client.try_admin_seed_scout(
+            &1u64,
+            &wallet,
+            &String::from_str(&env, "Europe"),
+            &false,
+            &1_600_000_000u64,
+        );
+        assert!(result.is_err());
     // TTL bump bugfix: get_player must extend persistent TTL on read
     // -------------------------------------------------------------------------
 

@@ -193,6 +193,45 @@ WHERE id = 1;
 -- 4. Restart the indexer — it will stream events from ledger 0.
 ```
 
+### 7. Seed migrated state (optional)
+
+For fresh deployments of an existing production dataset, use the admin-only
+seeding entrypoints to replay exported player/scout profiles without requiring
+their wallet signatures:
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- admin_seed_player \
+  --player_id <id> \
+  --wallet <G-address> \
+  --vitals '{"age":25,"position":"Forward","region":"Europe","nationality":"FR"}' \
+  --ipfs_hashes '["QmHash"]' \
+  --registered_at <unix_ts> \
+  --level <0-3>
+
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- admin_seed_scout \
+  --scout_id <id> \
+  --wallet <G-address> \
+  --region "Europe" \
+  --verified false \
+  --registered_at <unix_ts>
+```
+
+> **Warning:** These functions bypass wallet authentication.  They should only
+> be used during a controlled migration replay before the contract serves any
+> real wallet-signed registrations.
+
+### 8. Verify indexer consistency
+
+```bash
+node scripts/reconcile-indexer.js
+```
+
+The script compares on-chain state against the local database and reports
+discrepancies for `players.deactivated` and `scouts.verified`.
 If you only want to re-process events from a specific ledger (partial replay),
 replace `0` with the desired starting ledger sequence number.
 

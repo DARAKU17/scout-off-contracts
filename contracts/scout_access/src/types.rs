@@ -105,6 +105,12 @@ pub struct FeeConfig {
     pub elite_sub_stroops: i128,
     /// Subscription duration in seconds (default: 30 days)
     pub sub_duration_secs: u64,
+    /// Trial offer escrow hold amount in stroops.
+    /// Must be > 0 when trial offers are enabled; 0 disables trial offers.
+    pub trial_offer_escrow_stroops: i128,
+    /// Trial offer expiry window in seconds.
+    /// Must be > 0; defines how long an escrowed trial offer remains valid.
+    pub trial_offer_expiry_secs: u64,
     /// Maximum contacts per month for Pro tier (default: 10)
     pub pro_contact_limit: u32,
     /// Escrow amount for trial offers (stroops)
@@ -150,6 +156,9 @@ pub enum DataKey {
     TrialCounter(u64),
     /// (player_id, trial_index) → TrialOffer
     TrialOffer(u64, u32),
+    /// Bounded enumeration of outstanding trial escrows.
+    /// Each entry is `(player_id, trial_index)` for a currently-open trial offer.
+    TrialEscrowIndex,
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
     /// registration contract address for cross-contract scout verification checks
