@@ -32,10 +32,6 @@ const MAX_CREDENTIALS_LEN: u32 = 256;
 const MIN_CREDENTIALS_LEN: u32 = 10;
 const MAX_GLOBAL_MILESTONE_INDEX: u32 = 500;
 
-// Persistent storage TTL bump for milestone records.
-const PERSISTENT_TTL_MIN: u32 = 500;
-const PERSISTENT_TTL_MAX: u32 = 2_000;
-
 /// Maximum number of simultaneously registered validators.
 /// Increase requires a contract upgrade because the ValidatorVector entry
 /// is bounded by Soroban's 64 KB per-entry limit.
@@ -926,8 +922,9 @@ impl VerificationContract {
             .persistent()
             .extend_ttl(&counter_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
-        // Mark the evidence hash as globally used
-        env.storage().persistent().set(&evidence_used_key, &true);
+        // Mark the evidence hash as globally used, storing which milestone
+        // consumed it so get_evidence_hash_usage can surface the details.
+        env.storage().persistent().set(&evidence_used_key, &(player_id, next_index));
         // Keep-alive: extend TTL for evidence uniqueness so the same evidence
         // cannot be reused after archival.
         env.storage()
@@ -4061,3 +4058,4 @@ mod tests {
         assert_eq!(page3.len(), 0);
     }
 }
+

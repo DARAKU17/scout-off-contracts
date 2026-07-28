@@ -799,6 +799,25 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_evidence_hash_usage(evidence_hash: String) -> Option<(u64, u32)>`
+
+Return the original milestone consumer for an evidence hash that has already
+been used by `approve_milestone`. Returns `Some((player_id, milestone_index))`
+when the hash has been consumed, or `None` when it is still available for use.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_evidence_hash_usage \
+  --evidence_hash '"QmEvidence123"'
+```
+
+---
+
 #### `get_validators() -> Vec<Address>`
 
 Return the list of all registered validator addresses (both active and revoked).

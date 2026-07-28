@@ -162,7 +162,7 @@ pub enum DataKey {
     MilestoneDispute(u64, u32),
     ActiveValidatorCount,
     TotalValidatorCount,
-    /// Evidence hash → bool for global uniqueness check.
+    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
     EvidenceUsed(String),
     ValidatorMilestones(Address),
     ActiveDisputesCount,
