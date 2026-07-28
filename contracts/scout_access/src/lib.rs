@@ -541,6 +541,182 @@ impl ScoutAccessContract {
     }
 
     // -------------------------------------------------------------------------
+    // Auto-renewal
+    // -------------------------------------------------------------------------
+
+    /// Opt a scout wallet in or out of automatic subscription renewal.
+    ///
+    /// ## Auth model
+    ///
+    /// Requires the scout's own signature (`scout.require_auth()`).  This
+    /// prevents a third party from silently toggling auto-renewal on behalf
+    /// of a scout, which would create an unexpected recurring charge.
+    ///
+    /// ## Usage
+    ///
+    /// Once enabled, a keeper (off-chain cron job or bot) can call
+    /// `renew_if_due` when the scout's subscription is at or near expiry.
+    /// The scout must sign the `renew_if_due` transaction itself — the
+    /// keeper bot cannot pull funds without a fresh scout signature because
+    /// Soroban's token transfer always requires the sender's auth in the
+    /// same transaction.  See `renew_if_due` for the auth-model rationale.
+    pub fn set_auto_renew(
+        env: Env,
+        scout: Address,
+        enabled: bool,
+    ) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        scout.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AutoRenew(scout.clone()), &enabled);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AutoRenew(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::auto_renew_set(&env, &scout, enabled);
+        Ok(())
+    }
+
+    /// Return whether a scout has opted in to automatic subscription renewal.
+    pub fn get_auto_renew(env: Env, scout: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AutoRenew(scout))
+            .unwrap_or(false)
+    }
+
+    /// Renew a scout's subscription if auto-renewal is enabled and the
+    /// subscription is at or near expiry.
+    ///
+    /// ## Auth model — why the scout must sign
+    ///
+    /// Soroban's token transfer (`token::Client::transfer`) always requires an
+    /// authorisation entry for the sender *in the same transaction*.  A third-
+    /// party keeper bot calling this function cannot pull XLM from the scout's
+    /// wallet on its own: the scout's keypair must sign the transaction that
+    /// calls `renew_if_due`, exactly as it does for `subscribe`.
+    ///
+    /// This is not a limitation — it is the correct security posture.
+    /// Auto-renewal does not mean "anyone can charge me"; it means "I (the
+    /// scout) authorise this function to renew my subscription for me, and I
+    /// am still the one signing the transaction."  A keeper bot's role is to
+    /// *prompt* the scout to sign a renewal transaction before expiry, not to
+    /// sign on the scout's behalf.
+    ///
+    /// An allowance/pre-signed-transaction pattern (e.g. Soroban auth trees)
+    /// could allow truly permissionless renewal in a future version, but
+    /// would require the scout to pre-authorise a specific amount and time
+    /// window via `token::Client::approve`, which adds complexity and is
+    /// not worth the tradeoff for the current use case.
+    ///
+    /// ## When a renewal fires
+    ///
+    /// The renewal fires when **both** conditions hold:
+    /// 1. `auto_renew` is `true` for this scout.
+    /// 2. The current ledger timestamp is within `sub_duration_secs / 10`
+    ///    seconds of expiry (i.e. in the last 10 % of the subscription
+    ///    window), **or** the subscription has already expired.
+    ///
+    /// If neither condition is met the function returns `AutoRenewNotEnabled`
+    /// (condition 1 failed) or exits successfully without charging (condition
+    /// 2 not yet reached), making it safe for a keeper to call repeatedly
+    /// without triggering premature renewals.
+    ///
+    /// ## Charging
+    ///
+    /// Uses the same `collect_fee` path as `subscribe`: transfers the
+    /// tier-appropriate fee from the scout's wallet to the contract and
+    /// accumulates it in `AccumulatedFees`.  All downgrade-guard and
+    /// overflow protections from `subscribe` apply identically.
+    pub fn renew_if_due(env: Env, scout: Address) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        // The scout must sign this transaction. See auth-model note in the
+        // doc comment above — the token transfer requires the scout's auth in
+        // the same invocation, so this require_auth is both necessary and
+        // sufficient to protect against unauthorised charges.
+        scout.require_auth();
+
+        // Check auto-renewal opt-in.
+        let auto_renew_enabled: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AutoRenew(scout.clone()))
+            .unwrap_or(false);
+        if !auto_renew_enabled {
+            return Err(ScoutAccessError::AutoRenewNotEnabled);
+        }
+
+        // Fetch the existing subscription.  A scout with no subscription cannot
+        // be auto-renewed — they must use `subscribe` to create one first.
+        let existing: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::ScoutNotSubscribed)?;
+
+        let now = env.ledger().timestamp();
+        let config = Self::fee_config(&env);
+
+        // Renewal window: last 10 % of the subscription duration, or already
+        // expired.  This prevents renewing too early (e.g. the day after
+        // subscribing) while still giving the keeper a window before hard expiry.
+        let renewal_window_secs = config
+            .sub_duration_secs
+            .checked_div(10)
+            .unwrap_or(0)
+            .max(1);
+        let renewal_due_at = existing
+            .expires_at
+            .saturating_sub(renewal_window_secs);
+
+        if now < renewal_due_at {
+            // Not yet in the renewal window — no-op, not an error.
+            return Ok(());
+        }
+
+        let fee = match &existing.tier {
+            SubscriptionTier::Basic => config.basic_sub_stroops,
+            SubscriptionTier::Pro => config.pro_sub_stroops,
+            SubscriptionTier::Elite => config.elite_sub_stroops,
+        };
+
+        Self::collect_fee(&env, &scout, fee)?;
+
+        let expires_at = now
+            .checked_add(config.sub_duration_secs)
+            .ok_or(ScoutAccessError::Overflow)?;
+
+        let renewed_sub = Subscription {
+            scout: scout.clone(),
+            tier: existing.tier.clone(),
+            expires_at,
+            subscribed_at: now,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(scout.clone()), &renewed_sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::subscription_auto_renewed(&env, &scout, &existing.tier, now, expires_at);
+        // Also emit the legacy scout_subscribed event for backward compatibility.
+        events::scout_subscribed(&env, &scout, &existing.tier, fee);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
     // Pay-to-contact
     // -------------------------------------------------------------------------
 
@@ -4432,5 +4608,134 @@ mod tests {
         // The oldest retained entry is the config set on the 2nd update
         // (contact_fee=200_000), which had contact_fee_stroops=100_000*2.
         assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 200_000);
+    }
+
+    // -------------------------------------------------------------------------
+    // #861: set_auto_renew / renew_if_due
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_set_auto_renew_stores_flag_and_emits_event() {
+        let (env, _admin, xlm, contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 10_000_000);
+
+        // Opt in.
+        client.set_auto_renew(&scout, &true);
+        assert!(client.get_auto_renew(&scout));
+
+        let events = env.events().all().filter_by_contract(&contract_id);
+        assert_eq!(events.len(), 1);
+        let (_, topics_val, data_val) = events.get(0).unwrap();
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            soroban_sdk::Vec::try_from_val(&env, &topics_val).unwrap();
+        assert_eq!(
+            topics.get(0).unwrap(),
+            Symbol::new(&env, crate::events::AUTO_RENEW_SET).into_val(&env)
+        );
+        assert_eq!(data_val, true.into_val(&env));
+
+        // Opt back out.
+        client.set_auto_renew(&scout, &false);
+        assert!(!client.get_auto_renew(&scout));
+    }
+
+    #[test]
+    fn test_renew_if_due_noop_outside_window() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        // Subscribe and enable auto-renewal.
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        client.set_auto_renew(&scout, &true);
+
+        // The subscription was just created — we are nowhere near the renewal
+        // window.  renew_if_due should return Ok and do nothing (no charge).
+        let before = client.get_subscription(&scout).unwrap();
+        client.renew_if_due(&scout);
+        let after = client.get_subscription(&scout).unwrap();
+        assert_eq!(before.expires_at, after.expires_at);
+    }
+
+    #[test]
+    fn test_renew_if_due_renews_inside_window() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        let sub_duration: u64 = 30 * 24 * 60 * 60; // 30 days in seconds
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        client.set_auto_renew(&scout, &true);
+
+        let before = client.get_subscription(&scout).unwrap();
+
+        // Jump to 96 % of the way through the subscription (inside the last-10%-window).
+        let renewal_ts = before.expires_at - sub_duration / 20; // ~95 % in
+        env.ledger().with_mut(|l| l.timestamp = renewal_ts);
+
+        client.renew_if_due(&scout);
+
+        let after = client.get_subscription(&scout).unwrap();
+        // A new subscription was written; expires_at must advance.
+        assert!(after.expires_at > before.expires_at);
+        assert_eq!(after.subscribed_at, renewal_ts);
+    }
+
+    #[test]
+    fn test_renew_if_due_renews_after_expiry() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        let sub_duration: u64 = 30 * 24 * 60 * 60;
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.set_auto_renew(&scout, &true);
+
+        let before = client.get_subscription(&scout).unwrap();
+
+        // Jump past expiry.
+        env.ledger().with_mut(|l| l.timestamp = before.expires_at + 100);
+
+        client.renew_if_due(&scout);
+
+        let after = client.get_subscription(&scout).unwrap();
+        assert!(after.expires_at > before.expires_at);
+        // expires_at should be roughly now + sub_duration.
+        let expected_expiry = before.expires_at + 100 + sub_duration;
+        assert_eq!(after.expires_at, expected_expiry);
+    }
+
+    #[test]
+    fn test_renew_if_due_fails_when_not_enabled() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        // Deliberately do NOT call set_auto_renew.
+
+        let result = client.try_renew_if_due(&scout);
+        assert_eq!(result, Err(Ok(ScoutAccessError::AutoRenewNotEnabled)));
+    }
+
+    #[test]
+    fn test_renew_if_due_fails_with_no_subscription() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 10_000_000);
+
+        client.set_auto_renew(&scout, &true);
+
+        let result = client.try_renew_if_due(&scout);
+        assert_eq!(result, Err(Ok(ScoutAccessError::ScoutNotSubscribed)));
     }
 }

@@ -2174,6 +2174,77 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
+#### `set_auto_renew(scout: Address, enabled: bool) -> Result<(), ScoutAccessError>`
+
+Opt a scout wallet in (`true`) or out (`false`) of automatic subscription renewal.
+
+Once enabled, a keeper (off-chain cron job or bot) can call `renew_if_due` when
+the scout's subscription is approaching expiry. The flag is stored in persistent
+storage and survives upgrades.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_auto_renew \
+  --scout $SCOUT_ADDRESS \
+  --enabled true
+```
+
+---
+
+#### `get_auto_renew(scout: Address) -> bool`
+
+Returns `true` if the scout has opted in to automatic subscription renewal,
+`false` otherwise (including for scouts who have never called `set_auto_renew`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_auto_renew \
+  --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `renew_if_due(scout: Address) -> Result<(), ScoutAccessError>`
+
+Renew a scout's subscription if auto-renewal is enabled and the subscription is
+at or near expiry.
+
+**Renewal window**: fires when the current timestamp is within the last 10 % of
+`sub_duration_secs` before `expires_at`, **or** after `expires_at` has already
+passed. Outside this window the function is a no-op and returns `Ok(())` without
+charging — safe to call on a schedule.
+
+**Auth model**: Soroban's `token::Client::transfer` always requires the sender's
+authorization *in the same transaction*. A third-party keeper bot cannot pull XLM
+from the scout's wallet on its own; the scout must sign the `renew_if_due`
+transaction, just as they sign `subscribe`. The keeper's role is to remind the
+scout to sign before expiry, not to charge them autonomously. A future
+allowance-based (`token::approve`) pattern could enable truly permissionless
+renewal, but is not implemented in this version.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `AutoRenewNotEnabled` · `ScoutNotSubscribed` · `Overflow` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- renew_if_due \
+  --scout $SCOUT_ADDRESS
+```
+
+---
+
 #### `pay_to_contact(scout: Address, player_id: u64) -> Result<(), ScoutAccessError>`
 
 Pay a micro-fee to unlock a player's contact details. Scout must have an active
