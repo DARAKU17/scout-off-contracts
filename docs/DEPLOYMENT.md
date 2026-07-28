@@ -319,6 +319,10 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 ### Address migration (new contract ID)
 
+> **See [`docs/MIGRATION_GAPS.md`](MIGRATION_GAPS.md) for the canonical per-category
+> list of what can and cannot be automatically migrated, including in-flight milestone
+> disputes and other gaps not covered in this section.**
+
 If a bug cannot be fixed via `upgrade()` (e.g. the storage layout must change in a way that requires a fresh deploy), you must migrate to a new contract address. This is a breaking change — all clients and the off-chain indexer must be updated.
 
 This is the highest-risk operation in the deployment lifecycle, so most of it is

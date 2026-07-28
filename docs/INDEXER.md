@@ -94,6 +94,10 @@ against `progress.get_history_count` as a cheap drift signal.
 
 ## Known gaps between the contracts and this schema
 
+> **For a consolidated list of all migration gaps — including data categories that
+> cannot be automatically replayed onto a new contract — see
+> [`docs/MIGRATION_GAPS.md`](MIGRATION_GAPS.md).**
+
 These aren't reconciliation failures — they're places the migration doesn't
 track a field the contract exposes, discovered while building this tool.
 Worth fixing in a future migration if this class of on-chain state is used
