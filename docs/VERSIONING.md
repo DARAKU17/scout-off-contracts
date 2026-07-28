@@ -1,147 +1,131 @@
-# Versioning and Upgrade Policy
+# Contract Versioning Policy
 
-This document defines what constitutes a breaking change in ScoutChain's
-Soroban smart contracts and how upgrades are classified, reviewed, and
-executed safely.
+## Semantic Versioning
+
+ScoutChain contracts follow [Semantic Versioning 2.0.0](https://semver.org/) — `MAJOR.MINOR.PATCH`:
+
+| Component | Incremented when |
+|-----------|-----------------|
+| **MAJOR** | Breaking change — storage layout changed, function removed, error codes renumbered, event schema changed |
+| **MINOR** | Backward-compatible addition — new function, new event, new error code appended at end of enum |
+| **PATCH** | Backward-compatible fix — bug fix, gas optimisation, documentation update in source |
+
+The current version of all four contracts is **v0.1.0**.
+
+> **Note:** `Cargo.toml` `[workspace.package].version` is the build-time source of truth; keep the Version History table below in sync with every Cargo version bump.
+
+Each contract exposes a `version()` function that returns its current version string:
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID  -- version
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID  -- version
+stellar contract invoke --id $PROGRESS_CONTRACT_ID      -- version
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID  -- version
+```
 
 ---
 
-## Breaking-Change Classification
+## What Constitutes a Breaking Change
 
-### Storage-layout breaking changes
+A change is **breaking** (requires a MAJOR bump) if any of the following are true:
 
-A change is a **breaking storage-layout change** if it makes existing
-persistent-storage entries unreadable or causes deserialization to fail
-after a WASM upgrade. The following changes are always breaking:
+- A `pub fn` is renamed or removed from any contract
+- A function's parameter list changes (added, removed, or reordered parameters)
+- A `#[contracterror]` variant is renumbered or removed
+- A `#[contracttype]` struct or enum used in storage or function signatures gains or loses a field
+- The storage key layout changes such that existing persistent-storage entries become unreadable
+- An on-chain event's topic or data schema changes in a backward-incompatible way
+- The cross-contract interface expected by `set_progress_contract` / `set_verification_contract` changes
 
-1. **A `#[contracttype]` struct or enum used in storage or function signatures
-   gains or loses a field** — Soroban serialises structs positionally; adding
-   a field changes the byte layout of every existing stored value.
+A change is **non-breaking** (MINOR or PATCH) if:
 
-2. **A `#[contracttype]` enum variant is reordered** — variants are serialised
-   by discriminant index; reordering changes the numeric mapping.
-
-3. **A field's type changes** — even a widening change (e.g. `u32` → `u64`)
-   alters the serialized byte count.
-
-4. **The `DataKey` enum gains, loses, or reorders variants** — the key enum is
-   also a `#[contracttype]`; changing it makes existing storage entries
-   unreadable by the key that was used to write them.
-
-### Safe (non-breaking) storage-layout changes
-
-The following changes are **safe** and do not require a data migration:
-
-- Adding a new variant to the end of a `DataKey` enum (existing keys
-  are unaffected).
-- Adding a new `#[contracttype]` struct or enum that is not yet written to
-  storage.
-- Changing business logic inside a function body without altering types.
-- Adding new `pub fn` to a `#[contractimpl]` block.
-- Removing a `pub fn` from a `#[contractimpl]` block (existing storage
-  entries are unaffected).
+- A new `pub fn` is added (existing callers are unaffected)
+- A new `#[contracterror]` variant is appended at the end of an enum (existing numeric codes unchanged)
+- A new event type is added (existing listeners ignore unknown topics)
+- Internal helper functions or private storage keys change
 
 ---
 
 ## Upgrade Checklist
 
-Run through every item before submitting an upgrade PR and again before
-executing `scripts/upgrade.sh` against a live network.
+The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYMENT.md — Upgrading a Deployed Contract](docs/DEPLOYMENT.md#upgrading-a-deployed-contract) for manual steps).
+
+```bash
+./scripts/upgrade.sh <network> <contract_name> <new_wasm_path>
+# Example:
+./scripts/upgrade.sh testnet verification target/wasm32v1-none/release/scoutchain_verification.wasm
+```
 
 ### Pre-upgrade
 
-- [ ] **Automated storage-layout check** — run
-  `bash scripts/check-storage-layout-compat.sh <old-ref> <new-ref>` and
-  confirm it exits 0, or explicitly acknowledge every breaking change it
-  reports before proceeding.  This check replaces the previous manual
-  self-certification step and is enforced as a hard stop in `upgrade.sh`.
+- [ ] Read all BREAKING CHANGES listed in the release notes for the target version
+- [ ] Snapshot current on-chain state that lives in **instance** storage (fee config, initialized flag, contract links) — these survive the WASM swap but must be re-verified
+- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade. For a v0.1.0 deployment, each contract should return exactly `0.1.0` (from the workspace `CARGO_PKG_VERSION`, with no `v` prefix).
+- [ ] Run `cargo test --workspace` against the new code locally
+- [ ] Rehearse the upgrade locally with the storage-survival harness — **no testnet fees required.** For each contract it deploys v1, seeds representative state, calls `upgrade()`, and asserts every row of the "What survives an upgrade" table in `docs/DEPLOYMENT.md` (persistent state unchanged; instance `Initialized`/`Paused` flags intact; cross-contract links re-wirable), including the `verification` `AlreadyConfigured` re-wire quirk. Run:
+  - `cargo test -p scoutchain-registration  --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-verification  --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-progress      --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-scout-access  --test upgrade_rehearsal`
+  - (or all at once: `cargo test --workspace --test upgrade_rehearsal`)
+- [ ] Test the full upgrade flow on testnet before touching mainnet (only after the local rehearsal above passes, so testnet transaction fees are spent on a flow you already know survives an upgrade)
 
-- [ ] Identify every `#[contracttype]` struct/enum and `DataKey` enum that
-  changed between the last deployed version and the new build.
+### During upgrade (per contract)
 
-- [ ] For each change, classify it using the rules above (breaking vs safe).
-
-- [ ] If any breaking change is detected without the
-  `--acknowledge-breaking-change` flag, `upgrade.sh` will abort.  Do not
-  bypass this gate without migrating or draining the affected storage first.
-
-- [ ] Confirm the new WASM has been tested on testnet with the exact same
-  storage state that production holds (seed from a production snapshot if
-  possible).
-
-- [ ] Verify the admin key for the target contract is accessible and that
-  `DEPLOYER_SECRET` / `ADMIN_ADDRESS` in `.env` are correct for the target
-  network.
-
-### Upgrade execution
-
-- [ ] Run `./scripts/upgrade.sh [testnet|mainnet] <contract-name>`.
-  The script will execute `check-storage-layout-compat.sh` automatically.
-
-- [ ] Confirm the on-chain `version()` query returns the expected new version
-  after the upgrade.
-
-- [ ] Smoke-test the critical path (register → approve_milestone →
-  advance_level) against the upgraded contract.
+- [ ] Build and install the new WASM: `stellar contract build && stellar contract install ...`
+- [ ] Call `upgrade(new_wasm_hash)` from the admin address
+- [ ] Immediately call `health()` to confirm the contract responds
 
 ### Post-upgrade
 
-- [ ] Tag the commit with the deployed version (`vX.Y.Z`).
-- [ ] Update `config/testnet.json` or `config/mainnet.json` if contract IDs
-  changed (re-deploy rather than upgrade).
-- [ ] Notify downstream teams (backend indexer, frontend) of any API changes.
+- [ ] Call `version()` on each upgraded contract to confirm the expected new version
+- [ ] Re-verify instance storage (fee config, contract links) — re-apply if values were wiped
+- [ ] Verify cross-contract wiring: `./scripts/verify-cross-contract-wiring.sh <network>`
+- [ ] Re-run cross-contract wiring if any contract was re-deployed from scratch: `./scripts/initialize.sh <network>`
+- [ ] Regenerate TypeScript bindings: `./scripts/generate-bindings.sh <network>`
+- [ ] Update backend and frontend repos with the new bindings
 
 ---
 
-## Semantic Versioning
+## v0.1.0 → v0.x.0 Migration Notes
 
-| Change type | Version bump |
-|-------------|--------------|
-| Breaking storage-layout change or removed `pub fn` | Major (`X.0.0`) |
-| New `pub fn`, new safe DataKey variant, new event | Minor (`X.Y.0`) |
-| Bug fix, internal refactor, doc update | Patch (`X.Y.Z`) |
+This is the initial release. No prior on-chain state exists. The migration path from v0.1.0 to any future v0.x.0 (minor, backward-compatible) release is:
+
+1. **Build the new WASM** for the changed contract(s).
+2. **Install and upgrade** each changed contract using the procedure in [DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrading-a-deployed-contract).
+3. **Re-verify instance storage** — fee config and contract links are in instance storage and must be confirmed after each WASM swap.
+4. **Re-wire cross-contract links** if any contract address changed (i.e., a contract was re-deployed rather than upgraded in-place).
+5. **Regenerate bindings** and redeploy the backend/frontend.
+
+### Storage compatibility (v0.1.0 baseline)
+
+All persistent-storage keys in v0.1.0 use the `DataKey` enum defined in each contract's `types.rs`. Any v0.x.0 release that adds new `DataKey` variants is backward-compatible. Any release that **renames or removes** a `DataKey` variant is a breaking change and requires a MAJOR bump plus a data migration script.
+
+### Error code compatibility (v0.1.0 baseline)
+
+Error code assignments for v0.1.0 are fixed as documented in [docs/CONTRACT_REFERENCE.md](docs/CONTRACT_REFERENCE.md). Future minor releases may only **append** new error codes at the end of each enum. SDK consumers should handle unknown error codes gracefully (treat them as unexpected errors and surface to the user).
+
+> **Known gap:** `ScoutAccessError` code 13 is intentionally reserved and will never be assigned. See `contracts/scout_access/src/errors.rs` for the inline explanation.
 
 ---
 
-## Storage Layout Compatibility Checker
+## Version History
 
-`scripts/check-storage-layout-compat.sh` is the mechanical enforcement of
-the rules above.  It compares two Rust source references (git refs or file
-paths) and reports every `DataKey` and `#[contracttype]` change, classified
-as **safe** or **breaking**.
+### Format & Entry Guidelines
 
-### Usage
+When adding new entries to the Version History table:
+- **Contract Scope**: All four contracts (`registration`, `verification`, `progress`, `scout_access`) were initially released together at `v0.1.0`. Future releases may update all contracts in lockstep or target specific contracts individually. Specify the scope in the **Version** column (e.g., `v0.2.0 (all)` or `v0.2.0 (verification)`).
+- **SemVer Bump Type**: Explicitly classify each change as `MAJOR` (breaking storage/API change), `MINOR` (backward-compatible feature/event/error addition), or `PATCH` (backward-compatible bug fix/gas optimization) in the **Type** column.
+- **Summary**: Provide a concise summary of changes, explicitly calling out breaking changes if `MAJOR`.
+- **Cross-reference**: Every entry must mirror the corresponding entry in [CHANGELOG.md](CHANGELOG.md) — keep both files in sync.
 
-```bash
-# Compare current working tree against the last tagged release
-bash scripts/check-storage-layout-compat.sh HEAD~1 HEAD
+> **Current enforcement gap:** Keeping this Version History table current is
+> currently a convention-only process that relies on contributor discipline; no
+> CI check enforces that MAJOR or MINOR version changes add a corresponding row.
 
-# Compare two specific git refs
-bash scripts/check-storage-layout-compat.sh v1.0.0 v1.1.0
-
-# Compare two explicit file paths (useful in CI with checked-out artefacts)
-bash scripts/check-storage-layout-compat.sh \
-  path/to/old/types.rs \
-  path/to/new/types.rs
-```
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | No breaking changes detected (or all acknowledged) |
-| 1 | One or more breaking changes detected; upgrade blocked |
-| 2 | Usage error (wrong number of arguments) |
-
-### Override
-
-If a breaking change is intentional (migration has been prepared), pass
-`--acknowledge-breaking-change` to both this script and `upgrade.sh`:
-
-```bash
-bash scripts/check-storage-layout-compat.sh HEAD~1 HEAD --acknowledge-breaking-change
-./scripts/upgrade.sh mainnet verification --acknowledge-breaking-change
-```
-
-This flag records an explicit acknowledgement in the upgrade log but does not
-suppress the diagnostic output — operators can always see what changed.
+| Version | Date | Type | Summary |
+|---------|------|------|---------|
+| v0.1.0 (all) | 2025 | MINOR | Initial release — all four contracts with full test coverage |
+<!-- Template / Example for future entries: -->
+<!-- | v0.2.0 (verification) | YYYY-MM-DD | MINOR | Added batch verification helper functions | -->
+<!-- | v1.0.0 (all) | YYYY-MM-DD | MAJOR | BREAKING: Updated storage key layout across all contracts | -->
