@@ -514,6 +514,12 @@ When the progress contract is not wired, a `progress_contract_not_set` event is 
    ```
 3. Retry the original transaction — because `ProgressCallFailed` aborts the whole transaction, there is no partial state to clean up.
 
+> **Tested guarantee (Issue #811):** This all-or-nothing claim is backed by adversarial tests, not just this prose explanation. See:
+> - `contracts/verification/tests/adversarial_atomicity.rs` — proves `approve_milestone` behavior on bad-wired progress contract and validates the `DuplicateEvidence` idempotency token as defense-in-depth.
+> - `contracts/scout_access/tests/adversarial_atomicity.rs` — equivalent tests for `confirm_trial_offer`, including the `TrialOfferAlreadyConfirmed` double-confirm guard.
+>
+> **Idempotency defense-in-depth:** The `DuplicateEvidence` check (code 16) on `approve_milestone` acts as an explicit idempotency token: if a future refactor altered write ordering and partial state were committed, a retried call with the same evidence hash would return `DuplicateEvidence` rather than silently double-counting. For `confirm_trial_offer`, the absence of the `TrialEscrow` record (removed on first confirmation) serves the same purpose — a second call returns `TrialOfferAlreadyConfirmed` (code 22).
+
 ---
 
 ## Events Reference
