@@ -96,10 +96,16 @@ jobs:
           shellcheck scripts/git-hooks/pre-push
           shellcheck testnet/seed.sh
           shellcheck scripts/check-event-topic-consistency.sh
+          shellcheck scripts/check-guard-ordering.sh
+          shellcheck scripts/check-cross-doc-consistency.sh
       - name: Docs completeness check
         run: bash scripts/check-docs.sh
       - name: Event-topic consistency check
         run: bash scripts/check-event-topic-consistency.sh
+      - name: Guard-ordering audit
+        run: bash scripts/check-guard-ordering.sh
+      - name: Cross-doc consistency check
+        run: bash scripts/check-cross-doc-consistency.sh
       - name: Validate bindings package.json templates
         run: bash scripts/check-bindings.sh
 

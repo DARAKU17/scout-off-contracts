@@ -5,8 +5,8 @@ mod events;
 mod types;
 
 use errors::ProgressError;
-use scoutchain_shared_types::{require_admin, ContractHealth, ProgressLevel};
-use types::{DataKey, ProgressEntry};
+use scoutchain_shared_types::{require_admin, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
+use types::{DataKey, ProgressEntry, ProgressWiringState};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -221,6 +221,7 @@ impl ProgressContract {
         target_level: ProgressLevel,
     ) -> Result<(), ProgressError> {
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         let old_level = Self::get_current_level(&env, player_id);
@@ -611,6 +612,38 @@ impl ProgressContract {
         String::from_str(&env, CONTRACT_VERSION)
     }
 
+    /// Returns a snapshot of all cross-contract peer address pointers held by
+    /// this contract. Use this to verify that wiring is complete before
+    /// relying on `advance_level`.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired or paused contract (that is
+    /// exactly when you need it most).
+    ///
+    /// See `docs/WIRING_REGISTRY_DESIGN.md` for the full design context and
+    /// the recommended migration path for already-deployed contracts.
+    pub fn get_wiring_state(env: Env) -> ProgressWiringState {
+        Self::bump_instance_ttl(&env);
+        let registration_contract = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistrationContract);
+        let verification_contract = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::VerificationContract);
+        let scout_access_contract = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::ScoutAccessContract);
+        ProgressWiringState {
+            registration_contract,
+            verification_contract,
+            scout_access_contract,
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
@@ -666,7 +699,7 @@ impl ProgressContract {
     ) -> Result<(), ProgressError> {
         let history_key = DataKey::HistoryCounter(player_id);
         let index: u32 = env.storage().persistent().get(&history_key).unwrap_or(0u32);
-        let next_index = index.checked_add(1).ok_or(ProgressError::Overflow)?;
+        let next_index = safe_add_u32(index, 1).map_err(|_| ProgressError::Overflow)?;
 
         let entry = ProgressEntry {
             player_id,

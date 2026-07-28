@@ -23,7 +23,7 @@ use types::{
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{require_admin, validate_cid};
+use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_sub_u32}};
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
 /// Minimum credentials length for validator registration.
@@ -194,6 +194,7 @@ impl VerificationContract {
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
 
         if credentials.len() > MAX_CREDENTIALS_LEN {
             return Err(VerificationError::InvalidInput);
@@ -259,9 +260,7 @@ impl VerificationContract {
             .unwrap_or(0u32);
         env.storage().instance().set(
             &DataKey::ActiveValidatorCount,
-            &active_count
-                .checked_add(1)
-                .ok_or(VerificationError::Overflow)?,
+            &safe_add_u32(active_count, 1).map_err(|_| VerificationError::Overflow)?,
         );
 
         let total_count: u32 = env
@@ -271,9 +270,7 @@ impl VerificationContract {
             .unwrap_or(0u32);
         env.storage().instance().set(
             &DataKey::TotalValidatorCount,
-            &total_count
-                .checked_add(1)
-                .ok_or(VerificationError::Overflow)?,
+            &safe_add_u32(total_count, 1).map_err(|_| VerificationError::Overflow)?,
         );
 
         events::validator_registered(&env, &wallet, &validator.credentials);
@@ -331,7 +328,7 @@ impl VerificationContract {
                 .unwrap_or(0u32);
             env.storage().instance().set(
                 &DataKey::ActiveValidatorCount,
-                &count.checked_sub(1).ok_or(VerificationError::Overflow)?,
+                &safe_sub_u32(count, 1).map_err(|_| VerificationError::Overflow)?,
             );
         }
 
@@ -433,6 +430,7 @@ impl VerificationContract {
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
 
         // Preliminary cap check: ensure the batch won't push us over MAX_VALIDATORS.
         let current_count: u32 = env
@@ -441,9 +439,7 @@ impl VerificationContract {
             .get(&DataKey::TotalValidatorCount)
             .unwrap_or(0u32);
         let batch_len = entries.len();
-        if current_count
-            .checked_add(batch_len as u32)
-            .ok_or(VerificationError::Overflow)?
+        if safe_add_u32(current_count, batch_len as u32).map_err(|_| VerificationError::Overflow)?
             > MAX_VALIDATORS
         {
             return Err(VerificationError::ValidatorCapReached);
@@ -508,9 +504,7 @@ impl VerificationContract {
                 .unwrap_or(0u32);
             env.storage().instance().set(
                 &DataKey::ActiveValidatorCount,
-                &active_count
-                    .checked_add(1)
-                    .ok_or(VerificationError::Overflow)?,
+                &safe_add_u32(active_count, 1).map_err(|_| VerificationError::Overflow)?,
             );
 
             // Increment total validator count.
@@ -521,9 +515,7 @@ impl VerificationContract {
                 .unwrap_or(0u32);
             env.storage().instance().set(
                 &DataKey::TotalValidatorCount,
-                &total_count
-                    .checked_add(1)
-                    .ok_or(VerificationError::Overflow)?,
+                &safe_add_u32(total_count, 1).map_err(|_| VerificationError::Overflow)?,
             );
 
             events::validator_registered(&env, &wallet, &validator.credentials);
@@ -569,7 +561,7 @@ impl VerificationContract {
                 .unwrap_or(0u32);
             env.storage().instance().set(
                 &DataKey::ActiveValidatorCount,
-                &count.checked_add(1).ok_or(VerificationError::Overflow)?,
+                &safe_add_u32(count, 1).map_err(|_| VerificationError::Overflow)?,
             );
         }
 
@@ -732,6 +724,7 @@ impl VerificationContract {
         evidence_hash: String,
     ) -> Result<u32, VerificationError> {
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         validator_wallet.require_auth();
 
         if description.len() > MAX_DESCRIPTION_LEN {
@@ -766,7 +759,7 @@ impl VerificationContract {
         // Increment milestone counter for this player
         let counter_key = DataKey::MilestoneCounter(player_id);
         let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
-        let next_index = index.checked_add(1).ok_or(VerificationError::Overflow)?;
+        let next_index = safe_add_u32(index, 1).map_err(|_| VerificationError::Overflow)?;
 
         let _description_for_event = description.clone();
         let _evidence_hash_for_event = evidence_hash.clone();
@@ -809,9 +802,7 @@ impl VerificationContract {
         let val_count: u32 = env.storage().persistent().get(&val_key).unwrap_or(0u32);
         env.storage().persistent().set(
             &val_key,
-            &(val_count
-                .checked_add(1)
-                .ok_or(VerificationError::Overflow)?),
+            &(safe_add_u32(val_count, 1).map_err(|_| VerificationError::Overflow)?),
         );
         env.storage()
             .persistent()
@@ -819,7 +810,7 @@ impl VerificationContract {
 
         env.storage().persistent().set(
             &vp_key,
-            &(vp_count.checked_add(1).ok_or(VerificationError::Overflow)?),
+            &(safe_add_u32(vp_count, 1).map_err(|_| VerificationError::Overflow)?),
         );
 
         // Update ValidatorPlayers index: record that this validator has approved
@@ -844,7 +835,7 @@ impl VerificationContract {
             .unwrap_or(0u32);
         env.storage().instance().set(
             &DataKey::TotalMilestoneCount,
-            &(total.checked_add(1).ok_or(VerificationError::Overflow)?),
+            &(safe_add_u32(total, 1).map_err(|_| VerificationError::Overflow)?),
         );
 
         let mut global_index: Vec<GlobalMilestoneEntry> = env
@@ -1313,7 +1304,7 @@ impl VerificationContract {
             .unwrap_or(0u32);
         env.storage().instance().set(
             &DataKey::ActiveDisputesCount,
-            &count.checked_add(1).ok_or(VerificationError::Overflow)?,
+            &safe_add_u32(count, 1).map_err(|_| VerificationError::Overflow)?,
         );
 
         // Maintain the global open-dispute index so list_disputes_page can
@@ -1351,6 +1342,7 @@ impl VerificationContract {
     ) -> Result<(), VerificationError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
@@ -1375,7 +1367,7 @@ impl VerificationContract {
             .unwrap_or(0u32);
         env.storage().instance().set(
             &DataKey::ActiveDisputesCount,
-            &count.checked_sub(1).ok_or(VerificationError::Overflow)?,
+            &safe_sub_u32(count, 1).map_err(|_| VerificationError::Overflow)?,
         );
 
         // Remove this dispute from the global open-dispute index so it no

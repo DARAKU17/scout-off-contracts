@@ -14,7 +14,7 @@ use types::{
 // scope for the rest of this module.
 pub use types::PlayerVitals;
 
-use scoutchain_shared_types::require_admin;
+use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 // Generated client stub for the progress contract — used to resolve a player's
@@ -239,8 +239,8 @@ impl RegistrationContract {
         vitals: PlayerVitals,
         ipfs_hashes: Vec<String>,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         wallet.require_auth();
 
         // Prevent duplicate registrations
@@ -333,6 +333,7 @@ impl RegistrationContract {
         ipfs_hashes: Vec<String>,
     ) -> Result<(), ScoutChainError> {
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         let mut profile = Self::load_stored_player(&env, player_id)?;
         profile.wallet.require_auth();
         if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
@@ -422,8 +423,8 @@ impl RegistrationContract {
         wallet: Address,
         region: String,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         wallet.require_auth();
 
         if region.len() > MAX_REGION_LEN {
@@ -475,8 +476,8 @@ impl RegistrationContract {
         updated_at: u64,
     ) -> Result<u64, ScoutChainError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
 
         if vitals.age == 0 || vitals.age < MIN_PLAYER_AGE {
             return Err(ScoutChainError::InvalidInput);
@@ -543,8 +544,8 @@ impl RegistrationContract {
         verified: bool,
     ) -> Result<u64, ScoutChainError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
 
         if region.len() > MAX_REGION_LEN {
             return Err(ScoutChainError::InvalidInput);
@@ -935,7 +936,7 @@ impl RegistrationContract {
             .instance()
             .get(&DataKey::PlayerCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
+        let next = safe_add_u64(id, 1).map_err(|_| ScoutChainError::Overflow)?;
         env.storage().instance().set(&DataKey::PlayerCounter, &next);
         Ok(next)
     }
@@ -946,7 +947,7 @@ impl RegistrationContract {
             .instance()
             .get(&DataKey::ScoutCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
+        let next = safe_add_u64(id, 1).map_err(|_| ScoutChainError::Overflow)?;
         env.storage().instance().set(&DataKey::ScoutCounter, &next);
         Ok(next)
     }
