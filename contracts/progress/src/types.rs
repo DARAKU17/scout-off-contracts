@@ -1,16 +1,20 @@
 use soroban_sdk::{contracttype, Address};
 
-pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+pub use scoutchain_shared_types::ProgressLevel;
 
 /// A single entry in the immutable progress history
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProgressEntry {
+    /// Unique player identifier whose level changed.
     pub player_id: u64,
+    /// Player level before this history entry was recorded.
     pub old_level: ProgressLevel,
+    /// Player level after this history entry was recorded.
     pub new_level: ProgressLevel,
     /// Wallet that triggered the update (validator or scout)
     pub updated_by: Address,
+    /// Ledger timestamp when the level change was recorded, in Unix seconds.
     pub updated_at: u64,
     /// Milestone index from the verification contract that triggered this
     pub milestone_ref: u32,
@@ -18,11 +22,48 @@ pub struct ProgressEntry {
     pub ledger_sequence: u32,
 }
 
+/// Snapshot of all cross-contract peer addresses held by the progress
+/// contract. Returned by [`ProgressContract::get_wiring_state`].
+///
+/// Use this to verify — without inspecting storage keys directly — that all
+/// three peer links are configured. See `docs/WIRING_REGISTRY_DESIGN.md` for
+/// the full design rationale and the recommended migration path.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressWiringState {
+    /// Address of the registration contract, if set via
+    /// `set_registration_contract`. Required for `advance_level` to validate
+    /// player existence via the registration contract.
+    pub registration_contract: Option<Address>,
+    /// Address of the verification contract, if set via
+    /// `set_verification_contract`. Only this address may call `advance_level`
+    /// (primary authorised caller).
+    pub verification_contract: Option<Address>,
+    /// Address of the scout_access contract, if set via
+    /// `set_scout_access_contract`. Whitelisted as the secondary authorised
+    /// caller of `advance_level` for trial-offer Level-3 advances.
+    pub scout_access_contract: Option<Address>,
+}
+
+impl ProgressWiringState {
+    /// Returns `true` iff all three peer address slots are populated.
+    /// A return value of `false` means `advance_level` may fail because at
+    /// least one expected caller or dependency address is missing.
+    pub fn is_fully_wired(&self) -> bool {
+        self.registration_contract.is_some()
+            && self.verification_contract.is_some()
+            && self.scout_access_contract.is_some()
+    }
+}
+
 #[contracttype]
 pub enum DataKey {
     /// The `Address` of the contract administrator. Set during `initialize` and
-    /// updated by `transfer_admin`. Required for all privileged operations.
+    /// updated by `accept_admin`. Required for all privileged operations.
     Admin,
+    /// Proposed replacement admin. The address stored here must call
+    /// `accept_admin` before `Admin` is updated.
+    PendingAdmin,
     /// Boolean flag (`true`) written during `initialize`. Absence or `false`
     /// means the contract has not yet been set up; `health()` reads this key.
     Initialized,
