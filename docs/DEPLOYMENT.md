@@ -205,6 +205,7 @@ replace `0` with the desired starting ledger sequence number.
 - [ ] Run `./scripts/initialize.sh mainnet`
 - [ ] Verify all contract IDs in `.env.contracts`
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
+- [ ] Review [docs/STORAGE_COST_MODEL.md](STORAGE_COST_MODEL.md) and confirm the projected monthly storage rent is within budget at expected launch-day scale. Re-measure rent figures if the Stellar fee schedule has changed since the document's last-reviewed date.
 
 ## Upgrading a Deployed Contract
 
