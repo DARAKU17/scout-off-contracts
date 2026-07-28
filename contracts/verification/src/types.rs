@@ -35,6 +35,34 @@ pub struct Validator {
     pub active: bool,
 }
 
+/// A dispute filed against an approved milestone.
+/// Disputes are purely informational records — filing one does not
+/// automatically reverse the approval or affect the progress level.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MilestoneDispute {
+    /// The player whose milestone is under dispute
+    pub player_id: u64,
+    /// Index of the disputed milestone (1-based)
+    pub milestone_index: u32,
+    /// The validator who approved the disputed milestone
+    pub validator: Address,
+    /// Free-form reason provided by the disputing party
+    pub reason: String,
+    /// Address of the account that filed the dispute
+    pub filed_by: Address,
+    /// Ledger timestamp at the time of filing
+    pub filed_at: u64,
+}
+
+/// Lightweight reference used by paginated dispute queries.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRef {
+    pub player_id: u64,
+    pub milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -46,8 +74,15 @@ pub enum DataKey {
     MilestoneCounter(u64),
     Milestone(u64, u32),
     ValidatorMilestoneCount(Address),
-    /// progress contract address (cross-contract calls)
-    ProgressContract,
     ValidatorVector,
     TotalMilestoneCount,
+    /// Per-validator milestone reference list: validator → Vec<DisputeRef>
+    /// Stores (player_id, milestone_index) pairs in approval order.
+    ValidatorMilestones(Address),
+    /// Per-milestone dispute record: (player_id, milestone_index) → MilestoneDispute
+    DisputeRecord(u64, u32),
+    /// Per-player-validator milestone count cap key
+    ValidatorPlayerMilestoneCount(Address, u64),
+    /// Global count of active (unresolved) disputes
+    ActiveDisputeCount,
 }

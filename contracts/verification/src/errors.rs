@@ -19,4 +19,8 @@ pub enum VerificationError {
     Overflow = 13,
     MilestoneNotFound = 14,
     ValidatorCapReached = 15,
+    /// A dispute for this milestone has already been filed.
+    DisputeAlreadyFiled = 16,
+    /// No dispute record found for this milestone.
+    DisputeNotFound = 17,
 }

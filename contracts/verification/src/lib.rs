@@ -17,7 +17,7 @@ mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{ContractHealth, DataKey, Milestone, Validator, ValidatorStatus};
+use types::{ContractHealth, DataKey, DisputeRef, MilestoneDispute, Milestone, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -339,6 +339,20 @@ impl VerificationContract {
                 .ok_or(VerificationError::Overflow)?),
         );
 
+        // Append to per-validator milestone reference index (used by
+        // get_validator_milestones_page and get_disputes_for_validator).
+        let vm_key = DataKey::ValidatorMilestones(validator_wallet.clone());
+        let mut refs: Vec<DisputeRef> = env
+            .storage()
+            .persistent()
+            .get(&vm_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        refs.push_back(DisputeRef {
+            player_id,
+            milestone_index: next_index,
+        });
+        env.storage().persistent().set(&vm_key, &refs);
+
         // Increment global total milestone count
         let total: u32 = env
             .storage()
@@ -419,6 +433,188 @@ impl VerificationContract {
             .instance()
             .get(&DataKey::TotalMilestoneCount)
             .unwrap_or(0u32)
+    }
+
+    /// Return a paginated slice of a validator's milestone references (approval
+    /// history) in chronological order. Each entry is a `DisputeRef` containing
+    /// the `player_id` and `milestone_index` for one approved milestone.
+    ///
+    /// - `offset` — zero-based starting position in the full list.
+    /// - `limit` — maximum entries to return, capped at 50.
+    ///
+    /// Returns an empty vec for unknown validators or out-of-range offsets.
+    pub fn get_validator_milestones_page(
+        env: Env,
+        wallet: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<DisputeRef> {
+        const MAX_PAGE: u32 = 50;
+        let limit = limit.min(MAX_PAGE);
+
+        let refs: Vec<DisputeRef> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestones(wallet))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = refs.len();
+        if offset >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (offset + limit).min(total);
+        let mut page = Vec::new(&env);
+        for i in offset..end {
+            if let Some(r) = refs.get(i) {
+                page.push_back(r);
+            }
+        }
+        page
+    }
+
+    // -------------------------------------------------------------------------
+    // Dispute filing and lookup
+    // -------------------------------------------------------------------------
+
+    /// File a dispute against an approved milestone. Any account may dispute,
+    /// but each milestone may only have one dispute record at a time
+    /// (`DisputeAlreadyFiled` is returned on a second call).
+    ///
+    /// This is a purely informational record — it does NOT reverse the milestone
+    /// approval or roll back the player's progress level.
+    ///
+    /// - `reason` must be ≤ 128 bytes.
+    pub fn file_dispute(
+        env: Env,
+        filed_by: Address,
+        player_id: u64,
+        milestone_index: u32,
+        reason: String,
+    ) -> Result<(), VerificationError> {
+        filed_by.require_auth();
+
+        if reason.len() > 128 {
+            return Err(VerificationError::ReasonTooLong);
+        }
+
+        // The milestone must exist before a dispute can be filed.
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+            .ok_or(VerificationError::MilestoneNotFound)?;
+
+        let dispute_key = DataKey::DisputeRecord(player_id, milestone_index);
+        if env.storage().persistent().has(&dispute_key) {
+            return Err(VerificationError::DisputeAlreadyFiled);
+        }
+
+        let dispute = MilestoneDispute {
+            player_id,
+            milestone_index,
+            validator: milestone.validator.clone(),
+            reason,
+            filed_by: filed_by.clone(),
+            filed_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        // Increment global active dispute count.
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveDisputeCount, &active.saturating_add(1));
+
+        Ok(())
+    }
+
+    /// Return `true` if a dispute record exists for the given milestone.
+    pub fn has_dispute(env: Env, player_id: u64, milestone_index: u32) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::DisputeRecord(player_id, milestone_index))
+    }
+
+    /// Return the dispute record for a milestone.
+    pub fn get_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<MilestoneDispute, VerificationError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeRecord(player_id, milestone_index))
+            .ok_or(VerificationError::DisputeNotFound)
+    }
+
+    /// Return the number of active (unresolved) disputes across all milestones.
+    pub fn get_active_disputes_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0u32)
+    }
+
+    /// Convenience cross-reference: return only the subset of `wallet`'s approved
+    /// milestones that have an associated dispute record, in one paginated call.
+    ///
+    /// This composes `get_validator_milestones_page` (the validator's approval
+    /// index) with `has_dispute` / `get_dispute` (the per-milestone dispute
+    /// lookup) on-chain, so callers do not need to perform the join themselves.
+    ///
+    /// - `offset` — zero-based starting position in the **full** validator
+    ///   milestone list (not the disputed-only subset). This keeps the cursor
+    ///   stable across calls even as new milestones are approved.
+    /// - `limit` — maximum entries to return, capped at 50.
+    ///
+    /// Returns only `MilestoneDispute` records; non-disputed milestones are
+    /// excluded from the result.
+    pub fn get_disputes_for_validator(
+        env: Env,
+        wallet: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<MilestoneDispute> {
+        const MAX_PAGE: u32 = 50;
+        let limit = limit.min(MAX_PAGE);
+
+        // Load the full validator milestone reference list.
+        let refs: Vec<DisputeRef> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestones(wallet))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = refs.len();
+        if offset >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (offset + limit).min(total);
+        let mut disputed: Vec<MilestoneDispute> = Vec::new(&env);
+
+        for i in offset..end {
+            if let Some(dr) = refs.get(i) {
+                // Cross-reference: look up dispute record for this milestone.
+                if let Some(dispute) = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::DisputeRecord(dr.player_id, dr.milestone_index))
+                {
+                    disputed.push_back(dispute);
+                }
+            }
+        }
+
+        disputed
     }
 
     pub fn get_validator(env: Env, wallet: Address) -> Result<Validator, VerificationError> {
@@ -1266,5 +1462,141 @@ mod tests {
         // Assert counters are unchanged.
         assert_eq!(client.get_milestone_count(&player_id), milestone_count_before);
         assert_eq!(client.get_validator_milestone_count(&validator), validator_count_before);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #871: get_disputes_for_validator
+    // -------------------------------------------------------------------------
+
+    /// Confirms that get_disputes_for_validator returns only the disputed subset
+    /// of a validator's milestones, correctly excluding non-disputed ones, across
+    /// a validator with a mix of both.
+    #[test]
+    fn test_get_disputes_for_validator_returns_only_disputed_subset() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        // Approve 3 milestones for different players
+        let player1: u64 = 1;
+        let player2: u64 = 2;
+        let player3: u64 = 3;
+
+        let idx1 = client.approve_milestone(
+            &validator, &player1,
+            &String::from_str(&env, "Speed test"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let _idx2 = client.approve_milestone(
+            &validator, &player2,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let idx3 = client.approve_milestone(
+            &validator, &player3,
+            &String::from_str(&env, "Trial assessment"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+
+        // File disputes on milestone 1 (player1) and milestone 3 (player3).
+        // Milestone 2 (player2) is intentionally left undisputed.
+        let disputer = Address::generate(&env);
+        client.file_dispute(
+            &disputer, &player1, &idx1,
+            &String::from_str(&env, "Evidence questionable"),
+        );
+        client.file_dispute(
+            &disputer, &player3, &idx3,
+            &String::from_str(&env, "Conflict of interest"),
+        );
+
+        // get_disputes_for_validator must return exactly the 2 disputed milestones.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 2, "expected exactly 2 disputes");
+
+        // Verify each returned record belongs to the expected player/milestone.
+        let has_player1 = disputed.iter().any(|d| d.player_id == player1);
+        let has_player3 = disputed.iter().any(|d| d.player_id == player3);
+        let has_player2 = disputed.iter().any(|d| d.player_id == player2);
+        assert!(has_player1, "dispute for player1 missing");
+        assert!(has_player3, "dispute for player3 missing");
+
+        // Confirm the non-disputed milestone (player2) is absent.
+        assert!(!has_player2, "undisputed player2 must not appear");
+    }
+
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// validator who has approved milestones but none have been disputed.
+    #[test]
+    fn test_get_disputes_for_validator_returns_empty_when_no_disputes() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // No disputes filed — must return empty.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
+
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// wallet that has no milestones at all.
+    #[test]
+    fn test_get_disputes_for_validator_unknown_wallet_returns_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let disputed = client.get_disputes_for_validator(&unknown, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
+
+    /// Confirms the 50-entry-per-page cap and that offset correctly slices the list.
+    #[test]
+    fn test_get_disputes_for_validator_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let disputer = Address::generate(&env);
+
+        // Approve and dispute 5 milestones for 5 distinct players
+        for player_id in 1u64..=5 {
+            let idx = client.approve_milestone(
+                &validator, &player_id,
+                &String::from_str(&env, "test"),
+                &String::from_str(&env, VALID_CID_V0),
+            );
+            client.file_dispute(
+                &disputer, &player_id, &idx,
+                &String::from_str(&env, "test reason"),
+            );
+        }
+
+        // First 3 (offset=0, limit=3)
+        let page1 = client.get_disputes_for_validator(&validator, &0u32, &3u32);
+        assert_eq!(page1.len(), 3);
+
+        // Next 2 (offset=3, limit=3 — only 2 remain)
+        let page2 = client.get_disputes_for_validator(&validator, &3u32, &3u32);
+        assert_eq!(page2.len(), 2);
+
+        // Out-of-range offset returns empty
+        let page3 = client.get_disputes_for_validator(&validator, &10u32, &50u32);
+        assert_eq!(page3.len(), 0);
     }
 }

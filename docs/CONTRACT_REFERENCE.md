@@ -701,6 +701,137 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_co
 
 ---
 
+#### `get_validator_milestones_page(wallet: Address, offset: u32, limit: u32) -> Vec<DisputeRef>`
+
+Return a paginated slice of a validator's milestone approval history in
+chronological order. Each entry is a `DisputeRef` containing `player_id` and
+`milestone_index` for one approved milestone.
+
+- `offset` — zero-based starting position in the full list.
+- `limit` — maximum entries to return, capped at 50.
+
+Returns an empty Vec for unknown validators or out-of-range offsets.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_milestones_page \
+  --wallet $VALIDATOR_ADDRESS \
+  --offset 0 \
+  --limit 50
+```
+
+---
+
+#### `get_disputes_for_validator(wallet: Address, offset: u32, limit: u32) -> Vec<MilestoneDispute>`
+
+Convenience cross-reference: return only the subset of `wallet`'s approved
+milestones that have an associated dispute record, in one paginated call.
+
+This composes `get_validator_milestones_page` (the validator's approval index)
+with `has_dispute` / `get_dispute` (the per-milestone dispute lookup) on-chain,
+so callers do not need to perform the join themselves. A validator-trust
+dashboard can call this single function instead of iterating over every
+milestone reference and checking for disputes individually.
+
+- `offset` — zero-based position in the **full** validator milestone list
+  (not the disputed-only subset). The cursor is stable across calls even
+  as new milestones are approved.
+- `limit` — maximum entries to return, capped at 50.
+
+Returns only `MilestoneDispute` records; non-disputed milestones are excluded
+from the result.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_disputes_for_validator \
+  --wallet $VALIDATOR_ADDRESS \
+  --offset 0 \
+  --limit 50
+```
+
+---
+
+#### `file_dispute(filed_by: Address, player_id: u64, milestone_index: u32, reason: String) -> Result<(), VerificationError>`
+
+File a dispute against an approved milestone. Any account may dispute, but each
+milestone may only have one dispute record (`DisputeAlreadyFiled` is returned on
+a second call). `reason` must be ≤ 128 bytes. This is a purely informational
+record — it does **not** reverse the milestone approval or roll back the
+player's progress level.
+
+| | |
+|---|---|
+| **Auth** | `filed_by` must sign |
+| **Errors** | `MilestoneNotFound` · `ReasonTooLong` · `DisputeAlreadyFiled` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- file_dispute \
+  --filed_by $DISPUTER_ADDRESS \
+  --player_id 1 \
+  --milestone_index 1 \
+  --reason "Evidence CID does not match submitted video"
+```
+
+---
+
+#### `has_dispute(player_id: u64, milestone_index: u32) -> bool`
+
+Return `true` if a dispute record exists for the given milestone.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- has_dispute --player_id 1 --milestone_index 1
+```
+
+---
+
+#### `get_dispute(player_id: u64, milestone_index: u32) -> Result<MilestoneDispute, VerificationError>`
+
+Return the dispute record for a milestone.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `DisputeNotFound` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_dispute --player_id 1 --milestone_index 1
+```
+
+---
+
+#### `get_active_disputes_count() -> u32`
+
+Return the number of active (unresolved) disputes across all milestones.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_active_disputes_count
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
