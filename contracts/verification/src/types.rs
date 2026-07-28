@@ -80,6 +80,11 @@ pub struct Validator {
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
+    /// Optional specialization tags (e.g. "physical-stats", "identity-kyc", "match-performance").
+    /// When a milestone category is provided to `approve_milestone`, only validators with a
+    /// matching specialization tag can approve it. An empty Vec means the validator can approve
+    /// any untagged (general-category) milestone but cannot approve tagged milestones.
+    pub specializations: Vec<String>,
 }
 
 /// Entry in the global milestone index for on-chain auditability.

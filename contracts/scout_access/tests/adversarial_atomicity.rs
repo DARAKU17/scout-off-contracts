@@ -142,7 +142,7 @@ fn advance_player(h: &Harness, player_id: u64, levels: u32) {
 fn approve_milestone(h: &Harness, player_id: u64, cid: &str) {
     let validator = Address::generate(&h.env);
     h.verification
-        .register_validator(&validator, &String::from_str(&h.env, "UEFA-B-License"));
+        .register_validator(&validator, &String::from_str(&h.env, "UEFA-B-License"), &Vec::new(&h.env));
     h.verification.approve_milestone(
         &validator,
         &player_id,

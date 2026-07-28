@@ -40,7 +40,7 @@ fn setup() -> Harness {
 
     client.initialize(&admin).expect("initialize should succeed");
     client
-        .register_validator(&validator, &String::from_str(&env, CREDENTIALS))
+        .register_validator(&validator, &String::from_str(&env, CREDENTIALS), &Vec::new(&env))
         .expect("validator registration should succeed");
 
     Harness {
@@ -64,7 +64,7 @@ fn test_approve_milestone_succeeds_when_not_paused() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(
         result.is_ok(),
@@ -87,7 +87,7 @@ fn test_approve_milestone_blocked_by_function_scoped_pause() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(
         result.is_err(),
@@ -115,7 +115,7 @@ fn test_approve_milestone_succeeds_after_unpause() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(
         result.is_ok(),
@@ -138,7 +138,7 @@ fn test_approve_milestone_blocked_by_whole_contract_pause() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(
         result.is_err(),
@@ -164,7 +164,7 @@ fn test_approve_milestone_blocked_by_both_pauses() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(result.is_err(), "approve_milestone should be blocked");
 }
@@ -229,7 +229,7 @@ fn test_register_validator_works_when_approve_milestone_paused() {
 
     // register_validator should still work
     h.client
-        .register_validator(&new_validator, &String::from_str(&h.env, CREDENTIALS))
+        .register_validator(&new_validator, &String::from_str(&h.env, CREDENTIALS), &Vec::new(&h.env))
         .expect("register_validator should work while approve_milestone is paused");
 }
 
@@ -338,7 +338,7 @@ fn test_whole_contract_pause_overrides_unpause_approve_milestone() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(
         result.is_err(),
@@ -358,7 +358,7 @@ fn test_function_pause_independent_of_whole_contract_pause() {
     // Verify register_validator still works (whole-contract is not paused)
     let new_validator = Address::generate(&h.env);
     h.client
-        .register_validator(&new_validator, &String::from_str(&h.env, CREDENTIALS))
+        .register_validator(&new_validator, &String::from_str(&h.env, CREDENTIALS), &Vec::new(&h.env))
         .expect("register_validator should work");
 
     // Verify approve_milestone is still blocked
@@ -367,7 +367,7 @@ fn test_function_pause_independent_of_whole_contract_pause() {
         &1u64,
         &String::from_str(&h.env, DESCRIPTION),
         &String::from_str(&h.env, VALID_CID),
-    );
+        &None);
 
     assert!(result.is_err(), "approve_milestone should be blocked");
 }
