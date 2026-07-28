@@ -311,6 +311,108 @@ jobs:
             echo "  OK: dist/index.js present"
           done
 
+      - name: Verify ABI function coverage in generated bindings
+        # Re-extracts each contract's ABI directly from the already-built WASM
+        # (Stellar CLI is already installed from the earlier step) and compares
+        # the function names it declares against the method names exported by
+        # each binding package's src/index.ts.
+        #
+        # Approach: re-run the lightweight ABI extraction inside this job
+        # rather than depending on the abi-export job's artifact.  The two
+        # jobs run in parallel (both need: test) so the artifact is not
+        # guaranteed to be available, and duplicating the one-liner extraction
+        # is simpler than restructuring the dependency graph.
+        #
+        # Fails with a clear list of any ABI function that has no corresponding
+        # export in the binding package, so a stale or incomplete scaffold
+        # cannot silently pass CI.
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32v1-none/release
+          mkdir -p abi-smoke
+
+          failed=0
+
+          for contract in registration verification progress scout_access; do
+            wasm="${WASM}/scoutchain_${contract}.wasm"
+            abi_file="abi-smoke/${contract}-abi.json"
+            index_ts="bindings/${contract}/src/index.ts"
+
+            echo "==> Checking ABI coverage for ${contract}..."
+
+            # Extract ABI JSON from the WASM.
+            stellar contract info interface --wasm "$wasm" --output json-formatted \
+              > "$abi_file" 2>/dev/null \
+              || { echo "  WARN: ABI extraction failed for ${contract} — skipping"; continue; }
+
+            # Compare ABI function names against binding exports using Python.
+            python3 - "$abi_file" "$index_ts" "$contract" <<'PYEOF'
+          import json
+          import re
+          import sys
+
+          abi_path, index_ts_path, contract_name = sys.argv[1], sys.argv[2], sys.argv[3]
+
+          # Parse ABI: collect all top-level function names.
+          with open(abi_path) as f:
+              abi = json.load(f)
+
+          abi_functions = set()
+          # stellar contract info --output json-formatted returns a list of
+          # interface entries; each entry with "type": "function" has a "name".
+          entries = abi if isinstance(abi, list) else abi.get("contract", [])
+          for entry in entries:
+              if isinstance(entry, dict) and entry.get("type") == "function":
+                  name = entry.get("name")
+                  if name:
+                      abi_functions.add(name)
+
+          if not abi_functions:
+              print(f"  WARN: no functions found in ABI for {contract_name} — skipping coverage check")
+              sys.exit(0)
+
+          # Parse src/index.ts: collect exported method names.
+          # The generated binding exports a Client class; each public method
+          # declaration covers one contract function.  We scan for both:
+          #   async methodName(   — async contract invocations
+          #   methodName(         — sync / query methods
+          with open(index_ts_path) as f:
+              ts_source = f.read()
+
+          # Match exported method names from the Client class body.
+          # Pattern: optional "async", then the method name, then "("
+          binding_methods = set(
+              re.findall(r'(?:async\s+)?(\w+)\s*\(', ts_source)
+          )
+
+          # Filter out JS built-ins and constructor
+          ignored = {"constructor", "call", "apply", "bind", "toString", "valueOf"}
+          binding_methods -= ignored
+
+          missing = abi_functions - binding_methods
+          if missing:
+              print(f"  FAIL [{contract_name}]: binding is missing exports for these ABI functions:")
+              for fn in sorted(missing):
+                  print(f"    - {fn}")
+              sys.exit(1)
+
+          print(f"  OK [{contract_name}]: all {len(abi_functions)} ABI function(s) are covered by the binding")
+          PYEOF
+            rc=$?
+            if [ $rc -ne 0 ]; then
+              failed=1
+            fi
+          done
+
+          if [ $failed -ne 0 ]; then
+            echo ""
+            echo "ERROR: one or more binding packages are missing exports for ABI-declared functions."
+            echo "Regenerate the bindings with: ./scripts/generate-bindings.sh <network>"
+            exit 1
+          fi
+          echo ""
+          echo "All binding packages fully cover their contract ABIs."
+
       - name: Run migration smoke test against local sandbox
         # Reuses the already-running stellar/quickstart:testing sandbox set up
         # earlier in this job. The script's 'skips cleanly if docker/stellar

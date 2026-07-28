@@ -108,6 +108,8 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for approve_milestone (independent of whole-contract Paused)
+    PausedApproveMilestone,
     ProgressContract,
     ProgressContractSet,
     Validator(Address),

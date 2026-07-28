@@ -688,6 +688,43 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Pause the `approve_milestone` function independently (function-scoped circuit breaker).
+    /// The whole-contract pause still takes precedence; this enables granular control
+    /// when only validator milestone approval needs to be halted (e.g., validator collusion incident).
+    /// All other functions (register_validator, revoke_validator, read queries) remain operational.
+    /// Admin only.
+    pub fn pause_approve_milestone(env: Env) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedApproveMilestone, &true);
+        events::approve_milestone_paused(&env, &admin);
+        Ok(())
+    }
+
+    /// Unpause the `approve_milestone` function.
+    /// Admin only.
+    pub fn unpause_approve_milestone(env: Env) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedApproveMilestone, &false);
+        events::approve_milestone_unpaused(&env, &admin);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM. Admin auth required.
     /// Persistent storage (including Admin) survives this call.
     pub fn upgrade(
@@ -724,7 +761,7 @@ impl VerificationContract {
         evidence_hash: String,
     ) -> Result<u32, VerificationError> {
         Self::require_not_paused(&env)?;
-        Self::require_initialized(&env)?;
+        Self::require_approve_milestone_not_paused(&env)?;
         validator_wallet.require_auth();
 
         if description.len() > MAX_DESCRIPTION_LEN {
@@ -963,6 +1000,48 @@ impl VerificationContract {
             .persistent()
             .get(&DataKey::MilestoneCounter(player_id))
             .unwrap_or(0u32)
+    }
+
+    /// Return all milestones for a player with `approved_at >= since_timestamp`.
+    ///
+    /// Mirrors [`progress::get_history_since`] semantics exactly: iterates the
+    /// per-player milestone sequence (indices `1..=count`) and filters in-memory
+    /// by `approved_at`, returning entries in approval order (oldest first).
+    ///
+    /// An indexer that already tracks the timestamp of the last milestone it
+    /// processed can pass that timestamp to fetch only new approvals, avoiding
+    /// a full re-fetch of the player's entire milestone list on every sync.
+    ///
+    /// Returns an empty `Vec` when the player has no milestones or when none
+    /// satisfy the timestamp predicate.
+    pub fn get_milestones_since(env: Env, player_id: u64, since_timestamp: u64) -> Vec<Milestone> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestoneCounter(player_id))
+            .unwrap_or(0u32);
+
+        let mut result: Vec<Milestone> = Vec::new(&env);
+        for i in 1..=count {
+            let key = DataKey::Milestone(player_id, i);
+            if let Some(milestone) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Milestone>(&key)
+            {
+                if milestone.approved_at >= since_timestamp {
+                    // Keep-alive: extend TTL on read so accessed milestone
+                    // records are not silently archived.
+                    env.storage().persistent().extend_ttl(
+                        &key,
+                        PERSISTENT_TTL_MIN,
+                        PERSISTENT_TTL_MAX,
+                    );
+                    result.push_back(milestone);
+                }
+            }
+        }
+        result
     }
 
     pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
@@ -1562,6 +1641,20 @@ impl VerificationContract {
             .unwrap_or(false)
         {
             return Err(VerificationError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Check that approve_milestone is not paused (function-scoped circuit breaker).
+    /// Independent of the whole-contract pause flag.
+    fn require_approve_milestone_not_paused(env: &Env) -> Result<(), VerificationError> {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedApproveMilestone)
+            .unwrap_or(false)
+        {
+            return Err(VerificationError::ApproveMilestonePaused);
         }
         Ok(())
     }
@@ -3455,5 +3548,81 @@ mod tests {
         let wallets: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
         let statuses = client.get_validator_statuses(&wallets);
         assert_eq!(statuses.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // #860: get_milestones_since — mirrors progress.get_history_since semantics
+    // -------------------------------------------------------------------------
+
+    /// Returns only milestones with `approved_at >= since_timestamp`,
+    /// matching the established `get_history_since` contract in the progress
+    /// contract (issue #860).
+    #[test]
+    fn test_get_milestones_since_filters_by_approved_at() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+
+        let player_id: u64 = 1;
+
+        // Milestone 1 at timestamp 100.
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Scored 3 goals"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Milestone 2 at timestamp 200.
+        env.ledger().with_mut(|l| l.timestamp = 200);
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Top speed 32 km/h"),
+            &String::from_str(&env, VALID_CID_V0_2),
+        );
+
+        // Milestone 3 at timestamp 300.
+        env.ledger().with_mut(|l| l.timestamp = 300);
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "MVP in tournament"),
+            &String::from_str(&env, VALID_CID_V0_3),
+        );
+
+        // since_timestamp = 200 should return milestones 2 and 3 only.
+        let result = client.get_milestones_since(&player_id, &200u64);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(0).unwrap().approved_at, 200);
+        assert_eq!(result.get(1).unwrap().approved_at, 300);
+
+        // since_timestamp = 0 returns all three milestones.
+        let all = client.get_milestones_since(&player_id, &0u64);
+        assert_eq!(all.len(), 3);
+
+        // since_timestamp = 301 returns none.
+        let none = client.get_milestones_since(&player_id, &301u64);
+        assert_eq!(none.len(), 0);
+
+        // since_timestamp = 300 returns only the last milestone (boundary is inclusive).
+        let boundary = client.get_milestones_since(&player_id, &300u64);
+        assert_eq!(boundary.len(), 1);
+        assert_eq!(boundary.get(0).unwrap().approved_at, 300);
+    }
+
+    /// Player with no milestones returns an empty Vec.
+    #[test]
+    fn test_get_milestones_since_empty_for_unknown_player() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.get_milestones_since(&999u64, &0u64);
+        assert_eq!(result.len(), 0);
     }
 }

@@ -640,6 +640,46 @@ impl RegistrationContract {
         Ok(profile)
     }
 
+    /// Get a scout profile by wallet address. Used by scout_access contract for Pro-tier verification gating.
+    pub fn get_scout_by_wallet(
+        env: Env,
+        wallet: Address,
+    ) -> Result<ScoutProfile, ScoutChainError> {
+        let scout_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ScoutByWallet(wallet.clone()))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        Self::get_scout(env, scout_id)
+    }
+
+    /// Batch-fetch scout profiles for up to 20 IDs in a single call.
+    /// Missing IDs are silently skipped (partial-hit semantics, identical to
+    /// `get_players`). The returned vec contains only the profiles that were
+    /// found, preserving input order among hits.
+    ///
+    /// Capped at `MAX_BATCH_SIZE` (20) to bound gas usage per call.
+    /// Pass more than 20 IDs → `InvalidInput`.
+    pub fn get_scouts(env: Env, ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let mut profiles = Vec::new(&env);
+        for i in 0..ids.len() {
+            if let Some(id) = ids.get(i) {
+                if let Some(profile) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, ScoutProfile>(&DataKey::Scout(id))
+                {
+                    profiles.push_back(profile);
+                }
+            }
+        }
+        Ok(profiles)
+    }
+
     /// Verify a scout profile (admin only).
     pub fn verify_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;

@@ -15,6 +15,9 @@ pub const CONTRACT_PAUSED: &str = "contract_paused";
 pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
 pub const SUBSCRIPTION_REFUNDED: &str = "subscription_refunded";
 pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
+pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
+pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
+pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
 
 /// topics: (event_name, admin)  data: admin
 pub fn contract_initialized(env: &Env, admin: &Address) {
@@ -148,6 +151,27 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
     );
 }
 
+/// topics: (event_name, admin)  data: registration_contract
+pub fn registration_contract_updated(env: &Env, admin: &Address, registration_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "registration_contract_updated"), admin.clone()),
+        registration_contract.clone(),
+    );
+}
+
+/// topics: (event_name, admin)  data: (proposed_config, proposed_at)
+pub fn fee_config_proposed(
+    env: &Env,
+    admin: &Address,
+    proposed_config: &crate::types::FeeConfig,
+    proposed_at: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "fee_config_proposed"), admin.clone()),
+        (proposed_config.clone(), proposed_at),
+    );
+}
+
 /// topics: (event_name, admin)  data: (old_config, new_config)
 pub fn fee_config_updated(
     env: &Env,
@@ -180,5 +204,35 @@ pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
     env.events().publish(
         (Symbol::new(env, "progress_call_failed"), player_id),
         error_code,
+    );
+}
+
+pub const AUTO_RENEW_SET: &str = "auto_renew_set";
+pub const SUBSCRIPTION_AUTO_RENEWED: &str = "subscription_auto_renewed";
+
+/// topics: (event_name, scout)  data: enabled
+pub fn auto_renew_set(env: &Env, scout: &Address, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, AUTO_RENEW_SET), scout.clone()),
+        enabled,
+    );
+}
+
+/// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
+///
+/// Emitted when `renew_if_due` successfully renews a scout's subscription.
+pub fn subscription_auto_renewed(
+    env: &Env,
+    scout: &Address,
+    tier: &SubscriptionTier,
+    subscribed_at: u64,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, SUBSCRIPTION_AUTO_RENEWED),
+            scout.clone(),
+        ),
+        (tier.clone(), subscribed_at, expires_at),
     );
 }
