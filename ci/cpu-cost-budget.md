@@ -40,12 +40,13 @@ measured-cost trends can be tracked across commits.
 | scout_access   | `batch_contact_players` (5 ids)  | 25,000,000                |
 | scout_access   | `expire_trial_offers` (limit=20) | 25,000,000                |
 
-These starting budgets are deliberately generous placeholders, not measured
-baselines: the environment these were authored in had no Rust toolchain
-available, so `cargo test` could not be run to capture real current costs.
-**Tightening every budget to roughly current-cost-plus-headroom, once a real
-CI run reports actual numbers, is a follow-up — not a blocker for this file
-or the tests existing and being enforced.**
+These budgets are calibrated automatically by `scripts/calibrate-budgets.py`
+from the `cpu-cost-budget-report.txt` CI artifact.  The script adds a
+documented headroom percentage (default 20%) to the latest measured cost.
+To re-calibrate manually:
+  1. Ensure `cpu-cost-budget-report.txt` is present locally (produced by
+     `cargo test --workspace --test cost_budget -- --nocapture`).
+  2. Run: `CALIBRATE_WRITE=1 python scripts/calibrate-budgets.py`
 
 ## Raising a budget
 
