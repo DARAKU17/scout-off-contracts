@@ -3,8 +3,8 @@ mod errors;
 mod events;
 mod types;
 use errors::ScoutAccessError;
-use types::{ContactRecord, DataKey, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
-pub use types::{FeeConfig, FeeConfigHistoryEntry, SubscriptionTier};
+use types::{ContactRecord, DataKey, FeeConfigProposal, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
+pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
@@ -33,6 +33,37 @@ mod progress_contract {
             player_id: u64,
             milestone_ref: u32,
         ) -> Result<ProgressLevel, Error>;
+    }
+}
+
+// Cross-contract client for registration contract, used to verify scout identities
+mod registration_contract {
+    use soroban_sdk::{contractclient, contracterror, contracttype, Address, Env, String};
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct ScoutProfile {
+        pub scout_id: u64,
+        pub wallet: Address,
+        pub region: String,
+        pub verified: bool,
+        pub registered_at: u64,
+    }
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        ScoutNotFound = 12,
+    }
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn get_scout_by_wallet(
+            env: Env,
+            wallet: Address,
+        ) -> Result<ScoutProfile, Error>;
     }
 }
 
@@ -73,13 +104,10 @@ const TRIAL_OFFER_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const MIN_CONTACT_FEE_STROOPS: i128 = 100_000; // 0.01 XLM
 const MIN_SUB_FEE_STROOPS: i128 = 1_000_000; // 0.1 XLM
 
-/// Maximum number of FeeConfig entries retained in on-chain history.
-/// When this cap is reached the oldest entry is evicted (ring-buffer behaviour).
-/// Deliberately small — this is a lightweight middle ground that keeps the
-/// immediately-previous configs readable on-chain without depending on the
-/// off-chain indexer, and without attempting the fuller unbounded ring-buffer
-/// design tracked separately as a Hard-tier item.
-const FEE_CONFIG_HISTORY_CAP: u32 = 5;
+// Fee config proposal activation delay: 7 days (604,800 seconds) at average
+// 5s/ledger ≈ 120,960 ledgers. Scouts have one full week to react to a
+// proposed fee increase before it takes effect.
+const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -171,6 +199,102 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Propose a new fee configuration. If all fees are ≤ current fees (decreases only),
+    /// the config is immediately activated. Otherwise, it is stored as pending and requires
+    /// `activate_fee_config` after a 7-day delay to take effect.
+    pub fn propose_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::validate_fee_config(&fee_config)?;
+
+        // Check if a pending proposal already exists
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingFeeConfig)
+        {
+            return Err(ScoutAccessError::PendingFeeConfigAlreadyExists);
+        }
+
+        let current_config = Self::fee_config(&env);
+        let now = env.ledger().timestamp();
+
+        // Check if this is a pure decrease (all fees lower or equal)
+        let is_decrease_or_no_change = fee_config.contact_fee_stroops <= current_config.contact_fee_stroops
+            && fee_config.basic_sub_stroops <= current_config.basic_sub_stroops
+            && fee_config.pro_sub_stroops <= current_config.pro_sub_stroops
+            && fee_config.elite_sub_stroops <= current_config.elite_sub_stroops;
+
+        if is_decrease_or_no_change {
+            // Immediate activation for decreases
+            env.storage()
+                .instance()
+                .set(&DataKey::FeeConfig, &fee_config);
+
+            // Emit both events in the same transaction
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+            events::fee_config_updated(&env, &admin, &current_config, &fee_config);
+        } else {
+            // Store as pending for increases
+            let proposal = FeeConfigProposal {
+                config: fee_config.clone(),
+                proposed_at: now,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingFeeConfig, &proposal);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingFeeConfig,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+        }
+
+        Ok(())
+    }
+
+    /// Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+    pub fn activate_fee_config(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        // Retrieve the pending proposal
+        let proposal: FeeConfigProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingFeeConfig)
+            .ok_or(ScoutAccessError::NoPendingFeeConfig)?;
+
+        let now = env.ledger().timestamp();
+        let activation_time = proposal
+            .proposed_at
+            .checked_add(FEE_CONFIG_PROPOSAL_DELAY_SECS)
+            .ok_or(ScoutAccessError::Overflow)?;
+
+        // Check that the delay has elapsed
+        if now < activation_time {
+            return Err(ScoutAccessError::FeeConfigProposalNotReady);
+        }
+
+        // Get the currently active config for the event
+        let old_config = Self::fee_config(&env);
+
+        // Move pending to active
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeConfig, &proposal.config);
+
+        // Clear pending state
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingFeeConfig);
+
+        events::fee_config_updated(&env, &admin, &old_config, &proposal.config);
+        Ok(())
+    }
+
     pub fn withdraw_fees(env: Env, to: Address) -> Result<i128, ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -234,6 +358,18 @@ impl ScoutAccessContract {
     /// the initial deployment can use the same verb across contracts.
     pub fn update_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::set_progress_contract(env, addr)
+    }
+
+    /// Wire the registration contract address for Pro-tier scout verification gating.
+    /// Admin only. Can be re-invoked to re-wire the link.
+    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &addr);
+        events::registration_contract_updated(&env, &admin, &addr);
+        Ok(())
     }
 
     /// Emergency refund: admin returns `amount` XLM (stroops) from the
@@ -331,6 +467,26 @@ impl ScoutAccessContract {
                     }
                 }
             }
+        }
+
+        // Sybil resistance: gate Pro-tier subscriptions to verified scouts only.
+        // Basic and Elite tiers remain unrestricted.
+        if tier == SubscriptionTier::Pro {
+            if let Ok(reg_contract_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::RegistrationContract) {
+                let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
+                match reg_client.try_get_scout_by_wallet(&scout) {
+                    Ok(scout_profile) => {
+                        if !scout_profile.verified {
+                            return Err(ScoutAccessError::ScoutNotVerified);
+                        }
+                    }
+                    Err(_) => {
+                        // Scout not found in registration contract; deny Pro-tier access
+                        return Err(ScoutAccessError::ScoutNotVerified);
+                    }
+                }
+            }
+            // If registration contract is not wired, allow Pro-tier subscription (graceful degradation)
         }
 
         let config = Self::fee_config(&env);

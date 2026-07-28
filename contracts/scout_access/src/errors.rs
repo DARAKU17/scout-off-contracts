@@ -70,6 +70,18 @@ pub enum ScoutAccessError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 21,
+
+    // ── Fee config proposal ──
+    /// No pending fee config proposal exists for `activate_fee_config`.
+    NoPendingFeeConfig = 24,
+    /// Pending fee config proposal activation delay has not yet elapsed.
+    FeeConfigProposalNotReady = 25,
+    /// A fee config proposal already exists; must activate or replace it.
+    PendingFeeConfigAlreadyExists = 26,
+
+    // ── Sybil resistance ──
+    /// Scout is not verified; cannot subscribe to Pro tier.
+    ScoutNotVerified = 27,
 }
 
 impl AdminError for ScoutAccessError {

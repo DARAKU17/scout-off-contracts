@@ -696,6 +696,43 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Pause the `approve_milestone` function independently (function-scoped circuit breaker).
+    /// The whole-contract pause still takes precedence; this enables granular control
+    /// when only validator milestone approval needs to be halted (e.g., validator collusion incident).
+    /// All other functions (register_validator, revoke_validator, read queries) remain operational.
+    /// Admin only.
+    pub fn pause_approve_milestone(env: Env) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedApproveMilestone, &true);
+        events::approve_milestone_paused(&env, &admin);
+        Ok(())
+    }
+
+    /// Unpause the `approve_milestone` function.
+    /// Admin only.
+    pub fn unpause_approve_milestone(env: Env) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedApproveMilestone, &false);
+        events::approve_milestone_unpaused(&env, &admin);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM. Admin auth required.
     /// Persistent storage (including Admin) survives this call.
     pub fn upgrade(
@@ -732,6 +769,7 @@ impl VerificationContract {
         evidence_hash: String,
     ) -> Result<u32, VerificationError> {
         Self::require_not_paused(&env)?;
+        Self::require_approve_milestone_not_paused(&env)?;
         validator_wallet.require_auth();
 
         if description.len() > MAX_DESCRIPTION_LEN {
@@ -1570,6 +1608,20 @@ impl VerificationContract {
             .unwrap_or(false)
         {
             return Err(VerificationError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Check that approve_milestone is not paused (function-scoped circuit breaker).
+    /// Independent of the whole-contract pause flag.
+    fn require_approve_milestone_not_paused(env: &Env) -> Result<(), VerificationError> {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedApproveMilestone)
+            .unwrap_or(false)
+        {
+            return Err(VerificationError::ApproveMilestonePaused);
         }
         Ok(())
     }
