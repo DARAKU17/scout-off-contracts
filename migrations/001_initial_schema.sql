@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS players (
     nationality     VARCHAR(128) NOT NULL,
     ipfs_hashes     TEXT[]       NOT NULL DEFAULT '{}',
     level           SMALLINT     NOT NULL DEFAULT 0, -- 0-3
+    deactivated     BOOLEAN      NOT NULL DEFAULT FALSE,
     registered_at   BIGINT       NOT NULL,           -- Unix timestamp
     updated_at      BIGINT       NOT NULL,
     created_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -27,9 +28,10 @@ CREATE INDEX IF NOT EXISTS idx_players_wallet   ON players (wallet);
 -- Scouts
 -- -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS scouts (
-    scout_id        BIGINT PRIMARY KEY,
+    scout_id        BIGINT       PRIMARY KEY,
     wallet          VARCHAR(56)  NOT NULL UNIQUE,
     region          VARCHAR(128) NOT NULL,
+    verified        BOOLEAN      NOT NULL DEFAULT FALSE,
     registered_at   BIGINT       NOT NULL,
     created_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -128,3 +130,13 @@ CREATE TABLE IF NOT EXISTS indexer_cursor (
 
 INSERT INTO indexer_cursor (id, last_ledger) VALUES (1, 0)
 ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------
+-- Retroactive migrations for already-deployed databases
+-- -----------------------------------------------------------------------
+-- These ALTER TABLE statements are idempotent and can be run against an
+-- existing database to add columns introduced after initial deployment.
+
+ALTER TABLE players ADD COLUMN IF NOT EXISTS deactivated BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE scouts ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+
