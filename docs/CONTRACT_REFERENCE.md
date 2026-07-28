@@ -1695,6 +1695,9 @@ greater than zero; either function returns `InvalidInput` otherwise.
 | `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
 | `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
 | `sub_duration_secs` | `u64` | duration in seconds (not a Unix timestamp) | > 0 | `2592000` (30 days = 30 × 24 × 3600) |
+| `pro_contact_limit` | `u32` | count | > 0 | `10` (10 contacts/period) |
+| `trial_offer_escrow_stroops` | `i128` | stroops | > 0 | `500000` (0.05 XLM) |
+| `trial_offer_expiry_secs` | `u64` | duration in seconds | > 0 | `3600` (1 hour) |
 
 **Validation rules:**
 - Every `i128` fee field must be > 0 (zero or negative → `InvalidInput` error code 15).
@@ -1705,6 +1708,8 @@ greater than zero; either function returns `InvalidInput` otherwise.
   `ProContactLimitReached` (code 20) for that scout until their subscription
   renews. **Elite-tier scouts are exempt** from this limit and may contact any
   number of players regardless of `pro_contact_limit`.
+- `trial_offer_escrow_stroops` must be > 0 (zero or negative → `InvalidInput`). This is the XLM amount held in escrow when a scout logs a trial offer.
+- `trial_offer_expiry_secs` must be > 0 (zero → `InvalidInput`). This defines the window within which a player must confirm a trial offer before it expires and the escrow is refunded.
 - There is no enforced upper bound on fee fields, but values larger than the XLM supply
   (≈ 500 000 000 XLM = 5 × 10¹⁵ stroops) will cause `Overflow` errors at fee
   settlement time.
@@ -1758,7 +1763,7 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- initialize \
   --admin $ADMIN_ADDRESS \
   --xlm_token $XLM_TOKEN_ADDRESS \
-  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10}'
+  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10,"trial_offer_escrow_stroops":500000,"trial_offer_expiry_secs":3600}'
 ```
 
 ---
@@ -1859,7 +1864,130 @@ Adjust subscription and contact fee rates. Same validation rules as
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_fee_config \
-  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20,"trial_offer_escrow_stroops":1000000,"trial_offer_expiry_secs":7200}'
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
 ```
 
 ---
@@ -2525,9 +2653,13 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Emitted on successful initialization |
-| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription |
+| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout's very first subscription (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout renews or upgrades an existing subscription (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | (player_id: u64, fee_paid: i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | (player_id: u64, index: u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | (player_id: u64, index: u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | (to: Address, amount: i128, timestamp: u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Admin replacement proposed |
@@ -2535,10 +2667,7 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
-| `fee_config_proposed` | event_name, admin (Address) | (proposed_config: FeeConfig, proposed_at: u64) | New fee configuration proposed (requires activation after 7-day delay if any fees increase) |
-| `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed (becomes active immediately for decreases, or after activation delay for increases) |
-| `subscription_created` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | New subscription purchased (first-ever for this scout) |
-| `subscription_renewed` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | Existing subscription renewed or upgraded |
+| `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed |
 
 #### Diagnostic Events (scout_access)
 
@@ -2734,11 +2863,14 @@ pub struct ContactRecord {
 
 ```rust
 pub struct FeeConfig {
-    pub contact_fee_stroops: i128,   // must be > 0
-    pub basic_sub_stroops: i128,     // must be > 0
-    pub pro_sub_stroops: i128,       // must be > 0
-    pub elite_sub_stroops: i128,     // must be > 0
-    pub sub_duration_secs: u64,      // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub contact_fee_stroops: i128,          // must be > 0
+    pub basic_sub_stroops: i128,            // must be > 0
+    pub pro_sub_stroops: i128,              // must be > 0
+    pub elite_sub_stroops: i128,            // must be > 0
+    pub sub_duration_secs: u64,             // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub pro_contact_limit: u32,             // must be > 0; Elite scouts bypass this cap
+    pub trial_offer_escrow_stroops: i128,   // escrow held per trial offer, must be > 0
+    pub trial_offer_expiry_secs: u64,       // confirmation window in seconds, must be > 0
 }
 ```
 
@@ -2919,11 +3051,13 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Contract initialized |
-| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription |
-| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout |
-| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded |
+| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | player_id (u64), fee_paid (i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | player_id (u64), index (u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | player_id (u64), index (u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | to (Address), amount (i128), timestamp (u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed |

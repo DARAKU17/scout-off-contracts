@@ -147,6 +147,8 @@ pub enum DataKey {
     TrialOffer(u64, u32),
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
+    /// registration contract address for cross-contract scout verification checks
+    RegistrationContract,
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),

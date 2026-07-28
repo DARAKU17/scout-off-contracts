@@ -15,6 +15,7 @@ pub const CONTRACT_PAUSED: &str = "contract_paused";
 pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
 pub const SUBSCRIPTION_REFUNDED: &str = "subscription_refunded";
 pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
+pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
 pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
 pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
 
@@ -147,6 +148,14 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
     env.events().publish(
         (Symbol::new(env, "progress_contract_updated"), admin.clone()),
         progress_contract.clone(),
+    );
+}
+
+/// topics: (event_name, admin)  data: registration_contract
+pub fn registration_contract_updated(env: &Env, admin: &Address, registration_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "registration_contract_updated"), admin.clone()),
+        registration_contract.clone(),
     );
 }
 
