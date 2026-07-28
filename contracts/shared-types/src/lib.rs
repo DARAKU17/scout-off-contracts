@@ -480,6 +480,14 @@ mod tests {
     }
 
     #[test]
+    fn progress_level_ordinals_match_documented_table() {
+        assert_eq!(ProgressLevel::Unverified as u32, 0);
+        assert_eq!(ProgressLevel::VerifiedIdentity as u32, 1);
+        assert_eq!(ProgressLevel::PerformanceMilestones as u32, 2);
+        assert_eq!(ProgressLevel::EliteTier as u32, 3);
+    }
+
+    #[test]
     fn test_validate_cid_v0_accepts_valid() {
         let env = Env::default();
         let cid = s(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB");
