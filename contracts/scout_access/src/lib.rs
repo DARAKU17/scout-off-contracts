@@ -8,7 +8,7 @@ pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{require_admin, validate_cid, ContractHealth};
+use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_add_u64, safe_add_i128, safe_mul_i128}, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
 // The #[contractclient] macro generates a real Client that performs the
@@ -458,10 +458,8 @@ impl ScoutAccessContract {
                     return Err(ScoutAccessError::SubscriptionDowngradeNotAllowed);
                 }
                 if Self::tier_rank(&tier) > Self::tier_rank(&existing.tier) {
-                    let min_next = existing
-                        .subscribed_at
-                        .checked_add(MIN_UPGRADE_INTERVAL_SECS)
-                        .ok_or(ScoutAccessError::Overflow)?;
+                    let min_next = safe_add_u64(existing.subscribed_at, MIN_UPGRADE_INTERVAL_SECS)
+                        .map_err(|_| ScoutAccessError::Overflow)?;
                     if now < min_next {
                         return Err(ScoutAccessError::UpgradeTooSoon);
                     }
@@ -498,9 +496,8 @@ impl ScoutAccessContract {
 
         Self::collect_fee(&env, &scout, fee)?;
 
-        let expires_at = now
-            .checked_add(config.sub_duration_secs)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let expires_at = safe_add_u64(now, config.sub_duration_secs)
+            .map_err(|_| ScoutAccessError::Overflow)?;
 
         let sub = Subscription {
             scout: scout.clone(),
@@ -836,9 +833,7 @@ impl ScoutAccessContract {
             }
             let new_period = ProContactPeriod {
                 period_start: subscription.subscribed_at,
-                count: current_count
-                    .checked_add(1)
-                    .ok_or(ScoutAccessError::Overflow)?,
+                count: safe_add_u32(current_count, 1).map_err(|_| ScoutAccessError::Overflow)?,
             };
             env.storage().persistent().set(&period_key, &new_period);
             env.storage().persistent().extend_ttl(
@@ -934,9 +929,8 @@ impl ScoutAccessContract {
                 .persistent()
                 .has(&DataKey::ContactRecord(player_id, scout.clone()))
             {
-                new_contacts = new_contacts
-                    .checked_add(1)
-                    .ok_or(ScoutAccessError::Overflow)?;
+                new_contacts = safe_add_u32(new_contacts, 1)
+                    .map_err(|_| ScoutAccessError::Overflow)?;
             }
         }
 
@@ -948,10 +942,8 @@ impl ScoutAccessContract {
         Self::check_pro_contact_quota_with_count(&env, &scout, new_contacts)?;
 
         // Single token transfer for all new contacts combined.
-        let total_fee = config
-            .contact_fee_stroops
-            .checked_mul(new_contacts as i128)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let total_fee = safe_mul_i128(config.contact_fee_stroops, new_contacts as i128)
+            .map_err(|_| ScoutAccessError::Overflow)?;
         Self::collect_fee(&env, &scout, total_fee)?;
 
         // Second pass: write contact records and emit events.
@@ -1068,9 +1060,8 @@ impl ScoutAccessContract {
         let rate_key = DataKey::TrialOfferLastSent(scout.clone(), player_id);
         let now = env.ledger().timestamp();
         if let Some(last_sent) = env.storage().persistent().get::<DataKey, u64>(&rate_key) {
-            let next_allowed = last_sent
-                .checked_add(TRIAL_OFFER_COOLDOWN_SECS)
-                .ok_or(ScoutAccessError::Overflow)?;
+            let next_allowed = safe_add_u64(last_sent, TRIAL_OFFER_COOLDOWN_SECS)
+                .map_err(|_| ScoutAccessError::Overflow)?;
             if now < next_allowed {
                 return Err(ScoutAccessError::TrialOfferRateLimited);
             }
@@ -1078,7 +1069,7 @@ impl ScoutAccessContract {
 
         let counter_key = DataKey::TrialCounter(player_id);
         let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
-        let next_index = index.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
+        let next_index = safe_add_u32(index, 1).map_err(|_| ScoutAccessError::Overflow)?;
 
         let offer = TrialOffer {
             player_id,
@@ -1133,9 +1124,8 @@ impl ScoutAccessContract {
             .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
             .ok_or(ScoutAccessError::InvalidInput)?;
         let escrow_amount = fee_cfg.trial_offer_escrow_stroops;
-        let expires_at = now
-            .checked_add(fee_cfg.trial_offer_expiry_secs)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let expires_at = safe_add_u64(now, fee_cfg.trial_offer_expiry_secs)
+            .map_err(|_| ScoutAccessError::Overflow)?;
 
         // #795: actually collect the escrow — without this transfer the
         // TrialEscrow record was a bookkeeping-only promise, and every
@@ -1331,7 +1321,7 @@ impl ScoutAccessContract {
             token::Client::new(&env, &token_addr).transfer(&contract_addr, &scout, &escrow.amount);
             env.storage().persistent().remove(&escrow_key);
             events::trial_offer_expired(&env, player_id, &scout, index);
-            swept = swept.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
+            swept = safe_add_u32(swept, 1).map_err(|_| ScoutAccessError::Overflow)?;
         }
 
         // Entries beyond process_count were never examined this call and
@@ -1768,9 +1758,8 @@ impl ScoutAccessContract {
             .instance()
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0i128);
-        let new_total = current
-            .checked_add(amount)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let new_total = safe_add_i128(current, amount)
+            .map_err(|_| ScoutAccessError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &new_total);

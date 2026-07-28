@@ -2370,15 +2370,11 @@ true, the first matching check in this list wins):
 | 8 | Trial counter increment overflows | `Overflow` (10) |
 | 9 | Cross-contract `advance_level` fails for a reason other than `AlreadyAtMaxLevel` | `ProgressCallFailed` (14) |
 
-> ⚠️ **Design note — missing `require_initialized` check**: `log_trial_offer`
-> does **not** call `require_initialized`, unlike `subscribe`, `pay_to_contact`,
-> and `batch_contact_players`, which all call it immediately after
-> `require_not_paused`. This is an asymmetry in the current implementation.
-> In practice the function cannot succeed on an uninitialized contract (the
-> subscription lookup returns `ScoutNotSubscribed` before any write occurs), but
-> callers should not rely on this indirect guard — a dedicated initialized check
-> would be safer and consistent. This should be addressed in a follow-up
-> contract upgrade. See [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized).
+> ✅ **Design note — `require_initialized` check added**: `log_trial_offer`
+> now calls `require_initialized` immediately after `require_not_paused`,
+> matching `subscribe`, `pay_to_contact`, and `batch_contact_players`.
+> Fixed by the full guard-ordering audit (PR feat/797-798-801-835). See
+> [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized--resolved).
 
 > **Design note — `InvalidInput` before subscription check (Priority 3 before 4)**:
 > `details_hash` is validated before the subscription is looked up. This means
@@ -3201,42 +3197,17 @@ current behavior, why it may be suboptimal, and the recommended change.
 
 ---
 
-### 1. `log_trial_offer` is missing `require_initialized`
+### 1. `log_trial_offer` is missing `require_initialized` — ✅ RESOLVED
 
-**Current behavior**: `log_trial_offer` does not call `require_initialized`,
-unlike every other state-changing function in this contract (`subscribe`,
-`pay_to_contact`, and `batch_contact_players` all call it immediately after
-`require_not_paused`).
+**Resolved in**: PR feat/797-798-801-835 (full guard-ordering audit).
 
-**Why this matters**: On an uninitialized contract, `log_trial_offer` does not
-return `NotInitialized`. Instead it falls through to the subscription lookup,
-which returns `ScoutNotSubscribed` because no storage has been written. This
-means an uninitialized contract appears to a caller as if the scout simply
-has no subscription — an indirect, misleading error rather than the definitive
-"contract not set up" signal.
-
-**When it can surface**: Only on a freshly deployed contract that has never had
-`initialize` called. In production the initialize-then-use deployment flow
-makes this unlikely, but a mis-wired deployment or a test environment that
-calls `log_trial_offer` before `initialize` would observe `ScoutNotSubscribed`
-instead of `NotInitialized`.
-
-**Recommended fix**: Add `Self::require_initialized(&env)?;` immediately after
-`Self::require_not_paused(&env)?;` in `log_trial_offer`, matching the ordering
-of the other three state-changing functions. This is a one-line change, is
-backward-compatible (it makes an already-failing path fail with a more specific
-error), and requires no storage or API changes.
-
-```rust
-// Proposed change in log_trial_offer (contracts/scout_access/src/lib.rs):
-Self::bump_instance_ttl(&env);
-Self::require_not_paused(&env)?;
-Self::require_initialized(&env)?;   // ← add this line
-scout.require_auth();
-```
-
-**Risk**: None. On an initialized contract `require_initialized` always
-succeeds, so existing callers are unaffected.
+All state-changing functions in all four contracts — including `log_trial_offer`,
+`register_player`, `update_profile`, `register_scout`, `admin_seed_player`,
+`admin_seed_scout`, `register_validator`, `batch_register_validators`,
+`approve_milestone`, `resolve_dispute`, and `reset_player_level` — now call
+`require_not_paused` before `require_initialized`, matching the dominant
+convention. `scripts/check-guard-ordering.sh` (wired into the CI lint job)
+enforces this ordering automatically on every future PR.
 
 ---
 
