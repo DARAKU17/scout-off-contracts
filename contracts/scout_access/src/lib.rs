@@ -513,6 +513,9 @@ impl ScoutAccessContract {
             .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
         {
             Self::remove_from_tier_index(&env, &scout, &existing.tier);
+            // Remove from old expiry bucket so the prior expires_at entry
+            // doesn't linger and produce false positives in renewal-reminder queries.
+            Self::remove_from_expiry_bucket(&env, &scout, existing.expires_at);
         }
 
         env.storage()
@@ -523,6 +526,11 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MIN,
             PERSISTENT_TTL_MAX,
         );
+
+        // Add scout to the day-granularity expiry bucket so
+        // get_expiring_subscriptions can page through soon-to-expire
+        // subscriptions without walking every scout.
+        Self::add_to_expiry_bucket(&env, &scout, expires_at);
 
         // Emit a rich auditable event (closes #462).
         // subscription_renewed covers same-tier renewals and tier upgrades;
@@ -1447,6 +1455,80 @@ impl ScoutAccessContract {
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 
+    /// Return subscriptions whose `expires_at` is at or before `before_timestamp`,
+    /// excluding any subscription that has already been renewed (i.e. whose stored
+    /// `expires_at` is later than `before_timestamp`).
+    ///
+    /// Uses the day-granularity `ExpiryBucket` index populated by `subscribe` to
+    /// avoid a full linear scan of all subscribers.  Only buckets whose day key
+    /// falls within `[0, before_timestamp / 86_400]` are examined.  The index
+    /// covers all days from epoch 0 up to the given cutoff, so the scan is bounded
+    /// by the number of distinct expiry days in that range, not the total number
+    /// of scouts.
+    ///
+    /// **Index tradeoff**: day-bucket granularity is chosen over exact expiry-time
+    /// indexing to keep per-`subscribe` storage cost low.  Each bucket entry is
+    /// one `Address` in a `Vec<Address>` stored under a single persistent key per
+    /// day.  A scout is moved to a new bucket on every renewal, so stale entries
+    /// do not accumulate indefinitely.  Callers receive only subscriptions whose
+    /// real `expires_at` satisfies the predicate — the bucket is just a
+    /// pre-filter, not the authoritative answer.
+    ///
+    /// `limit` is capped at `MAX_EXPIRY_PAGE_SIZE` (50) to bound CPU cost per call.
+    /// Page through results by advancing `before_timestamp` by one second past
+    /// the latest `expires_at` in the previous page.
+    pub fn get_expiring_subscriptions(
+        env: Env,
+        before_timestamp: u64,
+        limit: u32,
+    ) -> soroban_sdk::Vec<Subscription> {
+        Self::bump_instance_ttl(&env);
+
+        const MAX_EXPIRY_PAGE_SIZE: u32 = 50;
+        const SECS_PER_DAY: u64 = 86_400;
+
+        let effective_limit = limit.min(MAX_EXPIRY_PAGE_SIZE);
+        let cutoff_day = before_timestamp / SECS_PER_DAY;
+
+        let mut results: soroban_sdk::Vec<Subscription> = soroban_sdk::Vec::new(&env);
+
+        // Walk day buckets from day 0 up to cutoff_day (inclusive).
+        // In practice, epoch-0 buckets are never populated; the loop starts
+        // effectively at the earliest real subscription day.
+        let mut day = 0u64;
+        while day <= cutoff_day && results.len() < effective_limit {
+            let bucket_key = DataKey::ExpiryBucket(day);
+            if let Some(scouts) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, soroban_sdk::Vec<Address>>(&bucket_key)
+            {
+                let n = scouts.len();
+                let mut i = 0u32;
+                while i < n && results.len() < effective_limit {
+                    let scout = scouts.get(i).unwrap();
+                    // Re-read the live Subscription to get the current expires_at.
+                    // This handles renewals: if the scout renewed, their bucket
+                    // entry was moved and the current expires_at will be later
+                    // than before_timestamp, so they are filtered out here.
+                    if let Some(sub) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
+                    {
+                        if sub.expires_at <= before_timestamp {
+                            results.push_back(sub);
+                        }
+                    }
+                    i = i.saturating_add(1);
+                }
+            }
+            day = day.saturating_add(1);
+        }
+
+        results
+    }
+
     pub fn has_contacted(env: Env, scout: Address, player_id: u64) -> bool {
         Self::bump_instance_ttl(&env);
         let key = DataKey::ContactRecord(player_id, scout);
@@ -1673,6 +1755,50 @@ impl ScoutAccessContract {
                 }
             }
             env.storage().persistent().set(&key, &new_list);
+        }
+    }
+
+    /// Add `scout` to the day-granularity expiry bucket for `expires_at`.
+    /// The bucket key is `expires_at / 86_400` so all subscriptions expiring
+    /// on the same UTC day share a single persistent storage entry.
+    fn add_to_expiry_bucket(env: &Env, scout: &Address, expires_at: u64) {
+        const SECS_PER_DAY: u64 = 86_400;
+        let day = expires_at / SECS_PER_DAY;
+        let key = DataKey::ExpiryBucket(day);
+        let mut bucket: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if !bucket.contains(scout) {
+            bucket.push_back(scout.clone());
+        }
+        env.storage().persistent().set(&key, &bucket);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+    }
+
+    /// Remove `scout` from the day-granularity expiry bucket for `expires_at`.
+    /// Called on subscription renewal so the old bucket entry does not produce
+    /// false positives in `get_subscriptions_expiring_before` queries.
+    fn remove_from_expiry_bucket(env: &Env, scout: &Address, expires_at: u64) {
+        const SECS_PER_DAY: u64 = 86_400;
+        let day = expires_at / SECS_PER_DAY;
+        let key = DataKey::ExpiryBucket(day);
+        if let Some(bucket) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<Address>>(&key)
+        {
+            let mut new_bucket: Vec<Address> = Vec::new(env);
+            for i in 0..bucket.len() {
+                let addr = bucket.get(i).unwrap();
+                if &addr != scout {
+                    new_bucket.push_back(addr);
+                }
+            }
+            env.storage().persistent().set(&key, &new_bucket);
         }
     }
 

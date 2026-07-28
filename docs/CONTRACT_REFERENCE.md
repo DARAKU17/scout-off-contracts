@@ -2682,6 +2682,25 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
+#### `get_expiring_subscriptions(before_timestamp: u64, limit: u32) -> Vec<Subscription>`
+
+Return subscriptions whose `expires_at` is at or before `before_timestamp`.
+This query uses a day-granularity expiry bucket index to avoid scanning every
+subscription, and it filters renewals by re-checking the live stored
+`Subscription.expires_at`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_expiring_subscriptions --before_timestamp 1700000000 --limit 50
+```
+
+---
+
 #### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
 
 Return the full `ContactRecord` for a `(scout, player_id)` pair, or `None`
