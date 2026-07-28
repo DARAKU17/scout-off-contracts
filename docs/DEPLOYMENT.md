@@ -131,7 +131,27 @@ chmod +x testnet/seed.sh
 ./testnet/seed.sh
 ```
 
-### 6. Run the database migration
+### 6. Verify deployment health and wiring (recommended)
+
+After deploying and initializing, run the combined readiness check to confirm
+all four contracts are healthy (initialized and not paused) and all five
+cross-contract wiring links are correctly set before routing any traffic:
+
+```bash
+chmod +x scripts/full-readiness-check.sh
+./scripts/full-readiness-check.sh testnet
+```
+
+This prints a combined summary table with ✅/❌/⚠️ status for every health and
+wiring check in a single command.  If any check fails, the script exits
+non-zero and names the failing check explicitly.
+
+The two underlying scripts remain available for targeted debugging:
+
+- `scripts/health-check.sh testnet` — init/pause status only
+- `scripts/verify-cross-contract-wiring.sh testnet` — wiring links only
+
+### 7. Run the database migration
 
 Copy the migration files to your backend repo and run them against PostgreSQL in order:
 
@@ -243,6 +263,7 @@ replace `0` with the desired starting ledger sequence number.
 - [ ] Run `./scripts/deploy.sh mainnet`
 - [ ] Run `./scripts/initialize.sh mainnet`
 - [ ] Verify all contract IDs in `.env.contracts`
+- [ ] **Run `./scripts/full-readiness-check.sh mainnet`** — confirms all four contracts are healthy and all five wiring links are set (recommended one-command post-deploy check)
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
 - [ ] Review [docs/STORAGE_COST_MODEL.md](STORAGE_COST_MODEL.md) and confirm the projected monthly storage rent is within budget at expected launch-day scale. Re-measure rent figures if the Stellar fee schedule has changed since the document's last-reviewed date.
 

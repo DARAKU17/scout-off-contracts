@@ -86,6 +86,7 @@ jobs:
           shellcheck scripts/generate-bindings.sh
           shellcheck scripts/check-bindings.sh
           shellcheck scripts/health-check.sh
+          shellcheck scripts/full-readiness-check.sh
           shellcheck scripts/smoke-test.sh
           shellcheck scripts/rollback.sh
           shellcheck scripts/emergency-pause.sh
@@ -275,6 +276,12 @@ jobs:
 
       - name: Run health-check.sh against local sandbox
         run: bash scripts/health-check.sh local
+
+      - name: Run full-readiness-check.sh (combined health + wiring verification)
+        # This is the recommended one-command post-deploy check (combines
+        # health-check.sh and verify-cross-contract-wiring.sh). The two
+        # individual scripts remain available for targeted debugging.
+        run: bash scripts/full-readiness-check.sh local
 
       - name: Run smoke-test.sh against local sandbox
         run: |
