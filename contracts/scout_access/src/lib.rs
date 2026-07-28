@@ -47,7 +47,18 @@ mod registration_contract {
         pub wallet: Address,
         pub region: String,
         pub verified: bool,
+        pub verification: ScoutVerificationRecord,
         pub registered_at: u64,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct ScoutVerificationRecord {
+        pub verified: bool,
+        pub verified_by: Option<Address>,
+        pub verified_at: Option<u64>,
+        pub evidence_ref: Option<String>,
+        pub method: Option<String>,
     }
 
     #[contracterror]
@@ -108,6 +119,12 @@ const MIN_SUB_FEE_STROOPS: i128 = 1_000_000; // 0.1 XLM
 // 5s/ledger ≈ 120,960 ledgers. Scouts have one full week to react to a
 // proposed fee increase before it takes effect.
 const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
+
+// #826: Bounded on-chain fee config history. 5 entries is enough to cover the
+// immediate past plus the pending proposal window (7 days), while keeping the
+// storage footprint fixed and predictable regardless of how many times fees
+// are updated over the contract's lifetime.
+const FEE_CONFIG_HISTORY_CAP: usize = 5;
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -474,7 +491,7 @@ impl ScoutAccessContract {
                 let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
                 match reg_client.try_get_scout_by_wallet(&scout) {
                     Ok(scout_profile) => {
-                        if !scout_profile.verified {
+                        if !scout_profile.verification.verified {
                             return Err(ScoutAccessError::ScoutNotVerified);
                         }
                     }

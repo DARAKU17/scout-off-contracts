@@ -572,3 +572,69 @@ with open(path, 'w') as f:
           name: contract-abis-${{ github.sha }}
           path: abi/*.json
           if-no-files-found: error
+
+  budget-calibration:
+    name: Budget Calibration
+    runs-on: ubuntu-latest
+    needs: [test, abi-export]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ABI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-abis-${{ github.sha }}
+          path: abi/
+
+      - name: Download CPU-cost budget report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cpu-cost-budget-${{ github.sha }}
+          path: .
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run budget calibration
+        run: |
+          set -euo pipefail
+          python scripts/calibrate-budgets.py --headroom 0.20
+
+      - name: Check for drift between measured and budgeted values
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json, sys
+
+          with open("abi/wasm-sizes.json") as f:
+              measured = json.load(f)
+          with open("ci/wasm-size-budget.json") as f:
+              budget = json.load(f)["budgets"]
+
+          failed = []
+          for contract, cap in sorted(budget.items()):
+              size = measured.get(contract)
+              if size is None:
+                  failed.append(f"{contract}: no measured size found")
+                  continue
+              headroom = cap - size
+              pct = (headroom / cap) * 100 if cap else 0
+              print(f"  {contract:<14} measured={size:>8}  budget={cap:>8}  headroom={headroom:>8}  ({pct:.1f}%)")
+              if size > cap:
+                  failed.append(
+                      f"{contract}: measured {size} bytes exceeds budget {cap} bytes"
+                  )
+
+          if failed:
+              print("")
+              print("FAIL: measured values exceed current budgets:")
+              for msg in failed:
+                  print(f"  - {msg}")
+              sys.exit(1)
+
+          print("")
+          print("All measured values are within budget.")
+          PYEOF

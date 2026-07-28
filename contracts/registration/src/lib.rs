@@ -444,7 +444,13 @@ impl RegistrationContract {
             scout_id,
             wallet: wallet.clone(),
             region,
-            verified: false,
+            verification: ScoutVerificationRecord {
+                verified: false,
+                verified_by: None,
+                verified_at: None,
+                evidence_ref: None,
+                method: None,
+            },
             registered_at: env.ledger().timestamp(),
         };
 
@@ -556,6 +562,13 @@ impl RegistrationContract {
             wallet: wallet.clone(),
             region,
             verified,
+            verification: ScoutVerificationRecord {
+                verified,
+                verified_by: if verified { Some(admin.clone()) } else { None },
+                verified_at: if verified { Some(env.ledger().timestamp()) } else { None },
+                evidence_ref: None,
+                method: if verified { Some(String::from_str(&env, "admin_manual")) } else { None },
+            },
             registered_at,
         };
 
@@ -688,12 +701,37 @@ impl RegistrationContract {
             .persistent()
             .get(&DataKey::Scout(scout_id))
             .ok_or(ScoutChainError::ScoutNotFound)?;
+        let admin = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .ok_or(ScoutChainError::NotInitialized)?;
+        profile.verification = ScoutVerificationRecord {
+            verified: true,
+            verified_by: Some(admin),
+            verified_at: Some(env.ledger().timestamp()),
+            evidence_ref: None,
+            method: Some(String::from_str(&env, "admin_manual")),
+        };
         profile.verified = true;
         env.storage()
             .persistent()
             .set(&DataKey::Scout(scout_id), &profile);
         events::scout_verified(&env, scout_id, &profile.wallet);
         Ok(())
+    }
+
+    /// Get the structured verification record for a scout by ID.
+    pub fn get_scout_verification(
+        env: Env,
+        scout_id: u64,
+    ) -> Result<ScoutVerificationRecord, ScoutChainError> {
+        let profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        Ok(profile.verification)
     }
 
     pub fn get_player_count(env: Env) -> u64 {
@@ -2299,7 +2337,7 @@ mod tests {
         assert_eq!(scout_id, 11u64);
         let scout = client.get_scout(&11u64);
         assert_eq!(scout.wallet, wallet);
-        assert!(scout.verified);
+        assert!(scout.verification.verified);
     }
 
     // -------------------------------------------------------------------------
@@ -2393,7 +2431,7 @@ mod tests {
         let scout_id = client.register_scout(&wallet, &region);
 
         let scout = client.get_scout(&scout_id);
-        assert!(!scout.verified);
+        assert!(!scout.verification.verified);
     }
 
     #[test]
@@ -2409,7 +2447,7 @@ mod tests {
         client.verify_scout(&scout_id);
 
         let scout = client.get_scout(&scout_id);
-        assert!(scout.verified);
+        assert!(scout.verification.verified);
     }
 
     // -------------------------------------------------------------------------
@@ -2906,5 +2944,54 @@ mod tests {
         assert_eq!(profile_updated.vitals.region, vitals_max.region);
         assert_eq!(profile_updated.vitals.nationality, vitals_max.nationality);
         assert_eq!(profile_updated.vitals.age, vitals_max.age);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #825: Structured scout verification record
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_scout_populates_structured_record() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        let before = client.get_scout(&scout_id);
+        assert!(!before.verification.verified);
+        assert!(before.verification.verified_by.is_none());
+        assert!(before.verification.verified_at.is_none());
+
+        client.verify_scout(&scout_id);
+
+        let after = client.get_scout(&scout_id);
+        assert!(after.verification.verified);
+        assert!(after.verification.verified_by.is_some());
+        assert!(after.verification.verified_at.is_some());
+        assert_eq!(after.verification.method, Some(String::from_str(&env, "admin_manual")));
+    }
+
+    #[test]
+    fn test_get_scout_verification_exposes_record() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        let record = client.get_scout_verification(&scout_id);
+        assert!(!record.verified);
+        assert!(record.verified_by.is_none());
+
+        client.verify_scout(&scout_id);
+
+        let record = client.get_scout_verification(&scout_id);
+        assert!(record.verified);
+        assert!(record.verified_by.is_some());
     }
 }

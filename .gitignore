@@ -50,3 +50,18 @@ pnpm-lock.yaml
 
 # Log files
 *.log
+
+# Test snapshots
+*.snap
+*.snap.new
+**/__snapshots__/
+**/snapshots/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Calibration artifacts (local only)
+calibration-report.json
+budget-drift.json
