@@ -7,6 +7,9 @@ Cargo.lock
 .env.contracts
 .env.local
 
+# Migration state exports (may contain player PII) — never commit these
+migration-export/
+
 # Optimized WASM outputs
 *.optimized.wasm
 *.wasm
