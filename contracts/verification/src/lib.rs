@@ -32,10 +32,6 @@ const MAX_CREDENTIALS_LEN: u32 = 256;
 const MIN_CREDENTIALS_LEN: u32 = 10;
 const MAX_GLOBAL_MILESTONE_INDEX: u32 = 500;
 
-// Persistent storage TTL bump for milestone records.
-const PERSISTENT_TTL_MIN: u32 = 500;
-const PERSISTENT_TTL_MAX: u32 = 2_000;
-
 /// Maximum number of simultaneously registered validators.
 /// Increase requires a contract upgrade because the ValidatorVector entry
 /// is bounded by Soroban's 64 KB per-entry limit.
@@ -796,8 +792,9 @@ impl VerificationContract {
             .persistent()
             .extend_ttl(&counter_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
-        // Mark the evidence hash as globally used
-        env.storage().persistent().set(&evidence_used_key, &true);
+        // Mark the evidence hash as globally used, storing which milestone
+        // consumed it so get_evidence_hash_usage can surface the details.
+        env.storage().persistent().set(&evidence_used_key, &(player_id, next_index));
         // Keep-alive: extend TTL for evidence uniqueness so the same evidence
         // cannot be reused after archival.
         env.storage()
@@ -972,6 +969,25 @@ impl VerificationContract {
             .persistent()
             .get(&DataKey::MilestoneCounter(player_id))
             .unwrap_or(0u32)
+    }
+
+    /// Return which milestone, if any, has already consumed the given evidence hash.
+    ///
+    /// Returns `Some((player_id, milestone_index))` if the hash was used in a
+    /// prior `approve_milestone` call, or `None` if the hash is still available.
+    /// This reads the same storage entry that `approve_milestone`'s
+    /// `DuplicateEvidence` check consults, so it gives an exact preview of
+    /// whether a given CID will be rejected before you attempt the call.
+    ///
+    /// See `docs/CONTRACT_REFERENCE.md` — `get_evidence_hash_usage` for the full
+    /// function reference, and `DuplicateEvidence` (error 16) for the condition
+    /// this function helps diagnose in advance.
+    pub fn get_evidence_hash_usage(
+        env: Env,
+        evidence_hash: String,
+    ) -> Option<(u64, u32)> {
+        let key = DataKey::EvidenceUsed(evidence_hash);
+        env.storage().persistent().get(&key)
     }
 
     pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
@@ -3464,4 +3480,54 @@ mod tests {
         let statuses = client.get_validator_statuses(&wallets);
         assert_eq!(statuses.len(), 0);
     }
+
+    /// `get_evidence_hash_usage` returns None for an unused evidence hash,
+    /// and returns Some((player_id, milestone_index)) after that hash is
+    /// consumed by `approve_milestone`, reflecting the same storage that
+    /// the DuplicateEvidence check consults.
+    #[test]
+    fn test_get_evidence_hash_usage_before_and_after_approve() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+
+        let evidence = String::from_str(&env, VALID_CID_V0);
+
+        // Before approval: evidence hash is unused → None
+        assert_eq!(client.get_evidence_hash_usage(&evidence), None);
+
+        // Approve a milestone using this evidence hash
+        let player_id = 1u64;
+        let milestone_idx = client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Identity verified"),
+            &evidence,
+        );
+
+        // After approval: get_evidence_hash_usage returns (player_id, milestone_index)
+        let usage = client.get_evidence_hash_usage(&evidence);
+        assert_eq!(usage, Some((player_id, milestone_idx)));
+
+        // A second attempt to approve with the same evidence hash is rejected
+        let result = client.try_approve_milestone(
+            &validator,
+            &2u64,
+            &String::from_str(&env, "Another milestone"),
+            &evidence,
+        );
+        // DuplicateEvidence error is code 16
+        assert_eq!(result, Err(Ok(VerificationError::DuplicateEvidence)));
+
+        // Usage record is unchanged: still points to the first milestone
+        assert_eq!(client.get_evidence_hash_usage(&evidence), Some((player_id, milestone_idx)));
+
+        // A completely different evidence hash is still unused
+        let evidence2 = String::from_str(&env, VALID_CID_V0_2);
+        assert_eq!(client.get_evidence_hash_usage(&evidence2), None);
+    }
 }
+
