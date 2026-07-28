@@ -6,9 +6,13 @@ pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PlayerVitals {
+    /// Player age in years at the time the profile was last written.
     pub age: u32,
+    /// Player position label used for discovery filtering.
     pub position: String,
+    /// Player region used for scout discovery filtering.
     pub region: String,
+    /// Player nationality label displayed in profile results.
     pub nationality: String,
 }
 
@@ -16,12 +20,17 @@ pub struct PlayerVitals {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StoredPlayerProfile {
+    /// Unique player identifier assigned by the registration contract.
     pub player_id: u64,
+    /// Player wallet that owns and can update this profile.
     pub wallet: Address,
+    /// Player vitals stored with the profile.
     pub vitals: PlayerVitals,
     /// IPFS/Arweave CIDs for highlight reels and photos
     pub ipfs_hashes: Vec<String>,
+    /// Ledger timestamp when the player was first registered, in Unix seconds.
     pub registered_at: u64,
+    /// Ledger timestamp when the profile was last updated, in Unix seconds.
     pub updated_at: u64,
 }
 
@@ -31,13 +40,19 @@ pub struct StoredPlayerProfile {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PlayerProfile {
+    /// Unique player identifier assigned by the registration contract.
     pub player_id: u64,
+    /// Player wallet that owns and can update this profile.
     pub wallet: Address,
+    /// Player vitals stored with the profile.
     pub vitals: PlayerVitals,
     /// IPFS/Arweave CIDs for highlight reels and photos
     pub ipfs_hashes: Vec<String>,
+    /// Current player level loaded from the progress contract at read time.
     pub level: ProgressLevel,
+    /// Ledger timestamp when the player was first registered, in Unix seconds.
     pub registered_at: u64,
+    /// Ledger timestamp when the profile was last updated, in Unix seconds.
     pub updated_at: u64,
 }
 
@@ -45,9 +60,13 @@ pub struct PlayerProfile {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PlayerSummary {
+    /// Unique player identifier for fetching the full profile.
     pub player_id: u64,
+    /// Player vitals exposed for scout discovery.
     pub vitals: PlayerVitals,
+    /// Current player level loaded from the progress contract at read time.
     pub level: ProgressLevel,
+    /// Ledger timestamp when the profile was last updated, in Unix seconds.
     pub updated_at: u64,
 }
 
@@ -56,20 +75,34 @@ pub struct PlayerSummary {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FilterResult {
+    /// Page of player profiles matching the supplied filter criteria.
     pub profiles: Vec<PlayerProfile>,
     /// Pass this value as `cursor` in the next call to continue pagination.
     /// A value of `0` means there are no further results.
     pub next_cursor: u64,
 }
 
+/// Direct status for a registered player.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlayerStatus {
+    Active,
+    Deactivated,
+}
+
 /// Scout profile stored on-chain
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ScoutProfile {
+    /// Unique scout identifier assigned by the registration contract.
     pub scout_id: u64,
+    /// Scout wallet that owns this profile.
     pub wallet: Address,
+    /// Scout operating region used for profile display and discovery context.
     pub region: String,
+    /// Whether the scout has been verified by the platform.
     pub verified: bool,
+    /// Ledger timestamp when the scout was registered, in Unix seconds.
     pub registered_at: u64,
 }
 
@@ -78,6 +111,9 @@ pub struct ScoutProfile {
 pub enum DataKey {
     /// Admin wallet address authorized to manage validators and fees
     Admin,
+    /// Proposed replacement admin. Set by `propose_admin` and removed after
+    /// the proposed address proves control by calling `accept_admin`.
+    PendingAdmin,
     /// Boolean flag indicating if contract has been initialized
     Initialized,
     /// Boolean flag indicating if contract is paused (circuit breaker)
@@ -98,8 +134,20 @@ pub enum DataKey {
     PlayerIndex,
     /// Address of the progress contract allowed to call set_player_level
     ProgressContract,
+    /// Explicit player level override used for admin-seeded players or
+    /// progress updates that should be visible to reads even before a progress
+    /// contract is wired.
+    PlayerLevel(u64),
     /// Composite index: (ProgressLevel, region) → Vec<u64> of player IDs.
     /// Used by `filter_players` for combined level+region queries so only
     /// matching players are loaded, avoiding a full scan of `PlayerIndex`.
     PlayersByLevelRegion(ProgressLevel, String),
+    /// Per-level sub-index: ProgressLevel → Vec<u64> of player IDs.
+    /// Primary lookup path for level-filtered queries without a region constraint.
+    /// Falls back to `PlayerIndex` only when no level filter is specified.
+    PlayersByLevel(ProgressLevel),
+    /// Deactivation flag for a player. When present and `true`, the player is
+    /// hidden from `filter_players` results while their profile and history are
+    /// fully preserved. Set by `deactivate_player`, cleared by `reactivate_player`.
+    PlayerDeactivated(u64),
 }
