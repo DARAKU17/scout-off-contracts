@@ -132,8 +132,8 @@ fn build_harness() -> ChaosHarness {
     // --- Register validators ---
     let v0 = Address::generate(&env);
     let v1 = Address::generate(&env);
-    verification.register_validator(&v0, &String::from_str(&env, "UEFA-B-License-A"));
-    verification.register_validator(&v1, &String::from_str(&env, "UEFA-B-License-B"));
+    verification.register_validator(&v0, &String::from_str(&env, "UEFA-B-License-A"), &Vec::new(&env));
+    verification.register_validator(&v1, &String::from_str(&env, "UEFA-B-License-B"), &Vec::new(&env));
 
     // --- Register scouts (Pro and Elite) ---
     let scout_pro = Address::generate(&env);

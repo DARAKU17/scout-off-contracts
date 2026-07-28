@@ -82,13 +82,13 @@ fn seed(h: &Harness) -> Seeded {
         &1u64,
         &String::from_str(&h.env, "scored"),
         &String::from_str(&h.env, CID_1),
-    );
+        &None);
     h.verification.approve_milestone(
         &validator,
         &2u64,
         &String::from_str(&h.env, "assisted"),
         &String::from_str(&h.env, CID_2),
-    );
+        &None);
 
     // Initial progress-contract wiring (sets the one-time ProgressContractSet
     // guard flag in instance storage).

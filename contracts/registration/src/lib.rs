@@ -2704,7 +2704,7 @@ mod tests {
 
         // 9. Register validator in verification contract
         let validator = Address::generate(&env);
-        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
 
         // 10. Approve milestone via verification contract (this triggers the cross-contract flow)
         ver_client.approve_milestone(
