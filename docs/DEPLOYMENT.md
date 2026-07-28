@@ -366,6 +366,8 @@ of an authorization asymmetry between the two data categories:
 
   > Note on levels: the registration contract does **not** store a player's level — the progress contract is the source of truth (`resolve_level` / `set_player_level`). The exported `PlayerProfile` already carries the `level` field resolved from the old progress contract, so it is captured in the export and re-seeded through `admin_seed_player`.
 
+- **In-flight milestone disputes — not replayed today.** `scripts/replay-state.sh` currently exports and replays validators, players, scouts, and player level data only. Milestone disputes filed on the old verification contract but not yet resolved are not part of the replay export, so operators must treat open disputes as a known migration gap and handle them manually during cutover.
+
 #### Testing a migration against the local sandbox
 
 `scripts/migrate-contract-smoke-test.sh` exercises the whole path

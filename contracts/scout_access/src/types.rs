@@ -70,9 +70,14 @@ pub struct ProContactPeriod {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrialEscrow {
-    /// Escrowed trial-offer amount in stroops.
+    /// Escrowed trial-offer amount in stroops, set from
+    /// `FeeConfig.trial_offer_escrow_stroops` when `log_trial_offer` creates
+    /// the escrow.
     pub amount: i128,
-    /// Ledger timestamp after which the escrow may be expired, in Unix seconds.
+    /// Ledger timestamp deadline, in Unix seconds, computed as the current
+    /// ledger timestamp plus `FeeConfig.trial_offer_expiry_secs`; checked by
+    /// `confirm_trial_offer` when deciding whether the trial offer is still
+    /// valid.
     pub expires_at: u64,
 }
 

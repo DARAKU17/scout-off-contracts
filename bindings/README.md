@@ -153,3 +153,4 @@ bindings/*/node_modules/
 | `Cannot find module '@stellar/stellar-sdk'` | `npm install` not run after generation | `cd bindings/<name> && npm install` |
 | `dist/` missing | `npm run build` not run | `cd bindings/<name> && npm run build` |
 | Stale types after contract change | Contract redeployed but bindings not regenerated | `./scripts/generate-bindings.sh testnet` then rebuild |
+| Wrong `stellar-cli` version | Local CLI does not match the pinned version | Install the pinned version in [`docs/CONTRIBUTING.md`](../docs/CONTRIBUTING.md#installing-the-pinned-stellar-cli-version) |
