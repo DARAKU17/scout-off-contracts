@@ -3824,4 +3824,140 @@ mod tests {
         assert_eq!(report.distinct_players.len(), 0);
         assert_eq!(report.status, types::ValidatorStatus::Active);
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #871: get_disputes_for_validator
+    // -------------------------------------------------------------------------
+
+    /// Confirms that get_disputes_for_validator returns only the disputed subset
+    /// of a validator's milestones, correctly excluding non-disputed ones, across
+    /// a validator with a mix of both.
+    #[test]
+    fn test_get_disputes_for_validator_returns_only_disputed_subset() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        // Approve 3 milestones for different players
+        let player1: u64 = 1;
+        let player2: u64 = 2;
+        let player3: u64 = 3;
+
+        let idx1 = client.approve_milestone(
+            &validator, &player1,
+            &String::from_str(&env, "Speed test"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let _idx2 = client.approve_milestone(
+            &validator, &player2,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let idx3 = client.approve_milestone(
+            &validator, &player3,
+            &String::from_str(&env, "Trial assessment"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+
+        // File disputes on milestone 1 (player1) and milestone 3 (player3).
+        // Milestone 2 (player2) is intentionally left undisputed.
+        let disputer = Address::generate(&env);
+        client.file_dispute(
+            &disputer, &player1, &idx1,
+            &String::from_str(&env, "Evidence questionable"),
+        );
+        client.file_dispute(
+            &disputer, &player3, &idx3,
+            &String::from_str(&env, "Conflict of interest"),
+        );
+
+        // get_disputes_for_validator must return exactly the 2 disputed milestones.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 2, "expected exactly 2 disputes");
+
+        // Verify each returned record belongs to the expected player/milestone.
+        let has_player1 = disputed.iter().any(|d| d.player_id == player1);
+        let has_player3 = disputed.iter().any(|d| d.player_id == player3);
+        let has_player2 = disputed.iter().any(|d| d.player_id == player2);
+        assert!(has_player1, "dispute for player1 missing");
+        assert!(has_player3, "dispute for player3 missing");
+
+        // Confirm the non-disputed milestone (player2) is absent.
+        assert!(!has_player2, "undisputed player2 must not appear");
+    }
+
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// validator who has approved milestones but none have been disputed.
+    #[test]
+    fn test_get_disputes_for_validator_returns_empty_when_no_disputes() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // No disputes filed — must return empty.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
+
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// wallet that has no milestones at all.
+    #[test]
+    fn test_get_disputes_for_validator_unknown_wallet_returns_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let disputed = client.get_disputes_for_validator(&unknown, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
+
+    /// Confirms the 50-entry-per-page cap and that offset correctly slices the list.
+    #[test]
+    fn test_get_disputes_for_validator_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let disputer = Address::generate(&env);
+
+        // Approve and dispute 5 milestones for 5 distinct players
+        for player_id in 1u64..=5 {
+            let idx = client.approve_milestone(
+                &validator, &player_id,
+                &String::from_str(&env, "test"),
+                &String::from_str(&env, VALID_CID_V0),
+            );
+            client.file_dispute(
+                &disputer, &player_id, &idx,
+                &String::from_str(&env, "test reason"),
+            );
+        }
+
+        // First 3 (offset=0, limit=3)
+        let page1 = client.get_disputes_for_validator(&validator, &0u32, &3u32);
+        assert_eq!(page1.len(), 3);
+
+        // Next 2 (offset=3, limit=3 — only 2 remain)
+        let page2 = client.get_disputes_for_validator(&validator, &3u32, &3u32);
+        assert_eq!(page2.len(), 2);
+
+        // Out-of-range offset returns empty
+        let page3 = client.get_disputes_for_validator(&validator, &10u32, &50u32);
+        assert_eq!(page3.len(), 0);
+    }
 }
