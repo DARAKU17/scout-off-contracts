@@ -341,6 +341,39 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- get_player_count
 
 ---
 
+#### `get_player_summary(player_id: u64) -> Result<PlayerSummary, ScoutChainError>`
+
+Return a lightweight player summary (vitals + level, no IPFS hashes or wallet)
+for efficient list rendering on the scout discovery dashboard.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_player_summary --player_id 1
+```
+
+---
+
+#### `get_players(ids: Vec<u64>) -> Result<Vec<PlayerSummary>, ScoutChainError>`
+
+Batch-fetch player summaries for a list of IDs. Unknown IDs are skipped.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `NotInitialized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_players --ids '[1,2,3]'
+```
+
+---
+
 #### `get_scout_count() -> u64`
 
 Return the total number of registered scouts. Returns `0` before the contract
@@ -672,23 +705,29 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `register_validator(wallet: Address, credentials: String) -> Result<(), VerificationError>`
+#### `register_validator(wallet: Address, credentials: String, specializations: Vec<String>) -> Result<(), VerificationError>`
 
 Onboard a new trusted validator (coach, academy director, certified trainer).
 `credentials` is a human-readable label (max 256 bytes, e.g. `"UEFA B License"`).
+`specializations` is an optional list of category tags (max 10 tags, each tag
+max 64 bytes, e.g. `["physical-stats", "identity-kyc"]`). Pass an empty `Vec`
+for a general-purpose validator that can approve any untagged (general-category)
+milestone. When a tagged milestone category is provided to `approve_milestone`,
+only validators whose `specializations` list contains that category can approve it.
 
 The contract enforces a cap of **100 simultaneously registered validators**. This limit exists because all validator addresses are stored in a single persistent entry; exceeding Soroban's 64 KB per-entry limit would cause the entry to become unreadable. Raising the cap requires a contract upgrade.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
+| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes, or >10 specializations, or empty/oversized tag) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- register_validator \
   --wallet $VALIDATOR_ADDRESS \
-  --credentials '"UEFA B License"'
+  --credentials '"UEFA B License"' \
+  --specializations '["physical-stats"]'
 ```
 
 ---
@@ -747,6 +786,31 @@ milestone history are preserved — only the `active` flag is flipped back to
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- restore_validator --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `set_validator_specializations(wallet: Address, specializations: Vec<String>) -> Result<(), VerificationError>`
+
+Update the specialization tags for an existing validator. Replaces the
+validator's current `specializations` list with the supplied one. Pass an
+empty `Vec` to make the validator general-purpose (untagged, can approve any
+untagged milestone). Max 10 tags, each max 64 bytes.
+
+This is additive/non-breaking: validators with no specializations remain
+fully functional for untagged milestones; specialization checks only engage
+when `approve_milestone` is called with a non-`None` `milestone_category`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `InvalidInput` (>10 tags or empty/oversized tag) · `NotInitialized` · `ContractPaused` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_validator_specializations \
+  --wallet $VALIDATOR_ADDRESS \
+  --specializations '["physical-stats","match-performance"]'
 ```
 
 ---
@@ -868,10 +932,26 @@ Return the total number of registered issuers.
 ---
 
 #### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<u32, VerificationError>`
+#### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String, milestone_category: Option<String>) -> Result<u32, VerificationError>`
 
 Record a verified milestone for a player. Caller must be a registered, active
 validator. Evidence hash must be a valid IPFS (`Qm…`) or Arweave (`bafy…`) CID
 of 2–128 bytes.
+
+`milestone_category` is an optional specialization tag (max 64 bytes, e.g.
+`"physical-stats"` or `"identity-kyc"`). When supplied, the validator's
+`specializations` list must contain this category — if not, the call is
+rejected with `SpecializationMismatch`. When omitted (`None`), the
+specialization check is skipped entirely and any active validator can approve,
+preserving the existing untagged behaviour for backwards compatibility.
+
+**Milestone Examples:**
+
+| Description | Category | Required validator specialization |
+|---|---|---|
+| "Scored 5 goals in Local Cup" | `None` (untagged) | Any active validator |
+| "Top speed clocked at 32 km/h" | `"physical-stats"` | Validator with `"physical-stats"` |
+| "Academy confirms active membership" | `"identity-kyc"` | Validator with `"identity-kyc"` |
 
 After storing the milestone this function cross-calls `progress.advance_level`
 atomically so both state changes occur in the same Stellar transaction. Returns
@@ -880,14 +960,44 @@ the milestone index.
 | | |
 |---|---|
 | **Auth** | `validator_wallet` must sign |
-| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `Overflow` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash or category tag >64 bytes) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `SpecializationMismatch` (category provided but validator not tagged for it) · `Overflow` · `ProgressCallFailed` |
 
 ```bash
+# Untagged milestone (any active validator)
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- approve_milestone \
   --validator_wallet $VALIDATOR_ADDRESS \
   --player_id 1 \
   --description '"Scored 5 goals in Local Cup"' \
+  --evidence_hash '"QmEvidence123"' \
+  --milestone_category null
+
+# Tagged milestone (only validators specialised in physical-stats)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- approve_milestone \
+  --validator_wallet $TRAINER_ADDRESS \
+  --player_id 1 \
+  --description '"Top speed clocked at 32 km/h"' \
+  --evidence_hash '"QmEvidence456"' \
+  --milestone_category '"physical-stats"'
+```
+
+---
+
+#### `get_evidence_hash_usage(evidence_hash: String) -> Option<(u64, u32)>`
+
+Return the original milestone consumer for an evidence hash that has already
+been used by `approve_milestone`. Returns `Some((player_id, milestone_index))`
+when the hash has been consumed, or `None` when it is still available for use.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_evidence_hash_usage \
   --evidence_hash '"QmEvidence123"'
 ```
 
@@ -1116,6 +1226,39 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), VerificationError>`
+
+Upgrade the contract WASM to a new hash. Admin auth required. Persistent
+storage (including the admin key) survives the upgrade.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_total_milestone_count() -> u32`
+
+Return the global total number of milestones approved across all players and
+validators since contract initialization.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_count
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -1176,6 +1319,35 @@ appears at most once.
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- get_validator_players --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `get_validator_activity_report(wallet: Address) -> Result<ValidatorActivityReport, VerificationError>`
+
+Convenience aggregate query — bundles the data from four individual queries into
+one call, reducing round-trips for admin dashboards and monitoring tools.
+
+Internally aggregates exactly:
+1. `get_validator(wallet)` → `credentials`, `registered_at`, `active`
+2. `get_validator_status(wallet)` → `status`
+3. `get_validator_milestone_count(wallet)` → `milestone_count`
+4. `get_validator_players(wallet)` → `distinct_players` (and `distinct_player_count`)
+
+This is a **pure read-only aggregation** — no new storage, no new business logic.
+The returned values are byte-for-byte identical to calling the four individual
+queries separately.
+
+Returns `ValidatorNotFound` if the wallet has never been registered.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ValidatorNotFound` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_activity_report --wallet $VALIDATOR_ADDRESS
 ```
 
 ---
@@ -2734,6 +2906,56 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
+
+Upgrade the contract WASM. Admin auth required. Persistent storage survives.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_scout_contacts(scout: Address) -> Vec<u64>`
+
+Return the list of player IDs that a scout has unlocked via `pay_to_contact`
+or `batch_contact_players`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers logged for a player in index order. Returns an
+empty Vec if none exist.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_all_trial_offers --player_id 1
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -3059,11 +3281,19 @@ pub struct ScoutProfile {
 ```rust
 pub struct Validator {
     pub wallet: Address,
-    pub credentials: String, // max 256 bytes
-    pub registered_at: u64, // Unix seconds
+    pub credentials: String,       // max 256 bytes
+    pub registered_at: u64,        // Unix seconds
     pub active: bool,
+    pub specializations: Vec<String>, // max 10 tags, each max 64 bytes
 }
 ```
+
+`specializations` is the list of milestone category tags this validator is
+authorised to approve. An empty list means the validator is general-purpose
+(can approve any untagged milestone). Tags are case-sensitive short strings
+(e.g. `"physical-stats"`, `"identity-kyc"`, `"match-performance"`). Set at
+registration time via `register_validator` or updated later via
+`set_validator_specializations`.
 
 ### `ValidatorStatus`
 
@@ -3072,6 +3302,36 @@ pub enum ValidatorStatus {
     NotRegistered,
     Active,
     Revoked,
+    RevokedForCause,
+}
+```
+
+### `ValidatorActivityReport`
+
+Convenience aggregate struct returned by `get_validator_activity_report`.
+Bundles the fields from four individual queries into one response:
+
+| Field | Source query | Description |
+|---|---|---|
+| `wallet` | — | Validator wallet address |
+| `credentials` | `get_validator` | Human-readable credential label |
+| `registered_at` | `get_validator` | Unix timestamp of registration |
+| `active` | `get_validator` | Whether the validator is currently active |
+| `status` | `get_validator_status` | Richer status (Active / Revoked / RevokedForCause / NotRegistered) |
+| `milestone_count` | `get_validator_milestone_count` | Total milestones approved across all players |
+| `distinct_player_count` | `get_validator_players` | Number of distinct players with at least one milestone |
+| `distinct_players` | `get_validator_players` | List of distinct player IDs |
+
+```rust
+pub struct ValidatorActivityReport {
+    pub wallet: Address,
+    pub credentials: String,
+    pub registered_at: u64,
+    pub active: bool,
+    pub status: ValidatorStatus,
+    pub milestone_count: u32,
+    pub distinct_player_count: u32,
+    pub distinct_players: Vec<u64>,
 }
 ```
 
@@ -3229,7 +3489,7 @@ pub struct TrialOffer {
 | 6 | `ValidatorInactive` | Validator has been revoked |
 | 7 | `ValidatorAlreadyRegistered` | Wallet already registered as validator |
 | 8 | `PlayerNotFound` | Invalid `player_id` |
-| 9 | `InvalidInput` | Bad evidence hash or credentials too long |
+| 9 | `InvalidInput` | Bad evidence hash, credentials too long, or region too long |
 | 10 | `ReasonTooLong` | Revocation reason exceeds 128 bytes |
 | 11 | `AlreadyConfigured` | `set_progress_contract` called twice |
 | 12 | `ProgressCallFailed` | Cross-contract `advance_level` failed |
@@ -3247,6 +3507,8 @@ pub struct TrialOffer {
 | 24 | `IssuerCapReached` | The issuer registry limit (20) has been reached; contract upgrade required to raise the cap |
 | 25 | `IssuerAlreadyRegistered` | The issuer is already registered |
 | 26 | `IssuerNotFound` | The issuer was not found in the registry |
+| 20 | `ApproveMilestonePaused` | `approve_milestone` is paused independently of the whole-contract pause |
+| 21 | `SpecializationMismatch` | `milestone_category` supplied to `approve_milestone` but validator is not tagged for that category |
 
 ### `ProgressError` (progress contract)
 

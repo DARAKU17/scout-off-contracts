@@ -31,6 +31,34 @@ pub struct CredentialAttestation {
     pub expires_at: u64,
     /// ed25519 signature over (issuer_wallet || validator_wallet || credential_type || expires_at).
     pub signature: Vec<u8>,
+/// Convenience aggregate returned by `get_validator_activity_report`.
+///
+/// Bundles the data from four individual queries into one call:
+/// - `get_validator`               → credentials, registered_at, active
+/// - `get_validator_status`        → status
+/// - `get_validator_milestone_count` → milestone_count
+/// - `get_validator_players`       → distinct_players (and distinct_player_count)
+///
+/// This is a pure read-only aggregate — no new storage or business logic.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ValidatorActivityReport {
+    /// Validator wallet address.
+    pub wallet: Address,
+    /// Human-readable credential label set at registration time.
+    pub credentials: String,
+    /// Unix timestamp (seconds) when the validator was registered.
+    pub registered_at: u64,
+    /// Whether the validator is currently active.
+    pub active: bool,
+    /// Richer status distinguishing Active / Revoked / RevokedForCause / NotRegistered.
+    pub status: ValidatorStatus,
+    /// Total number of milestones approved by this validator across all players.
+    pub milestone_count: u32,
+    /// Number of distinct players for whom this validator has approved at least one milestone.
+    pub distinct_player_count: u32,
+    /// List of distinct player IDs (same data as `get_validator_players`).
+    pub distinct_players: Vec<u64>,
 }
 
 /// Richer validator status — distinguishes unregistered from revoked.
@@ -82,6 +110,11 @@ pub struct Validator {
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
+    /// Optional specialization tags (e.g. "physical-stats", "identity-kyc", "match-performance").
+    /// When a milestone category is provided to `approve_milestone`, only validators with a
+    /// matching specialization tag can approve it. An empty Vec means the validator can approve
+    /// any untagged (general-category) milestone but cannot approve tagged milestones.
+    pub specializations: Vec<String>,
 }
 
 /// Entry in the global milestone index for on-chain auditability.
@@ -159,7 +192,7 @@ pub enum DataKey {
     MilestoneDispute(u64, u32),
     ActiveValidatorCount,
     TotalValidatorCount,
-    /// Evidence hash → bool for global uniqueness check.
+    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
     EvidenceUsed(String),
     ValidatorMilestones(Address),
     ActiveDisputesCount,

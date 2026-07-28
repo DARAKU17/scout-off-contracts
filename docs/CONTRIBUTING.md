@@ -86,7 +86,8 @@ Both files document their own process for intentionally raising a budget when a 
 
 - [ ] New functions have unit tests covering the happy path and at least one error case
 - [ ] Any new `DataKey` variant is documented with a comment
-- [ ] Cross-contract calls are documented with a comment explaining the atomicity guarantee
+- [ ] Cross-contract calls are documented with a `**Cross-contract calls:**` row in the
+  function's `CONTRACT_REFERENCE.md` entry and a comment explaining the atomicity guarantee
 - [ ] `ai.md` is updated if shared types, events, or env vars changed
 - [ ] `docs/CONTRACT_REFERENCE.md` is updated with new functions, events, and error codes *(enforced automatically by `scripts/check-docs.sh` in the CI lint job — the PR will fail if a `pub fn` from any `#[contractimpl]` block lacks a corresponding heading in the docs)*
 
