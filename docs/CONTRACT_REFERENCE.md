@@ -872,6 +872,32 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_milestones_since(player_id: u64, since_timestamp: u64) -> Vec<Milestone>`
+
+Return all milestones for a player where `approved_at >= since_timestamp`, in
+approval order (oldest first).
+
+This function mirrors [`progress.get_history_since`](#get_history_sinceplayerid-u64-sincetimestamp-u64---vecprogressentry)
+in signature and semantics: an indexer that already tracks the timestamp of the
+last milestone it processed can pass that timestamp to fetch only newly
+approved milestones, avoiding a full re-fetch of the player's entire milestone
+list on every sync cycle.
+
+Returns an empty `Vec` when the player has no milestones, or when none satisfy
+the timestamp predicate.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_milestones_since --player_id 1 --since_timestamp 1700000000
+```
+
+---
+
 #### `get_validator(wallet: Address) -> Result<Validator, VerificationError>`
 
 Read the full validator record including credentials, registration timestamp,
