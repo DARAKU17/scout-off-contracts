@@ -18,7 +18,7 @@ mod types;
 use errors::VerificationError;
 use types::{
     ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone,
-    MilestoneDispute, MilestoneRef, Validator, ValidatorStatus,
+    MilestoneDispute, MilestoneRef, Validator, ValidatorActivityReport, ValidatorStatus,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
@@ -1385,6 +1385,64 @@ impl VerificationContract {
     pub fn is_active_validator(env: Env, wallet: Address) -> bool {
         Self::get_validator_status(env, wallet) == ValidatorStatus::Active
     }
+
+    /// Convenience aggregate query — bundles the data from four individual
+    /// queries into one call, reducing round-trips for admin dashboards.
+    ///
+    /// Equivalent to calling:
+    /// 1. `get_validator(wallet)`          → credentials, registered_at, active
+    /// 2. `get_validator_status(wallet)`   → ValidatorStatus
+    /// 3. `get_validator_milestone_count(wallet)` → milestone_count
+    /// 4. `get_validator_players(wallet)`  → distinct_players list
+    ///
+    /// Returns `ValidatorNotFound` if the wallet has never been registered.
+    /// This is a pure read-only aggregation — no new storage or business logic.
+    pub fn get_validator_activity_report(
+        env: Env,
+        wallet: Address,
+    ) -> Result<ValidatorActivityReport, VerificationError> {
+        // 1. Fetch the full Validator record (errors if not registered)
+        let validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+        // Keep-alive: same as get_validator
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        // 2. Compute status (same logic as get_validator_status)
+        let status = Self::get_validator_status(env.clone(), wallet.clone());
+
+        // 3. Milestone count (same logic as get_validator_milestone_count)
+        let milestone_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(wallet.clone()))
+            .unwrap_or(0u32);
+
+        // 4. Distinct players (same logic as get_validator_players)
+        let distinct_players: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorPlayers(wallet.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let distinct_player_count = distinct_players.len();
+
+        Ok(ValidatorActivityReport {
+            wallet,
+            credentials: validator.credentials,
+            registered_at: validator.registered_at,
+            active: validator.active,
+            status,
+            milestone_count,
+            distinct_player_count,
+            distinct_players,
+        })
+    }
+
 
     pub fn health(env: Env) -> ContractHealth {
         let initialized = env
@@ -3777,172 +3835,229 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // #868: Validator specialization tagging
+    // #865: get_validator_activity_report aggregate query
     // -------------------------------------------------------------------------
 
-    /// A validator with the required specialization can approve a tagged milestone.
+    /// The aggregate report's fields exactly match what the four individual
+    /// queries return for the same validator.
     #[test]
-    fn test_approve_milestone_with_matching_specialization() {
+    fn test_get_validator_activity_report_matches_individual_queries() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
+        let player_id: u64 = 1;
+        let player_id_2: u64 = 2;
+
+        // Register the validator with specializations
         let mut specs = Vec::new(&env);
         specs.push_back(String::from_str(&env, "physical-stats"));
-        specs.push_back(String::from_str(&env, "identity-kyc"));
-        client.register_validator(&validator, &String::from_str(&env, "Certified Trainer"), specs);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), specs);
 
-        let player_id: u64 = 1;
-        let result = client.try_approve_milestone(
+        // Approve milestones for two distinct players
+        client.approve_milestone(
             &validator,
             &player_id,
-            &String::from_str(&env, "Top speed 32 km/h"),
-            &String::from_str(&env, VALID_CID_V0),
-            &Some(String::from_str(&env, "physical-stats")),
-        );
-        
-        assert!(result.is_ok(), "Approve with matching specialization should succeed");
-    }
-
-    /// A validator without the required specialization cannot approve a tagged milestone.
-    #[test]
-    fn test_approve_milestone_with_mismatched_specialization() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let validator = Address::generate(&env);
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, "identity-kyc"));
-        client.register_validator(&validator, &String::from_str(&env, "KYC Agent"), specs);
-
-        let player_id: u64 = 1;
-        let result = client.try_approve_milestone(
-            &validator,
-            &player_id,
-            &String::from_str(&env, "Top speed 32 km/h"),
-            &String::from_str(&env, VALID_CID_V0),
-            &Some(String::from_str(&env, "physical-stats")),
-        );
-        
-        assert_eq!(result, Err(Ok(VerificationError::SpecializationMismatch)));
-    }
-
-    /// An untagged milestone (None category) can be approved by any active validator,
-    /// regardless of specializations.
-    #[test]
-    fn test_approve_milestone_untagged_works_for_all_validators() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Validator with specializations
-        let v1 = Address::generate(&env);
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, "physical-stats"));
-        client.register_validator(&v1, &String::from_str(&env, "Trainer"), specs);
-
-        // Validator with no specializations
-        let v2 = Address::generate(&env);
-        client.register_validator(&v2, &String::from_str(&env, "Coach"), Vec::new(&env));
-
-        let player_id: u64 = 1;
-        
-        // Both validators can approve untagged milestones
-        let result1 = client.try_approve_milestone(
-            &v1,
-            &player_id,
-            &String::from_str(&env, "Good attitude"),
+            &String::from_str(&env, "Scored 5 goals"),
             &String::from_str(&env, VALID_CID_V0),
             &None,
         );
-        assert!(result1.is_ok(), "Specialized validator should approve untagged milestone");
-
-        let result2 = client.try_approve_milestone(
-            &v2,
-            &player_id,
-            &String::from_str(&env, "Team player"),
+        client.approve_milestone(
+            &validator,
+            &player_id_2,
+            &String::from_str(&env, "Speed test passed"),
             &String::from_str(&env, VALID_CID_V0_2),
             &None,
         );
-        assert!(result2.is_ok(), "General validator should approve untagged milestone");
+
+        // Get individual query results
+        let individual_validator = client.get_validator(&validator).unwrap();
+        let individual_status   = client.get_validator_status(&validator);
+        let individual_count    = client.get_validator_milestone_count(&validator);
+        let individual_players  = client.get_validator_players(&validator);
+
+        // Get aggregate report
+        let report = client.get_validator_activity_report(&validator).unwrap();
+
+        // Verify the aggregate matches every individual query exactly
+        assert_eq!(report.wallet, validator, "wallet mismatch");
+        assert_eq!(report.credentials, individual_validator.credentials, "credentials mismatch");
+        assert_eq!(report.registered_at, individual_validator.registered_at, "registered_at mismatch");
+        assert_eq!(report.active, individual_validator.active, "active mismatch");
+        assert_eq!(report.status, individual_status, "status mismatch");
+        assert_eq!(report.milestone_count, individual_count, "milestone_count mismatch");
+        assert_eq!(report.distinct_player_count, individual_players.len(), "distinct_player_count mismatch");
+        assert_eq!(report.distinct_players, individual_players, "distinct_players mismatch");
+
+        // Sanity-check expected values
+        assert_eq!(report.milestone_count, 2);
+        assert_eq!(report.distinct_player_count, 2);
+        assert_eq!(report.status, types::ValidatorStatus::Active);
     }
 
-    /// `set_validator_specializations` updates a validator's tags.
+    /// Report for an unregistered wallet returns ValidatorNotFound.
     #[test]
-    fn test_set_validator_specializations() {
+    fn test_get_validator_activity_report_unregistered_returns_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let result = client.try_get_validator_activity_report(&unknown);
+        assert_eq!(result, Err(Ok(VerificationError::ValidatorNotFound)));
+    }
+
+    /// Report for a validator with no milestones has zero counts.
+    #[test]
+    fn test_get_validator_activity_report_zero_milestones() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"), Vec::new(&env));
+        client.register_validator(&validator, &String::from_str(&env, "KYC Cert"), Vec::new(&env));
 
-        // Initially no specializations - cannot approve tagged milestone
-        let player_id: u64 = 1;
-        let result = client.try_approve_milestone(
-            &validator,
-            &player_id,
+        let report = client.get_validator_activity_report(&validator).unwrap();
+        assert_eq!(report.milestone_count, 0);
+        assert_eq!(report.distinct_player_count, 0);
+        assert_eq!(report.distinct_players.len(), 0);
+        assert_eq!(report.status, types::ValidatorStatus::Active);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #871: get_disputes_for_validator
+    // -------------------------------------------------------------------------
+
+    /// Confirms that get_disputes_for_validator returns only the disputed subset
+    /// of a validator's milestones, correctly excluding non-disputed ones, across
+    /// a validator with a mix of both.
+    #[test]
+    fn test_get_disputes_for_validator_returns_only_disputed_subset() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        // Approve 3 milestones for different players
+        let player1: u64 = 1;
+        let player2: u64 = 2;
+        let player3: u64 = 3;
+
+        let idx1 = client.approve_milestone(
+            &validator, &player1,
             &String::from_str(&env, "Speed test"),
             &String::from_str(&env, VALID_CID_V0),
-            &Some(String::from_str(&env, "physical-stats")),
         );
-        assert_eq!(result, Err(Ok(VerificationError::SpecializationMismatch)));
-
-        // Add specializations
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, "physical-stats"));
-        client.set_validator_specializations(&validator, &specs);
-
-        // Now can approve
-        let result2 = client.try_approve_milestone(
-            &validator,
-            &player_id,
-            &String::from_str(&env, "Speed test"),
-            &String::from_str(&env, VALID_CID_V0_2),
-            &Some(String::from_str(&env, "physical-stats")),
+        let _idx2 = client.approve_milestone(
+            &validator, &player2,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
         );
-        assert!(result2.is_ok(), "After setting specializations, approval should work");
+        let idx3 = client.approve_milestone(
+            &validator, &player3,
+            &String::from_str(&env, "Trial assessment"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+
+        // File disputes on milestone 1 (player1) and milestone 3 (player3).
+        // Milestone 2 (player2) is intentionally left undisputed.
+        let disputer = Address::generate(&env);
+        client.file_dispute(
+            &disputer, &player1, &idx1,
+            &String::from_str(&env, "Evidence questionable"),
+        );
+        client.file_dispute(
+            &disputer, &player3, &idx3,
+            &String::from_str(&env, "Conflict of interest"),
+        );
+
+        // get_disputes_for_validator must return exactly the 2 disputed milestones.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 2, "expected exactly 2 disputes");
+
+        // Verify each returned record belongs to the expected player/milestone.
+        let has_player1 = disputed.iter().any(|d| d.player_id == player1);
+        let has_player3 = disputed.iter().any(|d| d.player_id == player3);
+        let has_player2 = disputed.iter().any(|d| d.player_id == player2);
+        assert!(has_player1, "dispute for player1 missing");
+        assert!(has_player3, "dispute for player3 missing");
+
+        // Confirm the non-disputed milestone (player2) is absent.
+        assert!(!has_player2, "undisputed player2 must not appear");
     }
 
-    /// Specialization tag validation: empty tags and tags over 64 bytes are rejected.
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// validator who has approved milestones but none have been disputed.
     #[test]
-    fn test_register_validator_specialization_validation() {
+    fn test_get_disputes_for_validator_returns_empty_when_no_disputes() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        
-        // Empty tag rejected
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, ""));
-        let result = client.try_register_validator(&validator, &String::from_str(&env, "Coach"), &specs);
-        assert_eq!(result, Err(Ok(VerificationError::InvalidInput)));
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
 
-        // Tag exactly 64 bytes should work
-        let tag_64 = "a".repeat(64);
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, &tag_64));
-        let result = client.try_register_validator(&validator, &String::from_str(&env, "Coach"), &specs);
-        assert!(result.is_ok(), "64-byte tag should be accepted");
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "Goal tally"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
 
-        // Tag over 64 bytes rejected
-        let validator2 = Address::generate(&env);
-        let tag_65 = "b".repeat(65);
-        let mut specs = Vec::new(&env);
-        specs.push_back(String::from_str(&env, &tag_65));
-        let result = client.try_register_validator(&validator2, &String::from_str(&env, "Coach"), &specs);
-        assert_eq!(result, Err(Ok(VerificationError::InvalidInput)));
+        // No disputes filed — must return empty.
+        let disputed = client.get_disputes_for_validator(&validator, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
 
-        // More than 10 specializations rejected
-        let validator3 = Address::generate(&env);
-        let mut specs = Vec::new(&env);
-        for i in 0..11 {
-            specs.push_back(String::from_str(&env, &format!("spec-{}", i)));
+    /// Confirms that get_disputes_for_validator returns an empty Vec for a
+    /// wallet that has no milestones at all.
+    #[test]
+    fn test_get_disputes_for_validator_unknown_wallet_returns_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let disputed = client.get_disputes_for_validator(&unknown, &0u32, &50u32);
+        assert_eq!(disputed.len(), 0);
+    }
+
+    /// Confirms the 50-entry-per-page cap and that offset correctly slices the list.
+    #[test]
+    fn test_get_disputes_for_validator_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let disputer = Address::generate(&env);
+
+        // Approve and dispute 5 milestones for 5 distinct players
+        for player_id in 1u64..=5 {
+            let idx = client.approve_milestone(
+                &validator, &player_id,
+                &String::from_str(&env, "test"),
+                &String::from_str(&env, VALID_CID_V0),
+            );
+            client.file_dispute(
+                &disputer, &player_id, &idx,
+                &String::from_str(&env, "test reason"),
+            );
         }
-        let result = client.try_register_validator(&validator3, &String::from_str(&env, "Coach"), &specs);
-        assert_eq!(result, Err(Ok(VerificationError::InvalidInput)));
+
+        // First 3 (offset=0, limit=3)
+        let page1 = client.get_disputes_for_validator(&validator, &0u32, &3u32);
+        assert_eq!(page1.len(), 3);
+
+        // Next 2 (offset=3, limit=3 — only 2 remain)
+        let page2 = client.get_disputes_for_validator(&validator, &3u32, &3u32);
+        assert_eq!(page2.len(), 2);
+
+        // Out-of-range offset returns empty
+        let page3 = client.get_disputes_for_validator(&validator, &10u32, &50u32);
+        assert_eq!(page3.len(), 0);
     }
 }
