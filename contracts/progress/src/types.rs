@@ -22,6 +22,40 @@ pub struct ProgressEntry {
     pub ledger_sequence: u32,
 }
 
+/// Snapshot of all cross-contract peer addresses held by the progress
+/// contract. Returned by [`ProgressContract::get_wiring_state`].
+///
+/// Use this to verify — without inspecting storage keys directly — that all
+/// three peer links are configured. See `docs/WIRING_REGISTRY_DESIGN.md` for
+/// the full design rationale and the recommended migration path.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressWiringState {
+    /// Address of the registration contract, if set via
+    /// `set_registration_contract`. Required for `advance_level` to validate
+    /// player existence via the registration contract.
+    pub registration_contract: Option<Address>,
+    /// Address of the verification contract, if set via
+    /// `set_verification_contract`. Only this address may call `advance_level`
+    /// (primary authorised caller).
+    pub verification_contract: Option<Address>,
+    /// Address of the scout_access contract, if set via
+    /// `set_scout_access_contract`. Whitelisted as the secondary authorised
+    /// caller of `advance_level` for trial-offer Level-3 advances.
+    pub scout_access_contract: Option<Address>,
+}
+
+impl ProgressWiringState {
+    /// Returns `true` iff all three peer address slots are populated.
+    /// A return value of `false` means `advance_level` may fail because at
+    /// least one expected caller or dependency address is missing.
+    pub fn is_fully_wired(&self) -> bool {
+        self.registration_contract.is_some()
+            && self.verification_contract.is_some()
+            && self.scout_access_contract.is_some()
+    }
+}
+
 #[contracttype]
 pub enum DataKey {
     /// The `Address` of the contract administrator. Set during `initialize` and

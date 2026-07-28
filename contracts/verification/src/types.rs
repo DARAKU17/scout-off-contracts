@@ -108,6 +108,8 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for approve_milestone (independent of whole-contract Paused)
+    PausedApproveMilestone,
     ProgressContract,
     ProgressContractSet,
     Validator(Address),
@@ -130,4 +132,12 @@ pub enum DataKey {
     ValidatorMilestones(Address),
     ActiveDisputesCount,
     ValidatorRevokedForCause(Address),
+    /// Per-player list of milestone indices that have been disputed.
+    /// player_id → Vec<u32> of milestone_index values.
+    /// Updated on `dispute_milestone`.
+    PlayerDisputes(u64),
+    /// Persistent global index of currently-unresolved (player_id, milestone_index) pairs.
+    /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
+    /// Exposed via `list_disputes_page(offset, limit)`.
+    OpenDisputeIndex,
 }

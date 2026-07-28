@@ -19,6 +19,22 @@ That keeps the command copy-paste-runnable in a standard `bash`/`zsh` shell.
 - [progress](#progress)
 - [scout_access](#scout_access)
 - [Shared Types](#shared-types)
+  - [`ProgressLevel`](#progresslevel)
+  - [`ContractHealth`](#contracthealth)
+  - [`PlayerVitals`](#playervitals)
+  - [`PlayerProfile`](#playerprofile)
+  - [`ScoutProfile`](#scoutprofile)
+  - [`Validator`](#validator)
+  - [`ValidatorStatus`](#validatorstatus)
+  - [`Milestone`](#milestone)
+  - [`MilestoneDispute`](#milestonedispute)
+  - [`ProgressEntry`](#progressentry)
+  - [`SubscriptionTier`](#subscriptiontier)
+  - [`Subscription`](#subscription)
+  - [`ContactRecord`](#contactrecord)
+  - [`FeeConfig`](#feeconfig)
+  - [`ProContactPeriod`](#procontactperiod)
+  - [`TrialOffer`](#trialoffer)
 - [Error Codes](#error-codes)
 - [Events](#events)
 - [Design Discussion: Check-Ordering Follow-ups](#design-discussion-check-ordering-follow-ups)
@@ -448,6 +464,30 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 ---
 
+#### `get_scouts(ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError>`
+
+Batch-fetch full scout profiles for up to 20 IDs in a single call. Mirrors
+`get_players` semantics exactly: missing IDs are silently skipped with partial
+hits returned successfully, and the same 20-ID cap applies.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `InvalidInput` (more than 20 IDs provided) |
+
+**Examples**:
+```bash
+# Fetch three scouts by ID
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,2,3]'
+
+# Mixed batch with one nonexistent ID — returns two profiles only
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,999,2]'
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
@@ -736,6 +776,37 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_validator_statuses(wallets: Vec<Address>) -> Vec<ValidatorStatus>`
+
+Batch-fetch the status of up to 20 validator wallets in a single call.
+Returns one `ValidatorStatus` entry per input wallet **in the same order as the input**,
+including `NotRegistered` for wallets that have never been registered.
+
+**Batch-size cap**: the first 20 entries are processed; wallets beyond that are silently
+ignored. Call again with the remainder for larger sets. This is consistent with the 20-item
+cap used by `registration.get_players`.
+
+**Semantics**: unlike `registration.get_players` (which silently skips missing IDs), this
+function always returns one entry per input wallet — including `NotRegistered` — because
+`ValidatorStatus` already has a `NotRegistered` variant that makes the unregistered case
+unambiguously representable. Callers always receive exactly N results for N inputs (up to the
+cap), making it impossible to confuse "skipped" with "not registered".
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_statuses \
+  --wallets '["$WALLET_1","$WALLET_2","$WALLET_3"]'
+```
+
+Compare with [`get_players`](#get_playersids-vecu64---resultvecplayersummary-scoutchainerror) in the registration contract for the equivalent batch-fetch pattern.
+
+---
+
 #### `get_validator_milestone_count(wallet: Address) -> u32`
 
 Return the total number of milestones approved by a specific validator across
@@ -797,6 +868,32 @@ Return the total number of approved milestones for a player.
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- get_milestone_count --player_id 1
+```
+
+---
+
+#### `get_milestones_since(player_id: u64, since_timestamp: u64) -> Vec<Milestone>`
+
+Return all milestones for a player where `approved_at >= since_timestamp`, in
+approval order (oldest first).
+
+This function mirrors [`progress.get_history_since`](#get_history_sinceplayerid-u64-sincetimestamp-u64---vecprogressentry)
+in signature and semantics: an indexer that already tracks the timestamp of the
+last milestone it processed can pass that timestamp to fetch only newly
+approved milestones, avoiding a full re-fetch of the player's entire milestone
+list on every sync cycle.
+
+Returns an empty `Vec` when the player has no milestones, or when none satisfy
+the timestamp predicate.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_milestones_since --player_id 1 --since_timestamp 1700000000
 ```
 
 ---
@@ -978,6 +1075,46 @@ call and decremented when `resolve_dispute` marks a dispute resolved.
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_active_disputes_count
+```
+
+---
+
+#### `list_disputes_page(offset: u32, limit: u32) -> Vec<(u64, u32)>`
+
+Return a bounded, paginated page of currently-unresolved
+`(player_id, milestone_index)` dispute keys, platform-wide.
+
+The underlying index (`DataKey::OpenDisputeIndex`) is maintained at write-time:
+`dispute_milestone` appends an entry when a new dispute is filed, and
+`resolve_dispute` removes it when the dispute is resolved. This means the index
+always reflects exactly the set of open disputes with no full-scan required at
+query time — making it possible to build an admin "disputes needing attention"
+dashboard from on-chain queries alone.
+
+- `limit` is capped at **50** per page, consistent with `get_global_milestone_index`
+  and `get_validator_milestones_page`.
+- `offset` is a zero-based item offset (e.g. `offset=0, limit=50` → first page;
+  `offset=50, limit=50` → second page).
+- Entries are returned **oldest-first** (insertion order).
+- The index tracks **only unresolved disputes** — resolved disputes are removed
+  immediately, so the index stays naturally bounded in size.
+
+Use `get_active_disputes_count` to get the total count for building pagination UI
+without fetching the full list.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+# First page of open disputes (up to 50)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 0 --limit 50
+
+# Second page
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- list_disputes_page --offset 50 --limit 50
 ```
 
 ---
@@ -1608,6 +1745,9 @@ greater than zero; either function returns `InvalidInput` otherwise.
 | `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
 | `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
 | `sub_duration_secs` | `u64` | duration in seconds (not a Unix timestamp) | > 0 | `2592000` (30 days = 30 × 24 × 3600) |
+| `pro_contact_limit` | `u32` | count | > 0 | `10` (10 contacts/period) |
+| `trial_offer_escrow_stroops` | `i128` | stroops | > 0 | `500000` (0.05 XLM) |
+| `trial_offer_expiry_secs` | `u64` | duration in seconds | > 0 | `3600` (1 hour) |
 
 **Validation rules:**
 - Every `i128` fee field must be > 0 (zero or negative → `InvalidInput` error code 15).
@@ -1618,6 +1758,8 @@ greater than zero; either function returns `InvalidInput` otherwise.
   `ProContactLimitReached` (code 20) for that scout until their subscription
   renews. **Elite-tier scouts are exempt** from this limit and may contact any
   number of players regardless of `pro_contact_limit`.
+- `trial_offer_escrow_stroops` must be > 0 (zero or negative → `InvalidInput`). This is the XLM amount held in escrow when a scout logs a trial offer.
+- `trial_offer_expiry_secs` must be > 0 (zero → `InvalidInput`). This defines the window within which a player must confirm a trial offer before it expires and the escrow is refunded.
 - There is no enforced upper bound on fee fields, but values larger than the XLM supply
   (≈ 500 000 000 XLM = 5 × 10¹⁵ stroops) will cause `Overflow` errors at fee
   settlement time.
@@ -1643,9 +1785,9 @@ See the [Glossary](GLOSSARY.md#feeconfig) for a plain-language description of ea
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
-> The `scout_access` contract only stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`). There is no on-chain fee configuration history. Due to the very low frequency of administrative fee adjustments, an on-chain history vector is not implemented to avoid unnecessary storage costs and complexity.
+> The `scout_access` contract stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`) and a bounded on-chain trail of the **last 5 previous configs** (retrievable via `get_fee_config_history`). The history list is maintained oldest-first and is capped at 5 entries; when the cap is reached the oldest entry is evicted on the next `update_fee_config` call.
 >
-> Instead, historical fee configurations must be reconstructed off-chain by replaying `fee_config_updated` event logs. The off-chain indexer database maintains a complete audit trail in the `fee_config_history` table (see [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)) which serves as the actual source of truth for auditing historical transactions (e.g. verifying that a contact fee or subscription payment matched the rate in effect at that time).
+> This lightweight on-chain trail lets you read the immediately-previous fee configuration without depending on the off-chain indexer, making it suitable for quick audits or on-chain fee-change verification. For a *complete*, unbounded audit trail — including all historical fee rates for verifying that a contact fee or subscription payment matched the rate in effect at that time — replay the `fee_config_updated` event logs via the off-chain indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
 
 ### Functions
 
@@ -1671,7 +1813,7 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- initialize \
   --admin $ADMIN_ADDRESS \
   --xlm_token $XLM_TOKEN_ADDRESS \
-  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10}'
+  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10,"trial_offer_escrow_stroops":500000,"trial_offer_expiry_secs":3600}'
 ```
 
 ---
@@ -1762,7 +1904,7 @@ Adjust subscription and contact fee rates. Same validation rules as
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
-> Adjusting the fee config emits the `fee_config_updated` event log containing both the old and new `FeeConfig` values. Since the contract does not maintain an on-chain fee history vector, historical fee rates must be reconstructed off-chain by replaying these events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)).
+> Adjusting the fee config emits the `fee_config_updated` event containing both the old and new `FeeConfig` values and also pushes the previous config into the bounded on-chain history (last 5 entries, oldest-first, accessible via `get_fee_config_history`). For a complete unbounded audit trail, replay events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
 
 | | |
 |---|---|
@@ -1772,7 +1914,171 @@ Adjust subscription and contact fee rates. Same validation rules as
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_fee_config \
-  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20,"trial_offer_escrow_stroops":1000000,"trial_offer_expiry_secs":7200}'
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
 ```
 
 ---
@@ -1864,6 +2170,77 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- subscribe \
   --scout $SCOUT_ADDRESS \
   --tier '"Elite"'
+```
+
+---
+
+#### `set_auto_renew(scout: Address, enabled: bool) -> Result<(), ScoutAccessError>`
+
+Opt a scout wallet in (`true`) or out (`false`) of automatic subscription renewal.
+
+Once enabled, a keeper (off-chain cron job or bot) can call `renew_if_due` when
+the scout's subscription is approaching expiry. The flag is stored in persistent
+storage and survives upgrades.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_auto_renew \
+  --scout $SCOUT_ADDRESS \
+  --enabled true
+```
+
+---
+
+#### `get_auto_renew(scout: Address) -> bool`
+
+Returns `true` if the scout has opted in to automatic subscription renewal,
+`false` otherwise (including for scouts who have never called `set_auto_renew`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_auto_renew \
+  --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `renew_if_due(scout: Address) -> Result<(), ScoutAccessError>`
+
+Renew a scout's subscription if auto-renewal is enabled and the subscription is
+at or near expiry.
+
+**Renewal window**: fires when the current timestamp is within the last 10 % of
+`sub_duration_secs` before `expires_at`, **or** after `expires_at` has already
+passed. Outside this window the function is a no-op and returns `Ok(())` without
+charging — safe to call on a schedule.
+
+**Auth model**: Soroban's `token::Client::transfer` always requires the sender's
+authorization *in the same transaction*. A third-party keeper bot cannot pull XLM
+from the scout's wallet on its own; the scout must sign the `renew_if_due`
+transaction, just as they sign `subscribe`. The keeper's role is to remind the
+scout to sign before expiry, not to charge them autonomously. A future
+allowance-based (`token::approve`) pattern could enable truly permissionless
+renewal, but is not implemented in this version.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `AutoRenewNotEnabled` · `ScoutNotSubscribed` · `Overflow` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- renew_if_due \
+  --scout $SCOUT_ADDRESS
 ```
 
 ---
@@ -1993,15 +2370,11 @@ true, the first matching check in this list wins):
 | 8 | Trial counter increment overflows | `Overflow` (10) |
 | 9 | Cross-contract `advance_level` fails for a reason other than `AlreadyAtMaxLevel` | `ProgressCallFailed` (14) |
 
-> ⚠️ **Design note — missing `require_initialized` check**: `log_trial_offer`
-> does **not** call `require_initialized`, unlike `subscribe`, `pay_to_contact`,
-> and `batch_contact_players`, which all call it immediately after
-> `require_not_paused`. This is an asymmetry in the current implementation.
-> In practice the function cannot succeed on an uninitialized contract (the
-> subscription lookup returns `ScoutNotSubscribed` before any write occurs), but
-> callers should not rely on this indirect guard — a dedicated initialized check
-> would be safer and consistent. This should be addressed in a follow-up
-> contract upgrade. See [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized).
+> ✅ **Design note — `require_initialized` check added**: `log_trial_offer`
+> now calls `require_initialized` immediately after `require_not_paused`,
+> matching `subscribe`, `pay_to_contact`, and `batch_contact_players`.
+> Fixed by the full guard-ordering audit (PR feat/797-798-801-835). See
+> [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized--resolved).
 
 > **Design note — `InvalidInput` before subscription check (Priority 3 before 4)**:
 > `details_hash` is validated before the subscription is looked up. This means
@@ -2124,6 +2497,31 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- get_fee_config
 
 ---
 
+#### `get_fee_config_history() -> Vec<FeeConfigHistoryEntry>`
+
+Return the bounded on-chain history of the last (up to 5) `FeeConfig` values, **oldest-first**.
+
+Each `FeeConfigHistoryEntry` contains:
+- `config: FeeConfig` — the fee configuration that was active *before* a particular `update_fee_config` call.
+- `updated_at: u64` — the Unix-seconds ledger timestamp when that change was made.
+
+The *current* config is not included — retrieve it with `get_fee_config`. The history grows by
+one entry per `update_fee_config` call and is capped at 5 entries; when the cap is reached the
+oldest entry is evicted. This provides a lightweight middle-ground between the indexer-only
+design (full history via `fee_config_updated` events) and an unbounded on-chain ring-buffer,
+keeping the immediately-previous configs readable on-chain without additional indexer dependency.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- get_fee_config_history
+```
+
+---
+
 #### `get_accumulated_fees() -> i128`
 
 Return total platform fees pending admin withdrawal (in stroops).
@@ -2230,11 +2628,28 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- get_scout_contacts --scout $SCOUT_ADDRESS
 ```
 
+Direction check for the same contact relationship:
+
+```bash
+# Scout -> players contacted by this scout.
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+
+# Player -> scouts that contacted this player.
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_contacts --player_id 1
+```
+
 ---
 
 #### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
 
 Return all trial offers for a player in a single call. Bounded at 20 to prevent gas exhaustion. Returns an empty `Vec` when no offers exist.
+
+| Function | Behavior | Recommended use |
+|---|---|---|
+| `get_all_trial_offers` | Returns at most 20 offers. | Bounded UI previews or low-cost reads. |
+| `get_player_trial_offers` | Reads the complete per-player offer range. | Full history views or audits that must include entries beyond the first 20. |
 
 | | |
 |---|---|
@@ -2374,9 +2789,13 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Emitted on successful initialization |
-| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription |
+| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout's very first subscription (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout renews or upgrades an existing subscription (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | (player_id: u64, fee_paid: i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | (player_id: u64, index: u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | (player_id: u64, index: u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | (to: Address, amount: i128, timestamp: u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Admin replacement proposed |
@@ -2385,8 +2804,6 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
 | `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed |
-| `subscription_created` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | New subscription purchased (first-ever for this scout) |
-| `subscription_renewed` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | Existing subscription renewed or upgraded |
 
 #### Diagnostic Events (scout_access)
 
@@ -2582,17 +2999,26 @@ pub struct ContactRecord {
 
 ```rust
 pub struct FeeConfig {
-    pub contact_fee_stroops: i128,   // must be > 0
-    pub basic_sub_stroops: i128,     // must be > 0
-    pub pro_sub_stroops: i128,       // must be > 0
-    pub elite_sub_stroops: i128,     // must be > 0
-    pub sub_duration_secs: u64,      // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub contact_fee_stroops: i128,          // must be > 0
+    pub basic_sub_stroops: i128,            // must be > 0
+    pub pro_sub_stroops: i128,              // must be > 0
+    pub elite_sub_stroops: i128,            // must be > 0
+    pub sub_duration_secs: u64,             // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub pro_contact_limit: u32,             // must be > 0; Elite scouts bypass this cap
+    pub trial_offer_escrow_stroops: i128,   // escrow held per trial offer, must be > 0
+    pub trial_offer_expiry_secs: u64,       // confirmation window in seconds, must be > 0
 }
 ```
 
 > [!NOTE]
-> **Historical Fee Configs & Auditability**
-> The `scout_access` contract only stores the *current* `FeeConfig` on-chain. Historical fee configurations are event-log-only and must be reconstructed off-chain by replaying `fee_config_updated` events into the indexer's `fee_config_history` table (defined in [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)).
+> **Historical Fee Configs & Auditability (Proposal + Activation Pattern)**
+> The `scout_access` contract stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`) and optionally a pending proposal (when an increase is being staged for activation).
+> 
+> Historical fee configurations must be reconstructed off-chain by replaying events into the indexer's `fee_config_history` table:
+> - `fee_config_proposed` marks when an increase is staged (proposal timestamp, proposed config).
+> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases).
+> 
+> The audit trail is complete: every config change is visible via one of these two events, and subscribers can be notified of coming increases well in advance.
 
 
 ### `ProContactPeriod`
@@ -2761,11 +3187,13 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Contract initialized |
-| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription |
-| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout |
-| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded |
+| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | player_id (u64), fee_paid (i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | player_id (u64), index (u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | player_id (u64), index (u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | to (Address), amount (i128), timestamp (u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed |
@@ -2788,42 +3216,17 @@ current behavior, why it may be suboptimal, and the recommended change.
 
 ---
 
-### 1. `log_trial_offer` is missing `require_initialized`
+### 1. `log_trial_offer` is missing `require_initialized` — ✅ RESOLVED
 
-**Current behavior**: `log_trial_offer` does not call `require_initialized`,
-unlike every other state-changing function in this contract (`subscribe`,
-`pay_to_contact`, and `batch_contact_players` all call it immediately after
-`require_not_paused`).
+**Resolved in**: PR feat/797-798-801-835 (full guard-ordering audit).
 
-**Why this matters**: On an uninitialized contract, `log_trial_offer` does not
-return `NotInitialized`. Instead it falls through to the subscription lookup,
-which returns `ScoutNotSubscribed` because no storage has been written. This
-means an uninitialized contract appears to a caller as if the scout simply
-has no subscription — an indirect, misleading error rather than the definitive
-"contract not set up" signal.
-
-**When it can surface**: Only on a freshly deployed contract that has never had
-`initialize` called. In production the initialize-then-use deployment flow
-makes this unlikely, but a mis-wired deployment or a test environment that
-calls `log_trial_offer` before `initialize` would observe `ScoutNotSubscribed`
-instead of `NotInitialized`.
-
-**Recommended fix**: Add `Self::require_initialized(&env)?;` immediately after
-`Self::require_not_paused(&env)?;` in `log_trial_offer`, matching the ordering
-of the other three state-changing functions. This is a one-line change, is
-backward-compatible (it makes an already-failing path fail with a more specific
-error), and requires no storage or API changes.
-
-```rust
-// Proposed change in log_trial_offer (contracts/scout_access/src/lib.rs):
-Self::bump_instance_ttl(&env);
-Self::require_not_paused(&env)?;
-Self::require_initialized(&env)?;   // ← add this line
-scout.require_auth();
-```
-
-**Risk**: None. On an initialized contract `require_initialized` always
-succeeds, so existing callers are unaffected.
+All state-changing functions in all four contracts — including `log_trial_offer`,
+`register_player`, `update_profile`, `register_scout`, `admin_seed_player`,
+`admin_seed_scout`, `register_validator`, `batch_register_validators`,
+`approve_milestone`, `resolve_dispute`, and `reset_player_level` — now call
+`require_not_paused` before `require_initialized`, matching the dominant
+convention. `scripts/check-guard-ordering.sh` (wired into the CI lint job)
+enforces this ordering automatically on every future PR.
 
 ---
 

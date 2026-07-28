@@ -70,6 +70,121 @@ re-run the pause command for that contract before proceeding.
 
 ---
 
+## Rehearse Routine Admin Rotation
+
+Use `scripts/rehearse-admin-rotation.sh` to rehearse the two-step
+`propose_admin` → `accept_admin` rotation procedure on a **disposable**
+local or testnet deployment before performing it against a real shared
+testnet or mainnet contract.
+
+This is the **routine, happy-path** counterpart to the tabletop exercise in
+[Emergency: Admin Key Loss / Compromise](#emergency-admin-key-loss--compromise)
+above. That exercise rehearses the failure scenario; this one rehearses the
+normal, successful procedure so operators have practised it at least once
+before they need to do it for real (e.g. onboarding a new platform operator,
+rotating keys after a team member leaves, or regular security hygiene).
+
+### When to run this
+
+- Before performing a routine admin rotation on a shared testnet for the
+  first time.
+- Before performing a rotation on mainnet.
+- Any time the rotation procedure in `ai.md` or `docs/DEPLOYMENT.md` is
+  updated — re-run to confirm the new steps still work end-to-end.
+- As part of onboarding a new operator who will be responsible for admin
+  rotations.
+
+### Prerequisites
+
+- `stellar-cli` installed at the pinned version (see `docs/CONTRIBUTING.md`).
+- A running local Soroban quickstart sandbox **or** testnet access with
+  funded accounts.
+- For local: start the sandbox first (see `docs/DEPLOYMENT.md` or the
+  `bindings-smoke-test` CI job for the exact `docker run` command).
+
+### Run the rehearsal
+
+```bash
+# Against the local quickstart sandbox (default):
+bash scripts/rehearse-admin-rotation.sh local
+
+# Against Stellar testnet (will request funding via friendbot):
+bash scripts/rehearse-admin-rotation.sh testnet
+```
+
+The script:
+1. Generates two fresh ephemeral Stellar identities (`OLD_ADMIN` and `NEW_ADMIN`).
+2. Funds both via friendbot.
+3. Builds and deploys a fresh, isolated set of all four contracts.
+4. Initialises them with `OLD_ADMIN`.
+5. For each contract, performs `propose_admin(NEW_ADMIN)` then `accept_admin()`.
+6. Verifies `NEW_ADMIN` can call `pause_contract` / `unpause_contract`
+   (admin-only operations) after the rotation.
+7. Verifies `OLD_ADMIN` is correctly rejected from admin-only operations.
+8. Cleans up the ephemeral identities.
+
+A `PASS` result means the full rotation procedure worked end-to-end on a
+real Soroban contract deployment and you are ready to perform the same
+steps on your intended target.
+
+### After a successful rehearsal
+
+When you are ready to rotate on a real deployment:
+
+```bash
+# Load the real contract IDs
+source .env.contracts
+
+# --- On the CURRENT admin machine: ---
+stellar contract invoke --id "$REGISTRATION_CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- propose_admin --new_admin "$NEW_ADMIN_ADDRESS"
+
+stellar contract invoke --id "$VERIFICATION_CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- propose_admin --new_admin "$NEW_ADMIN_ADDRESS"
+
+stellar contract invoke --id "$PROGRESS_CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- propose_admin --new_admin "$NEW_ADMIN_ADDRESS"
+
+stellar contract invoke --id "$SCOUT_ACCESS_CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- propose_admin --new_admin "$NEW_ADMIN_ADDRESS"
+
+# --- On the NEW admin machine (the incoming operator): ---
+stellar contract invoke --id "$REGISTRATION_CONTRACT_ID" \
+  --source "$NEW_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- accept_admin
+
+stellar contract invoke --id "$VERIFICATION_CONTRACT_ID" \
+  --source "$NEW_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- accept_admin
+
+stellar contract invoke --id "$PROGRESS_CONTRACT_ID" \
+  --source "$NEW_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- accept_admin
+
+stellar contract invoke --id "$SCOUT_ACCESS_CONTRACT_ID" \
+  --source "$NEW_ADMIN_SECRET" --network "$STELLAR_NETWORK" \
+  -- accept_admin
+```
+
+> **Note**: `propose_admin` stores the proposed address on-chain. The current
+> admin retains all privileges until `accept_admin` is called from the new
+> address — the rotation is not complete until both steps succeed on every
+> contract. Confirm with `health()` and a test admin call after each
+> `accept_admin` to ensure the contract is live and the new key works.
+
+### Scope
+
+This procedure covers the **routine, non-emergency rotation**. For the
+scenario where the current admin key is lost or compromised and cannot sign
+`propose_admin`, see
+[Emergency: Admin Key Loss / Compromise](#emergency-admin-key-loss--compromise).
+
+---
+
 ## Post-Incident Recovery: Unpause All Contracts
 
 Only unpause after the root cause has been confirmed as fixed or mitigated.

@@ -70,10 +70,25 @@ pub struct ProContactPeriod {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrialEscrow {
-    /// Escrowed trial-offer amount in stroops.
+    /// Escrowed trial-offer amount in stroops, set from
+    /// `FeeConfig.trial_offer_escrow_stroops` when `log_trial_offer` creates
+    /// the escrow.
     pub amount: i128,
-    /// Ledger timestamp after which the escrow may be expired, in Unix seconds.
+    /// Ledger timestamp deadline, in Unix seconds, computed as the current
+    /// ledger timestamp plus `FeeConfig.trial_offer_expiry_secs`; checked by
+    /// `confirm_trial_offer` when deciding whether the trial offer is still
+    /// valid.
     pub expires_at: u64,
+}
+
+/// Proposed fee configuration awaiting activation after a delay
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigProposal {
+    /// The proposed fee configuration
+    pub config: FeeConfig,
+    /// Ledger timestamp when the proposal was created
+    pub proposed_at: u64,
 }
 
 /// Platform fee configuration
@@ -98,6 +113,18 @@ pub struct FeeConfig {
     pub trial_offer_expiry_secs: u64,
 }
 
+/// A single entry in the bounded on-chain fee configuration history.
+/// Stored in `DataKey::FeeConfigHistory` as a `Vec<FeeConfigHistoryEntry>`,
+/// oldest-first, capped at `FEE_CONFIG_HISTORY_CAP` entries.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigHistoryEntry {
+    /// The fee configuration that was active before this change.
+    pub config: FeeConfig,
+    /// Ledger timestamp (Unix seconds) when this config was set via `update_fee_config`.
+    pub updated_at: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -106,6 +133,8 @@ pub enum DataKey {
     Initialized,
     Paused,
     FeeConfig,
+    /// Proposed fee configuration awaiting activation after a 7-day delay
+    PendingFeeConfig,
     AccumulatedFees,
     /// Native XLM token contract address
     XlmToken,
@@ -123,6 +152,8 @@ pub enum DataKey {
     TrialOffer(u64, u32),
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
+    /// registration contract address for cross-contract scout verification checks
+    RegistrationContract,
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),
@@ -141,15 +172,10 @@ pub enum DataKey {
     /// (push on creation) and `confirm_trial_offer` (remove on cleanup) so
     /// `expire_trial_offers` can sweep stale escrows without an off-chain index.
     OutstandingTrialEscrows,
-    /// Day-granularity expiry bucket: (expires_at / 86_400) → Vec<Address>.
-    ///
-    /// Maintained by `subscribe` alongside `Subscription(scout)` so that
-    /// `get_expiring_subscriptions` can page through soon-to-expire
-    /// subscriptions in O(days_covered) without walking every scout.
-    ///
-    /// Tradeoff: coarse day-bucket granularity keeps index storage cost low
-    /// (one Vec per day with at least one subscriber) at the cost of requiring
-    /// the caller to re-check `Subscription.expires_at` for exact filtering,
-    /// which `get_subscriptions_expiring_before` already does.
-    ExpiryBucket(u64),
+    /// Bounded on-chain history of the last N FeeConfig values, oldest-first.
+    /// Updated by `update_fee_config`. Exposed via `get_fee_config_history`.
+    FeeConfigHistory,
+    /// scout wallet → bool; true if the scout has opted in to auto-renewal.
+    /// Set by `set_auto_renew`, consumed by `renew_if_due`.
+    AutoRenew(Address),
 }

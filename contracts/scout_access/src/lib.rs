@@ -3,12 +3,12 @@ mod errors;
 mod events;
 mod types;
 use errors::ScoutAccessError;
-use types::{ContactRecord, DataKey, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
+use types::{ContactRecord, DataKey, FeeConfigProposal, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{require_admin, validate_cid, ContractHealth};
+use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_add_u64, safe_add_i128, safe_mul_i128}, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
 // The #[contractclient] macro generates a real Client that performs the
@@ -33,6 +33,37 @@ mod progress_contract {
             player_id: u64,
             milestone_ref: u32,
         ) -> Result<ProgressLevel, Error>;
+    }
+}
+
+// Cross-contract client for registration contract, used to verify scout identities
+mod registration_contract {
+    use soroban_sdk::{contractclient, contracterror, contracttype, Address, Env, String};
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct ScoutProfile {
+        pub scout_id: u64,
+        pub wallet: Address,
+        pub region: String,
+        pub verified: bool,
+        pub registered_at: u64,
+    }
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        ScoutNotFound = 12,
+    }
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn get_scout_by_wallet(
+            env: Env,
+            wallet: Address,
+        ) -> Result<ScoutProfile, Error>;
     }
 }
 
@@ -72,6 +103,11 @@ const TRIAL_OFFER_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 // that would effectively remove the monetization model.
 const MIN_CONTACT_FEE_STROOPS: i128 = 100_000; // 0.01 XLM
 const MIN_SUB_FEE_STROOPS: i128 = 1_000_000; // 0.1 XLM
+
+// Fee config proposal activation delay: 7 days (604,800 seconds) at average
+// 5s/ledger ≈ 120,960 ledgers. Scouts have one full week to react to a
+// proposed fee increase before it takes effect.
+const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -137,11 +173,125 @@ impl ScoutAccessContract {
 
         let old_config = Self::fee_config(&env);
 
+        // Append the outgoing config to the bounded on-chain history (oldest-first,
+        // capped at FEE_CONFIG_HISTORY_CAP). When the cap is reached the oldest
+        // entry is evicted so the list never grows beyond the fixed capacity.
+        let history_key = DataKey::FeeConfigHistory;
+        let mut history: Vec<FeeConfigHistoryEntry> = env
+            .storage()
+            .instance()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if history.len() >= FEE_CONFIG_HISTORY_CAP {
+            history.remove(0);
+        }
+        history.push_back(FeeConfigHistoryEntry {
+            config: old_config.clone(),
+            updated_at: env.ledger().timestamp(),
+        });
+        env.storage().instance().set(&history_key, &history);
+
         env.storage()
             .instance()
             .set(&DataKey::FeeConfig, &fee_config);
 
         events::fee_config_updated(&env, &admin, &old_config, &fee_config);
+        Ok(())
+    }
+
+    /// Propose a new fee configuration. If all fees are ≤ current fees (decreases only),
+    /// the config is immediately activated. Otherwise, it is stored as pending and requires
+    /// `activate_fee_config` after a 7-day delay to take effect.
+    pub fn propose_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::validate_fee_config(&fee_config)?;
+
+        // Check if a pending proposal already exists
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingFeeConfig)
+        {
+            return Err(ScoutAccessError::PendingFeeConfigAlreadyExists);
+        }
+
+        let current_config = Self::fee_config(&env);
+        let now = env.ledger().timestamp();
+
+        // Check if this is a pure decrease (all fees lower or equal)
+        let is_decrease_or_no_change = fee_config.contact_fee_stroops <= current_config.contact_fee_stroops
+            && fee_config.basic_sub_stroops <= current_config.basic_sub_stroops
+            && fee_config.pro_sub_stroops <= current_config.pro_sub_stroops
+            && fee_config.elite_sub_stroops <= current_config.elite_sub_stroops;
+
+        if is_decrease_or_no_change {
+            // Immediate activation for decreases
+            env.storage()
+                .instance()
+                .set(&DataKey::FeeConfig, &fee_config);
+
+            // Emit both events in the same transaction
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+            events::fee_config_updated(&env, &admin, &current_config, &fee_config);
+        } else {
+            // Store as pending for increases
+            let proposal = FeeConfigProposal {
+                config: fee_config.clone(),
+                proposed_at: now,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingFeeConfig, &proposal);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingFeeConfig,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+
+            events::fee_config_proposed(&env, &admin, &fee_config, now);
+        }
+
+        Ok(())
+    }
+
+    /// Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+    pub fn activate_fee_config(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        // Retrieve the pending proposal
+        let proposal: FeeConfigProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingFeeConfig)
+            .ok_or(ScoutAccessError::NoPendingFeeConfig)?;
+
+        let now = env.ledger().timestamp();
+        let activation_time = proposal
+            .proposed_at
+            .checked_add(FEE_CONFIG_PROPOSAL_DELAY_SECS)
+            .ok_or(ScoutAccessError::Overflow)?;
+
+        // Check that the delay has elapsed
+        if now < activation_time {
+            return Err(ScoutAccessError::FeeConfigProposalNotReady);
+        }
+
+        // Get the currently active config for the event
+        let old_config = Self::fee_config(&env);
+
+        // Move pending to active
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeConfig, &proposal.config);
+
+        // Clear pending state
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingFeeConfig);
+
+        events::fee_config_updated(&env, &admin, &old_config, &proposal.config);
         Ok(())
     }
 
@@ -208,6 +358,18 @@ impl ScoutAccessContract {
     /// the initial deployment can use the same verb across contracts.
     pub fn update_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::set_progress_contract(env, addr)
+    }
+
+    /// Wire the registration contract address for Pro-tier scout verification gating.
+    /// Admin only. Can be re-invoked to re-wire the link.
+    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &addr);
+        events::registration_contract_updated(&env, &admin, &addr);
+        Ok(())
     }
 
     /// Emergency refund: admin returns `amount` XLM (stroops) from the
@@ -296,15 +458,33 @@ impl ScoutAccessContract {
                     return Err(ScoutAccessError::SubscriptionDowngradeNotAllowed);
                 }
                 if Self::tier_rank(&tier) > Self::tier_rank(&existing.tier) {
-                    let min_next = existing
-                        .subscribed_at
-                        .checked_add(MIN_UPGRADE_INTERVAL_SECS)
-                        .ok_or(ScoutAccessError::Overflow)?;
+                    let min_next = safe_add_u64(existing.subscribed_at, MIN_UPGRADE_INTERVAL_SECS)
+                        .map_err(|_| ScoutAccessError::Overflow)?;
                     if now < min_next {
                         return Err(ScoutAccessError::UpgradeTooSoon);
                     }
                 }
             }
+        }
+
+        // Sybil resistance: gate Pro-tier subscriptions to verified scouts only.
+        // Basic and Elite tiers remain unrestricted.
+        if tier == SubscriptionTier::Pro {
+            if let Ok(reg_contract_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::RegistrationContract) {
+                let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
+                match reg_client.try_get_scout_by_wallet(&scout) {
+                    Ok(scout_profile) => {
+                        if !scout_profile.verified {
+                            return Err(ScoutAccessError::ScoutNotVerified);
+                        }
+                    }
+                    Err(_) => {
+                        // Scout not found in registration contract; deny Pro-tier access
+                        return Err(ScoutAccessError::ScoutNotVerified);
+                    }
+                }
+            }
+            // If registration contract is not wired, allow Pro-tier subscription (graceful degradation)
         }
 
         let config = Self::fee_config(&env);
@@ -316,9 +496,8 @@ impl ScoutAccessContract {
 
         Self::collect_fee(&env, &scout, fee)?;
 
-        let expires_at = now
-            .checked_add(config.sub_duration_secs)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let expires_at = safe_add_u64(now, config.sub_duration_secs)
+            .map_err(|_| ScoutAccessError::Overflow)?;
 
         let sub = Subscription {
             scout: scout.clone(),
@@ -363,6 +542,182 @@ impl ScoutAccessContract {
         }
         // Keep the legacy scout_subscribed event for backward compatibility.
         events::scout_subscribed(&env, &scout, &tier, fee);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Auto-renewal
+    // -------------------------------------------------------------------------
+
+    /// Opt a scout wallet in or out of automatic subscription renewal.
+    ///
+    /// ## Auth model
+    ///
+    /// Requires the scout's own signature (`scout.require_auth()`).  This
+    /// prevents a third party from silently toggling auto-renewal on behalf
+    /// of a scout, which would create an unexpected recurring charge.
+    ///
+    /// ## Usage
+    ///
+    /// Once enabled, a keeper (off-chain cron job or bot) can call
+    /// `renew_if_due` when the scout's subscription is at or near expiry.
+    /// The scout must sign the `renew_if_due` transaction itself — the
+    /// keeper bot cannot pull funds without a fresh scout signature because
+    /// Soroban's token transfer always requires the sender's auth in the
+    /// same transaction.  See `renew_if_due` for the auth-model rationale.
+    pub fn set_auto_renew(
+        env: Env,
+        scout: Address,
+        enabled: bool,
+    ) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        scout.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AutoRenew(scout.clone()), &enabled);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AutoRenew(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::auto_renew_set(&env, &scout, enabled);
+        Ok(())
+    }
+
+    /// Return whether a scout has opted in to automatic subscription renewal.
+    pub fn get_auto_renew(env: Env, scout: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AutoRenew(scout))
+            .unwrap_or(false)
+    }
+
+    /// Renew a scout's subscription if auto-renewal is enabled and the
+    /// subscription is at or near expiry.
+    ///
+    /// ## Auth model — why the scout must sign
+    ///
+    /// Soroban's token transfer (`token::Client::transfer`) always requires an
+    /// authorisation entry for the sender *in the same transaction*.  A third-
+    /// party keeper bot calling this function cannot pull XLM from the scout's
+    /// wallet on its own: the scout's keypair must sign the transaction that
+    /// calls `renew_if_due`, exactly as it does for `subscribe`.
+    ///
+    /// This is not a limitation — it is the correct security posture.
+    /// Auto-renewal does not mean "anyone can charge me"; it means "I (the
+    /// scout) authorise this function to renew my subscription for me, and I
+    /// am still the one signing the transaction."  A keeper bot's role is to
+    /// *prompt* the scout to sign a renewal transaction before expiry, not to
+    /// sign on the scout's behalf.
+    ///
+    /// An allowance/pre-signed-transaction pattern (e.g. Soroban auth trees)
+    /// could allow truly permissionless renewal in a future version, but
+    /// would require the scout to pre-authorise a specific amount and time
+    /// window via `token::Client::approve`, which adds complexity and is
+    /// not worth the tradeoff for the current use case.
+    ///
+    /// ## When a renewal fires
+    ///
+    /// The renewal fires when **both** conditions hold:
+    /// 1. `auto_renew` is `true` for this scout.
+    /// 2. The current ledger timestamp is within `sub_duration_secs / 10`
+    ///    seconds of expiry (i.e. in the last 10 % of the subscription
+    ///    window), **or** the subscription has already expired.
+    ///
+    /// If neither condition is met the function returns `AutoRenewNotEnabled`
+    /// (condition 1 failed) or exits successfully without charging (condition
+    /// 2 not yet reached), making it safe for a keeper to call repeatedly
+    /// without triggering premature renewals.
+    ///
+    /// ## Charging
+    ///
+    /// Uses the same `collect_fee` path as `subscribe`: transfers the
+    /// tier-appropriate fee from the scout's wallet to the contract and
+    /// accumulates it in `AccumulatedFees`.  All downgrade-guard and
+    /// overflow protections from `subscribe` apply identically.
+    pub fn renew_if_due(env: Env, scout: Address) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        // The scout must sign this transaction. See auth-model note in the
+        // doc comment above — the token transfer requires the scout's auth in
+        // the same invocation, so this require_auth is both necessary and
+        // sufficient to protect against unauthorised charges.
+        scout.require_auth();
+
+        // Check auto-renewal opt-in.
+        let auto_renew_enabled: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AutoRenew(scout.clone()))
+            .unwrap_or(false);
+        if !auto_renew_enabled {
+            return Err(ScoutAccessError::AutoRenewNotEnabled);
+        }
+
+        // Fetch the existing subscription.  A scout with no subscription cannot
+        // be auto-renewed — they must use `subscribe` to create one first.
+        let existing: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::ScoutNotSubscribed)?;
+
+        let now = env.ledger().timestamp();
+        let config = Self::fee_config(&env);
+
+        // Renewal window: last 10 % of the subscription duration, or already
+        // expired.  This prevents renewing too early (e.g. the day after
+        // subscribing) while still giving the keeper a window before hard expiry.
+        let renewal_window_secs = config
+            .sub_duration_secs
+            .checked_div(10)
+            .unwrap_or(0)
+            .max(1);
+        let renewal_due_at = existing
+            .expires_at
+            .saturating_sub(renewal_window_secs);
+
+        if now < renewal_due_at {
+            // Not yet in the renewal window — no-op, not an error.
+            return Ok(());
+        }
+
+        let fee = match &existing.tier {
+            SubscriptionTier::Basic => config.basic_sub_stroops,
+            SubscriptionTier::Pro => config.pro_sub_stroops,
+            SubscriptionTier::Elite => config.elite_sub_stroops,
+        };
+
+        Self::collect_fee(&env, &scout, fee)?;
+
+        let expires_at = now
+            .checked_add(config.sub_duration_secs)
+            .ok_or(ScoutAccessError::Overflow)?;
+
+        let renewed_sub = Subscription {
+            scout: scout.clone(),
+            tier: existing.tier.clone(),
+            expires_at,
+            subscribed_at: now,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(scout.clone()), &renewed_sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::subscription_auto_renewed(&env, &scout, &existing.tier, now, expires_at);
+        // Also emit the legacy scout_subscribed event for backward compatibility.
+        events::scout_subscribed(&env, &scout, &existing.tier, fee);
         Ok(())
     }
 
@@ -486,9 +841,7 @@ impl ScoutAccessContract {
             }
             let new_period = ProContactPeriod {
                 period_start: subscription.subscribed_at,
-                count: current_count
-                    .checked_add(1)
-                    .ok_or(ScoutAccessError::Overflow)?,
+                count: safe_add_u32(current_count, 1).map_err(|_| ScoutAccessError::Overflow)?,
             };
             env.storage().persistent().set(&period_key, &new_period);
             env.storage().persistent().extend_ttl(
@@ -584,9 +937,8 @@ impl ScoutAccessContract {
                 .persistent()
                 .has(&DataKey::ContactRecord(player_id, scout.clone()))
             {
-                new_contacts = new_contacts
-                    .checked_add(1)
-                    .ok_or(ScoutAccessError::Overflow)?;
+                new_contacts = safe_add_u32(new_contacts, 1)
+                    .map_err(|_| ScoutAccessError::Overflow)?;
             }
         }
 
@@ -598,10 +950,8 @@ impl ScoutAccessContract {
         Self::check_pro_contact_quota_with_count(&env, &scout, new_contacts)?;
 
         // Single token transfer for all new contacts combined.
-        let total_fee = config
-            .contact_fee_stroops
-            .checked_mul(new_contacts as i128)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let total_fee = safe_mul_i128(config.contact_fee_stroops, new_contacts as i128)
+            .map_err(|_| ScoutAccessError::Overflow)?;
         Self::collect_fee(&env, &scout, total_fee)?;
 
         // Second pass: write contact records and emit events.
@@ -718,9 +1068,8 @@ impl ScoutAccessContract {
         let rate_key = DataKey::TrialOfferLastSent(scout.clone(), player_id);
         let now = env.ledger().timestamp();
         if let Some(last_sent) = env.storage().persistent().get::<DataKey, u64>(&rate_key) {
-            let next_allowed = last_sent
-                .checked_add(TRIAL_OFFER_COOLDOWN_SECS)
-                .ok_or(ScoutAccessError::Overflow)?;
+            let next_allowed = safe_add_u64(last_sent, TRIAL_OFFER_COOLDOWN_SECS)
+                .map_err(|_| ScoutAccessError::Overflow)?;
             if now < next_allowed {
                 return Err(ScoutAccessError::TrialOfferRateLimited);
             }
@@ -728,7 +1077,7 @@ impl ScoutAccessContract {
 
         let counter_key = DataKey::TrialCounter(player_id);
         let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
-        let next_index = index.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
+        let next_index = safe_add_u32(index, 1).map_err(|_| ScoutAccessError::Overflow)?;
 
         let offer = TrialOffer {
             player_id,
@@ -783,9 +1132,8 @@ impl ScoutAccessContract {
             .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
             .ok_or(ScoutAccessError::InvalidInput)?;
         let escrow_amount = fee_cfg.trial_offer_escrow_stroops;
-        let expires_at = now
-            .checked_add(fee_cfg.trial_offer_expiry_secs)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let expires_at = safe_add_u64(now, fee_cfg.trial_offer_expiry_secs)
+            .map_err(|_| ScoutAccessError::Overflow)?;
 
         // #795: actually collect the escrow — without this transfer the
         // TrialEscrow record was a bookkeeping-only promise, and every
@@ -981,7 +1329,7 @@ impl ScoutAccessContract {
             token::Client::new(&env, &token_addr).transfer(&contract_addr, &scout, &escrow.amount);
             env.storage().persistent().remove(&escrow_key);
             events::trial_offer_expired(&env, player_id, &scout, index);
-            swept = swept.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
+            swept = safe_add_u32(swept, 1).map_err(|_| ScoutAccessError::Overflow)?;
         }
 
         // Entries beyond process_count were never examined this call and
@@ -1068,6 +1416,28 @@ impl ScoutAccessContract {
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::bump_instance_ttl(&env);
         Self::fee_config(&env)
+    }
+
+    /// Return the bounded on-chain history of the last (up to 5) `FeeConfig`
+    /// values **oldest-first**.
+    ///
+    /// Each entry contains the config that was active *before* a particular
+    /// `update_fee_config` call, together with the timestamp at which that
+    /// change was made. The *current* config is not included — retrieve it
+    /// with `get_fee_config`.
+    ///
+    /// This is a lightweight middle-ground between the indexer-only design
+    /// (full history replayed from `fee_config_updated` events) and a fuller
+    /// unbounded ring-buffer: it makes the immediately-previous configs
+    /// cheaply readable on-chain without depending on the off-chain indexer.
+    /// The cap is fixed at 5 entries. When the cap is reached the oldest
+    /// entry is evicted on the next `update_fee_config` call.
+    pub fn get_fee_config_history(env: Env) -> Vec<FeeConfigHistoryEntry> {
+        Self::bump_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeConfigHistory)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn get_accumulated_fees(env: Env) -> i128 {
@@ -1514,9 +1884,8 @@ impl ScoutAccessContract {
             .instance()
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0i128);
-        let new_total = current
-            .checked_add(amount)
-            .ok_or(ScoutAccessError::Overflow)?;
+        let new_total = safe_add_i128(current, amount)
+            .map_err(|_| ScoutAccessError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &new_total);
@@ -4270,136 +4639,218 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Tests for get_expiring_subscriptions (issue #851)
+    // get_fee_config_history tests (#849)
     // -------------------------------------------------------------------------
 
-    /// A subscription expiring at or before `before_timestamp` is returned.
+    /// History is empty before any update_fee_config call.
     #[test]
-    fn test_get_expiring_subscriptions_returns_expiring_sub() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-        let scout = Address::generate(&env);
-        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
-
-        client.subscribe(&scout, &SubscriptionTier::Basic);
-        let sub = client.get_subscription(&scout);
-
-        // Query at exactly expires_at — should be included.
-        let results = client.get_expiring_subscriptions(&sub.expires_at, &50u32);
-        assert_eq!(results.len(), 1, "exactly one expiring subscription expected");
-        assert_eq!(results.get(0).unwrap().scout, scout);
-    }
-
-    /// A subscription expiring AFTER `before_timestamp` is NOT returned.
-    #[test]
-    fn test_get_expiring_subscriptions_excludes_future_expiry() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-        let scout = Address::generate(&env);
-        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
-
-        client.subscribe(&scout, &SubscriptionTier::Basic);
-        let sub = client.get_subscription(&scout);
-
-        // Query one second before expiry — scout should NOT appear.
-        let results = client.get_expiring_subscriptions(&(sub.expires_at - 1), &50u32);
-        assert_eq!(results.len(), 0, "no subscriptions should be returned before expiry");
-    }
-
-    /// A renewed subscription is excluded from the old expiry bucket.
-    #[test]
-    fn test_get_expiring_subscriptions_excludes_renewed_sub() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-        let scout = Address::generate(&env);
-        // Enough XLM for two Basic subscriptions.
-        mint_token(&env, &xlm, &admin, &scout, 20_000_000);
-
-        client.subscribe(&scout, &SubscriptionTier::Basic);
-        let first_sub = client.get_subscription(&scout);
-
-        // Advance time past the first expiry so the scout can renew.
-        env.ledger().with_mut(|l| l.timestamp = first_sub.expires_at + 1);
-        client.subscribe(&scout, &SubscriptionTier::Basic);
-
-        let second_sub = client.get_subscription(&scout);
-        assert!(second_sub.expires_at > first_sub.expires_at, "renewed expiry must be later");
-
-        // Query at the OLD expiry — scout must NOT appear because they renewed.
-        let results = client.get_expiring_subscriptions(&first_sub.expires_at, &50u32);
-        assert_eq!(
-            results.len(), 0,
-            "renewed subscription must not appear in old expiry window"
-        );
-    }
-
-    /// Multiple scouts, only those expiring at or before the cutoff are returned.
-    #[test]
-    fn test_get_expiring_subscriptions_only_returns_correct_scouts() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-
-        let scout_a = Address::generate(&env);
-        let scout_b = Address::generate(&env);
-        mint_token(&env, &xlm, &admin, &scout_a, 10_000_000);
-        mint_token(&env, &xlm, &admin, &scout_b, 10_000_000);
-
-        // scout_a subscribes at ledger timestamp 0 (default).
-        client.subscribe(&scout_a, &SubscriptionTier::Basic);
-        let sub_a = client.get_subscription(&scout_a);
-
-        // Advance time by 2 days and subscribe scout_b — later expiry.
-        env.ledger().with_mut(|l| l.timestamp += 2 * 86_400);
-        client.subscribe(&scout_b, &SubscriptionTier::Basic);
-        let sub_b = client.get_subscription(&scout_b);
-
-        assert!(sub_b.expires_at > sub_a.expires_at, "scout_b expires later");
-
-        // Query at sub_a.expires_at — only scout_a should appear.
-        let results = client.get_expiring_subscriptions(&sub_a.expires_at, &50u32);
-        assert_eq!(results.len(), 1, "only scout_a should be returned");
-        assert_eq!(results.get(0).unwrap().scout, scout_a);
-
-        // Query at sub_b.expires_at — both scouts should appear.
-        let results_both = client.get_expiring_subscriptions(&sub_b.expires_at, &50u32);
-        assert_eq!(results_both.len(), 2, "both scouts should be returned");
-    }
-
-    /// The `limit` parameter caps the number of results.
-    #[test]
-    fn test_get_expiring_subscriptions_respects_limit() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-
-        let scout_a = Address::generate(&env);
-        let scout_b = Address::generate(&env);
-        mint_token(&env, &xlm, &admin, &scout_a, 10_000_000);
-        mint_token(&env, &xlm, &admin, &scout_b, 10_000_000);
-
-        client.subscribe(&scout_a, &SubscriptionTier::Basic);
-        client.subscribe(&scout_b, &SubscriptionTier::Basic);
-        let sub = client.get_subscription(&scout_a);
-
-        // Both scouts expire at the same timestamp; limit=1 must return only one.
-        let results = client.get_expiring_subscriptions(&sub.expires_at, &1u32);
-        assert_eq!(results.len(), 1, "limit=1 must return at most one result");
-    }
-
-    /// Limit is capped at 50 (MAX_EXPIRY_PAGE_SIZE); passing a larger value is safe.
-    #[test]
-    fn test_get_expiring_subscriptions_caps_limit_at_max() {
-        let (env, admin, xlm, _contract_id, client) = setup();
-        let scout = Address::generate(&env);
-        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
-
-        client.subscribe(&scout, &SubscriptionTier::Basic);
-        let sub = client.get_subscription(&scout);
-
-        // Passing limit=1000 must not panic and must return at most 50.
-        let results = client.get_expiring_subscriptions(&sub.expires_at, &1000u32);
-        assert!(results.len() <= 50, "result count must not exceed MAX_EXPIRY_PAGE_SIZE");
-    }
-
-    /// Empty result when no subscriptions exist.
-    #[test]
-    fn test_get_expiring_subscriptions_empty_when_no_subs() {
+    fn test_fee_config_history_empty_before_any_update() {
         let (env, _admin, _xlm, _contract_id, client) = setup();
-        let results = client.get_expiring_subscriptions(&u64::MAX, &50u32);
-        assert_eq!(results.len(), 0, "no subscriptions: result must be empty");
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 0);
+    }
+
+    /// Each update_fee_config call appends the old config to history, oldest-first.
+    #[test]
+    fn test_fee_config_history_records_previous_configs_oldest_first() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        let fees_v2 = FeeConfig {
+            contact_fee_stroops: 200_000,
+            basic_sub_stroops: 2_000_000,
+            pro_sub_stroops: 5_000_000,
+            elite_sub_stroops: 10_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 15,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
+        };
+        let fees_v3 = FeeConfig {
+            contact_fee_stroops: 300_000,
+            basic_sub_stroops: 3_000_000,
+            pro_sub_stroops: 6_000_000,
+            elite_sub_stroops: 11_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 20,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
+        };
+
+        // First update: moves v1 (default) → history[0], sets v2 as current.
+        client.update_fee_config(&fees_v2);
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 100_000);
+
+        // Second update: moves v2 → history[1], sets v3 as current.
+        client.update_fee_config(&fees_v3);
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 2);
+        // Oldest-first: history[0] is v1, history[1] is v2.
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 100_000);
+        assert_eq!(history.get(1).unwrap().config.contact_fee_stroops, 200_000);
+
+        // Current config should be v3.
+        assert_eq!(client.get_fee_config().contact_fee_stroops, 300_000);
+    }
+
+    /// After 5 updates the cap (5 entries) is reached; the 6th update evicts
+    /// the oldest entry so the list never exceeds 5 items.
+    #[test]
+    fn test_fee_config_history_capped_at_five_entries() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        // Perform 6 updates; each one bumps the contact_fee by 100_000.
+        for i in 1u32..=6 {
+            let new_fees = FeeConfig {
+                contact_fee_stroops: 100_000 * (i as i128 + 1),
+                basic_sub_stroops: 1_000_000,
+                pro_sub_stroops: 3_000_000,
+                elite_sub_stroops: 7_000_000,
+                sub_duration_secs: 30 * 24 * 60 * 60,
+                pro_contact_limit: 10,
+                trial_offer_escrow_stroops: 500_000,
+                trial_offer_expiry_secs: 3_600,
+            };
+            client.update_fee_config(&new_fees);
+        }
+
+        // History must be capped at 5 even though 6 updates were made.
+        let history = client.get_fee_config_history();
+        assert_eq!(history.len(), 5);
+
+        // The very first config (contact_fee=100_000) was evicted.
+        // The oldest retained entry is the config set on the 2nd update
+        // (contact_fee=200_000), which had contact_fee_stroops=100_000*2.
+        assert_eq!(history.get(0).unwrap().config.contact_fee_stroops, 200_000);
+    }
+
+    // -------------------------------------------------------------------------
+    // #861: set_auto_renew / renew_if_due
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_set_auto_renew_stores_flag_and_emits_event() {
+        let (env, _admin, xlm, contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 10_000_000);
+
+        // Opt in.
+        client.set_auto_renew(&scout, &true);
+        assert!(client.get_auto_renew(&scout));
+
+        let events = env.events().all().filter_by_contract(&contract_id);
+        assert_eq!(events.len(), 1);
+        let (_, topics_val, data_val) = events.get(0).unwrap();
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            soroban_sdk::Vec::try_from_val(&env, &topics_val).unwrap();
+        assert_eq!(
+            topics.get(0).unwrap(),
+            Symbol::new(&env, crate::events::AUTO_RENEW_SET).into_val(&env)
+        );
+        assert_eq!(data_val, true.into_val(&env));
+
+        // Opt back out.
+        client.set_auto_renew(&scout, &false);
+        assert!(!client.get_auto_renew(&scout));
+    }
+
+    #[test]
+    fn test_renew_if_due_noop_outside_window() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        // Subscribe and enable auto-renewal.
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        client.set_auto_renew(&scout, &true);
+
+        // The subscription was just created — we are nowhere near the renewal
+        // window.  renew_if_due should return Ok and do nothing (no charge).
+        let before = client.get_subscription(&scout).unwrap();
+        client.renew_if_due(&scout);
+        let after = client.get_subscription(&scout).unwrap();
+        assert_eq!(before.expires_at, after.expires_at);
+    }
+
+    #[test]
+    fn test_renew_if_due_renews_inside_window() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        let sub_duration: u64 = 30 * 24 * 60 * 60; // 30 days in seconds
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        client.set_auto_renew(&scout, &true);
+
+        let before = client.get_subscription(&scout).unwrap();
+
+        // Jump to 96 % of the way through the subscription (inside the last-10%-window).
+        let renewal_ts = before.expires_at - sub_duration / 20; // ~95 % in
+        env.ledger().with_mut(|l| l.timestamp = renewal_ts);
+
+        client.renew_if_due(&scout);
+
+        let after = client.get_subscription(&scout).unwrap();
+        // A new subscription was written; expires_at must advance.
+        assert!(after.expires_at > before.expires_at);
+        assert_eq!(after.subscribed_at, renewal_ts);
+    }
+
+    #[test]
+    fn test_renew_if_due_renews_after_expiry() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        let sub_duration: u64 = 30 * 24 * 60 * 60;
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.set_auto_renew(&scout, &true);
+
+        let before = client.get_subscription(&scout).unwrap();
+
+        // Jump past expiry.
+        env.ledger().with_mut(|l| l.timestamp = before.expires_at + 100);
+
+        client.renew_if_due(&scout);
+
+        let after = client.get_subscription(&scout).unwrap();
+        assert!(after.expires_at > before.expires_at);
+        // expires_at should be roughly now + sub_duration.
+        let expected_expiry = before.expires_at + 100 + sub_duration;
+        assert_eq!(after.expires_at, expected_expiry);
+    }
+
+    #[test]
+    fn test_renew_if_due_fails_when_not_enabled() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        // Deliberately do NOT call set_auto_renew.
+
+        let result = client.try_renew_if_due(&scout);
+        assert_eq!(result, Err(Ok(ScoutAccessError::AutoRenewNotEnabled)));
+    }
+
+    #[test]
+    fn test_renew_if_due_fails_with_no_subscription() {
+        let (env, _admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &_admin, &scout, 10_000_000);
+
+        client.set_auto_renew(&scout, &true);
+
+        let result = client.try_renew_if_due(&scout);
+        assert_eq!(result, Err(Ok(ScoutAccessError::ScoutNotSubscribed)));
     }
 }

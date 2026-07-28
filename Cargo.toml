@@ -33,4 +33,6 @@ inherits = "release"
 debug-assertions = true
 
 [patch.crates-io]
+# Pin hashbrown to the v0.14.5 source known to compile for Soroban SDK 25.x
+# WASM builds; this override was introduced with validator vector tracking.
 hashbrown = { git = 'https://github.com/rust-lang/hashbrown.git', tag = 'v0.14.5' }
