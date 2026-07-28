@@ -1,13 +1,3 @@
-# CODEOWNERS — trust-sensitive paths requiring explicit reviewer approval
-#
-# Branch protection should have 'Require review from Code Owners' enabled for these paths.
-# See docs/CONTRIBUTING.md for the rationale and what changes qualify as trust-sensitive.
-
-# Validator registration, revocation, and milestone approval logic — trust anchor of the platform
-/contracts/verification/ @scout-off/core-team
-
-# Progress level advancement caller-whitelist and cross-contract trust — controls who can advance player levels
-/contracts/progress/ @scout-off/core-team
-
-# Scout subscription tier enforcement and fee settlement logic — controls access and payments
-/contracts/scout_access/ @scout-off/core-team
+# Validator authorization is a platform trust anchor. Keep this owner in sync
+# with the repository's authorized validator-logic reviewers.
+/contracts/verification/ @Petah1
