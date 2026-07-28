@@ -1,23 +1,16 @@
 {
-  "name": "@scoutchain/contracts",
-  "version": "0.1.0",
+  "name": "scoutchain-contracts-tooling",
   "private": true,
-  "description": "ScoutChain Soroban smart contracts — decentralized football talent scouting on Stellar",
-  "homepage": "https://github.com/scout-off/scout-off-contracts",
+  "version": "1.0.0",
+  "description": "Node-based tooling for scout-off-contracts (currently just the on-chain/off-chain indexer reconciliation script). Does not affect the Rust contracts or bindings/ packages.",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "scripts": {
-    "build": "cargo build --workspace --target wasm32v1-none --release",
-    "test": "cargo test --workspace",
-    "lint": "cargo clippy --workspace -- -D warnings && cargo fmt --all -- --check"
+    "reconcile-indexer": "node scripts/reconcile-indexer.js"
   },
-  "keywords": [
-    "stellar",
-    "soroban",
-    "scoutchain",
-    "smart-contracts",
-    "blockchain"
-  ]
+  "dependencies": {
+    "pg": "^8.11.0"
+  }
 }
