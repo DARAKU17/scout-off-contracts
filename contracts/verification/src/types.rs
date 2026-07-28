@@ -1,6 +1,38 @@
 pub use scoutchain_shared_types::ContractHealth;
 use soroban_sdk::{contracttype, Address, String, Vec};
 
+const MAX_ISSUERS: u32 = 20;
+
+/// A trusted credential issuer authorized to sign validator attestation claims.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Issuer {
+    /// Issuer wallet address (also the ed25519 public key holder).
+    pub wallet: Address,
+    /// Human-readable issuer name (e.g. "Football Federation", "UEFA").
+    pub name: String,
+    /// Ledger timestamp when the issuer was registered.
+    pub registered_at: u64,
+    /// Whether this issuer is currently authorized to sign attestations.
+    pub active: bool,
+}
+
+/// A signed credential claim produced by an issuer off-chain.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CredentialAttestation {
+    /// Wallet address of the issuer who signed this attestation.
+    pub issuer_wallet: Address,
+    /// Validator wallet being attested.
+    pub validator_wallet: Address,
+    /// Credential type label (e.g. "UEFA B License").
+    pub credential_type: String,
+    /// Unix timestamp when the credential expires (0 = no expiry).
+    pub expires_at: u64,
+    /// ed25519 signature over (issuer_wallet || validator_wallet || credential_type || expires_at).
+    pub signature: Vec<u8>,
+}
+
 /// Richer validator status — distinguishes unregistered from revoked.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -140,4 +172,10 @@ pub enum DataKey {
     /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
     /// Exposed via `list_disputes_page(offset, limit)`.
     OpenDisputeIndex,
+    /// Issuer registry: wallet → Issuer record.
+    Issuer(Address),
+    /// Vector of all registered issuer wallets (for enumeration).
+    IssuerVector,
+    /// Total number of registered issuers.
+    TotalIssuerCount,
 }

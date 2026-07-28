@@ -16,6 +16,7 @@ pub use types::PlayerVitals;
 
 use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::crypto::sha256;
 
 // Generated client stub for the progress contract — used to resolve a player's
 // current level at read time.  `level` is never stored in this contract.
@@ -566,6 +567,240 @@ impl RegistrationContract {
 
         events::scout_registered(&env, scout_id, &wallet);
         Ok(scout_id)
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration ticket protocol
+    // -------------------------------------------------------------------------
+
+    /// Redeem a player migration authorization signed by the player off-chain.
+    ///
+    /// A relayer with no player private key can call this function to recreate
+    /// a player's profile on a freshly deployed contract. The function verifies
+    /// the player's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Player=0) || profile_data_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_player(
+        env: Env,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        level: ProgressLevel,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Player {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile_data_hash = Self::profile_data_hash(&env, &wallet, &vitals, &ipfs_hashes, player_id, registered_at, updated_at);
+        if authorization.profile_data_hash != profile_data_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
+            &true,
+        );
+
+        let result = Self::admin_seed_player(&env, wallet, vitals, ipfs_hashes, level, player_id, registered_at, updated_at);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Player, player_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Redeem a scout migration authorization signed by the scout off-chain.
+    ///
+    /// A relayer with no scout private key can call this function to recreate
+    /// a scout's profile on a freshly deployed contract. The function verifies
+    /// the scout's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Scout=1) || region_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_scout(
+        env: Env,
+        wallet: Address,
+        region: String,
+        scout_id: u64,
+        registered_at: u64,
+        verified: bool,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Scout {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let region_hash = Self::region_hash(&env, &region);
+        if authorization.profile_data_hash != region_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
+            &true,
+        );
+
+        let result = Self::admin_seed_scout(&env, wallet, region, scout_id, registered_at, verified);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Scout, scout_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Compute a hash of the player profile data for migration authorization.
+    fn profile_data_hash(
+        env: &Env,
+        wallet: &Address,
+        vitals: &PlayerVitals,
+        ipfs_hashes: &Vec<String>,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+    ) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in wallet.to_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.age.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.position.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.nationality.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for hash in ipfs_hashes.iter() {
+            for b in hash.as_bytes() {
+                hasher.update(&[b]);
+            }
+        }
+        for b in player_id.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in registered_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in updated_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Compute a hash of the scout profile data for migration authorization.
+    fn region_hash(env: &Env, region: &String) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Construct the canonical message that a player/scout signs for migration.
+    fn migration_message(env: &Env, auth: &MigrationAuthorization) -> Vec<u8> {
+        let mut msg = Vec::new(env);
+        for b in auth.wallet.to_bytes() {
+            msg.push_back(b);
+        }
+        let role_byte = match auth.role {
+            MigrationRole::Player => 0u8,
+            MigrationRole::Scout => 1u8,
+        };
+        msg.push_back(role_byte);
+        for b in &auth.profile_data_hash {
+            msg.push_back(*b);
+        }
+        for b in auth.new_contract_hint.to_bytes() {
+            msg.push_back(b);
+        }
+        for b in auth.nonce.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        for b in auth.expires_at.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        msg
+    }
+
+    /// Derive an ed25519 public key from a wallet address.
+    ///
+    /// Soroban Ed25519 addresses encode the public key starting at byte 1
+    /// (byte 0 is the type discriminator).
+    fn address_to_ed25519(env: &Env, address: &Address) -> [u8; 32] {
+        let bytes = address.to_bytes();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes.0[1..33]);
+        key
+    }
+
+    /// Convert a Vec<u8> signature into a fixed-size [u8; 64] array.
+    fn vec_to_signature(sig: Vec<u8>) -> [u8; 64] {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&sig);
+        arr
     }
 
     // -------------------------------------------------------------------------

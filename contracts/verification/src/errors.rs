@@ -61,6 +61,20 @@ pub enum VerificationError {
     // ── Function-scoped pausing ──
     /// The approve_milestone function is paused independently of whole-contract pause.
     ApproveMilestonePaused = 20,
+
+    // ── Credential attestation ──
+    /// The provided attestation signature is invalid or does not match the expected issuer.
+    InvalidAttestation = 21,
+    /// The attestation issuer is not registered in the trusted issuer registry.
+    UntrustedIssuer = 22,
+    /// The credential claim has expired.
+    CredentialExpired = 23,
+    /// The issuer registry limit has been reached; contract upgrade required to raise the cap.
+    IssuerCapReached = 24,
+    /// The issuer is already registered.
+    IssuerAlreadyRegistered = 25,
+    /// The issuer was not found in the registry.
+    IssuerNotFound = 26,
 }
 
 impl AdminError for VerificationError {

@@ -17,8 +17,8 @@ mod types;
 
 use errors::VerificationError;
 use types::{
-    ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone,
-    MilestoneDispute, MilestoneRef, Validator, ValidatorStatus,
+    ContractHealth, CredentialAttestation, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
+    Issuer, Milestone, MilestoneDispute, MilestoneRef, Validator, ValidatorStatus,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
@@ -57,6 +57,15 @@ const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
 /// Maximum length for milestone description in bytes.
 const MAX_DESCRIPTION_LEN: u32 = 256;
+
+/// Maximum number of trusted credential issuers.
+const MAX_ISSUERS: u32 = 20;
+
+/// Maximum length for an issuer name.
+const MAX_ISSUER_NAME_LEN: u32 = 128;
+
+/// Maximum length for a credential type label.
+const MAX_CREDENTIAL_TYPE_LEN: u32 = 128;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -277,30 +286,315 @@ impl VerificationContract {
 
         Ok(())
     }
-    pub fn get_validators(env: Env) -> Vec<Address> {
-        let all: Vec<Address> = env
+
+    // -------------------------------------------------------------------------
+    // Credential attestation bridge
+    // -------------------------------------------------------------------------
+
+    /// Register a trusted credential issuer (admin only).
+    ///
+    /// An issuer holds an ed25519 keypair and signs structured credential claims
+    /// off-chain. `register_validator_with_attestation` verifies those signatures
+    /// on-chain before accepting a validator registration.
+    pub fn register_issuer(
+        env: Env,
+        wallet: Address,
+        name: String,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if name.len() > MAX_ISSUER_NAME_LEN || name.len() < 2 {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        let total_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalIssuerCount)
+            .unwrap_or(0u32);
+        if total_count >= MAX_ISSUERS {
+            return Err(VerificationError::IssuerCapReached);
+        }
+
+        let mut issuer_vector: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuerVector)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(wallet.clone()))
+        {
+            return Err(VerificationError::IssuerAlreadyRegistered);
+        }
+
+        let issuer = Issuer {
+            wallet: wallet.clone(),
+            name: name.clone(),
+            registered_at: env.ledger().timestamp(),
+            active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Issuer(wallet.clone()), &issuer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Issuer(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        issuer_vector.push_back(wallet.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::IssuerVector, &issuer_vector);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::IssuerVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        let total_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalIssuerCount)
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::TotalIssuerCount,
+            &safe_add_u32(total_count, 1).map_err(|_| VerificationError::Overflow)?,
+        );
+
+        events::issuer_registered(&env, &wallet, &name);
+
+        Ok(())
+    }
+
+    /// Deactivate an issuer (admin only).
+    pub fn revoke_issuer(env: Env, wallet: Address) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        let mut issuer: Issuer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Issuer(wallet.clone()))
+            .ok_or(VerificationError::IssuerNotFound)?;
+        issuer.active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Issuer(wallet.clone()), &issuer);
+
+        events::issuer_revoked(&env, &wallet);
+
+        Ok(())
+    }
+
+    /// Register a validator with a cryptographically verified credential attestation.
+    ///
+    /// The `attestation` must be a signature produced by a trusted issuer over the
+    /// structured claim `(validator_wallet || credential_type || expires_at)`. The
+    /// issuer's ed25519 public key is derived from its registered wallet address.
+    ///
+    /// If the issuer is not yet onboarded (not in the issuer registry), the call
+    /// fails with `UntrustedIssuer`. The legacy `register_validator` path remains
+    /// available for admin-vouched registrations while the issuer ecosystem matures.
+    pub fn register_validator_with_attestation(
+        env: Env,
+        wallet: Address,
+        attestation: CredentialAttestation,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        let credential_type = attestation.credential_type.clone();
+        if credential_type.len() > MAX_CREDENTIAL_TYPE_LEN
+            || credential_type.len() < MIN_CREDENTIALS_LEN
+        {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        if attestation.expires_at > 0 && attestation.expires_at <= env.ledger().timestamp() {
+            return Err(VerificationError::CredentialExpired);
+        }
+
+        let issuer: Issuer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Issuer(attestation.issuer_wallet.clone()))
+            .ok_or(VerificationError::UntrustedIssuer)?;
+
+        if !issuer.active {
+            return Err(VerificationError::UntrustedIssuer);
+        }
+
+        let message = Self::attestation_message(&env, &attestation);
+        let signature = Self::vec_to_signature(attestation.signature.clone());
+        let public_key = Self::address_to_ed25519(&env, &issuer.wallet);
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(VerificationError::InvalidAttestation);
+        }
+
+        Self::register_validator_internal(&env, wallet, credential_type)
+    }
+
+    /// Legacy admin-vouched registration path. Retained for issuers not yet
+    /// onboarded and for backward compatibility.
+    pub fn register_validator(
+        env: Env,
+        wallet: Address,
+        credentials: String,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if credentials.len() > MAX_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        if credentials.len() < MIN_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        Self::register_validator_internal(&env, wallet, credentials)
+    }
+
+    fn register_validator_internal(
+        env: &Env,
+        wallet: Address,
+        credentials: String,
+    ) -> Result<(), VerificationError> {
+        let total_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalValidatorCount)
+            .unwrap_or(0u32);
+        if total_count >= MAX_VALIDATORS {
+            return Err(VerificationError::ValidatorCapReached);
+        }
+
+        let mut validator_vector: Vec<Address> = env
             .storage()
             .persistent()
             .get(&DataKey::ValidatorVector)
             .unwrap_or_else(|| Vec::new(&env));
-        let mut active = Vec::new(&env);
-        for i in 0..all.len() {
-            let wallet = all.get(i).unwrap();
-            let status = Self::get_validator_status(env.clone(), wallet.clone());
-            if status == ValidatorStatus::Active {
-                active.push_back(wallet);
-            }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Validator(wallet.clone()))
+        {
+            return Err(VerificationError::ValidatorAlreadyRegistered);
         }
-        active
+
+        let validator = Validator {
+            wallet: wallet.clone(),
+            credentials,
+            registered_at: env.ledger().timestamp(),
+            active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Validator(wallet.clone()), &validator);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        validator_vector.push_back(wallet.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorVector, &validator_vector);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        let active_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveValidatorCount)
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::ActiveValidatorCount,
+            &safe_add_u32(active_count, 1).map_err(|_| VerificationError::Overflow)?,
+        );
+
+        let total_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalValidatorCount)
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::TotalValidatorCount,
+            &safe_add_u32(total_count, 1).map_err(|_| VerificationError::Overflow)?,
+        );
+
+        events::validator_registered(&env, &wallet, &validator.credentials);
+
+        Ok(())
     }
 
-    /// Deactivate a validator (admin only).
-    /// Optionally accepts a reason (max 128 bytes) that is included in the event.
-    pub fn revoke_validator(
-        env: Env,
-        wallet: Address,
-        reason: Option<String>,
-    ) -> Result<(), VerificationError> {
+    /// Construct the message that an issuer signs for a credential attestation.
+    fn attestation_message(env: &Env, attestation: &CredentialAttestation) -> Vec<u8> {
+        let mut msg = Vec::new(env);
+        for b in attestation.issuer_wallet.to_bytes() {
+            msg.push_back(b);
+        }
+        for b in attestation.validator_wallet.to_bytes() {
+            msg.push_back(b);
+        }
+        for b in attestation.credential_type.as_bytes() {
+            msg.push_back(b);
+        }
+        let expires_bytes = attestation.expires_at.to_be_bytes();
+        for b in expires_bytes.iter() {
+            msg.push_back(*b);
+        }
+        msg
+    }
+
+    /// Derive an ed25519 public key from an issuer's wallet address.
+    ///
+    /// Soroban Ed25519 addresses encode the public key starting at byte 1
+    /// (byte 0 is the type discriminator).
+    fn address_to_ed25519(env: &Env, address: &Address) -> [u8; 32] {
+        let bytes = address.to_bytes();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes.0[1..33]);
+        key
+    }
+
+    /// Convert a Vec<u8> signature into a fixed-size [u8; 64] array for
+    /// ed25519 verification. Returns InvalidInput if the length is wrong.
+    fn vec_to_signature(sig: Vec<u8>) -> [u8; 64] {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&sig);
+        arr
+    }
+
+    /// Get a single issuer by wallet address.
+    pub fn get_issuer(env: Env, wallet: Address) -> Option<Issuer> {
+        env.storage().persistent().get(&DataKey::Issuer(wallet))
+    }
+
+    /// List all registered issuer wallets.
+    pub fn list_issuers(env: Env) -> Vec<Address> {
+        let all: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuerVector)
+            .unwrap_or_else(|| Vec::new(&env));
+        all
+    }
+
+    /// Get the total number of registered issuers.
+    pub fn get_issuer_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalIssuerCount)
+            .unwrap_or(0u32)
+    }
+
+    pub fn get_validators(env: Env) -> Vec<Address> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         if let Some(ref r) = reason {

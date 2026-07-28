@@ -126,6 +126,7 @@ When adding new entries to the Version History table:
 | Version | Date | Type | Summary |
 |---------|------|------|---------|
 | v0.1.0 (all) | 2025 | MINOR | Initial release — all four contracts with full test coverage |
+| v0.2.0 (scout_access) | 2026-07-28 | MAJOR | BREAKING: `ContactQuotaExceeded` (18) deprecated; `batch_contact_players` now returns `ProContactLimitReached` (20) for Pro-tier quota exceeded; error code 18 slot reserved |
 <!-- Template / Example for future entries: -->
 <!-- | v0.2.0 (verification) | YYYY-MM-DD | MINOR | Added batch verification helper functions | -->
 <!-- | v1.0.0 (all) | YYYY-MM-DD | MAJOR | BREAKING: Updated storage key layout across all contracts | -->
