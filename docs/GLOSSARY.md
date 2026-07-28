@@ -57,6 +57,9 @@ adjustable via `update_fee_config`.
 | `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
 | `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
 | `sub_duration_secs` | `u64` | duration in seconds (not a Unix timestamp) | > 0 | `2592000` (30 days) |
+| `pro_contact_limit` | `u32` | count | > 0 | `10` (10 contacts/period) |
+| `trial_offer_escrow_stroops` | `i128` | stroops | > 0 | `500000` (0.05 XLM) |
+| `trial_offer_expiry_secs` | `u64` | duration in seconds | > 0 | `3600` (1 hour) |
 
 All fields must be strictly greater than zero; `initialize` and
 `update_fee_config` return `InvalidInput` otherwise.
@@ -65,6 +68,17 @@ All fields must be strictly greater than zero; `initialize` and
 may contact in a single subscription period. Reaching the limit causes
 `pay_to_contact` to return `ProContactLimitReached` (code 20). **Elite-tier
 scouts are exempt** from this cap.
+
+`trial_offer_escrow_stroops` is the XLM amount held in escrow when a scout
+logs a trial offer via `log_trial_offer`. The escrowed amount is released to
+the contract's accumulated fees on successful `confirm_trial_offer`, or
+refunded to the originating scout if the offer expires (confirmed after
+`trial_offer_expiry_secs` have elapsed, or swept by `expire_trial_offers`).
+
+`trial_offer_expiry_secs` defines the window (in seconds) within which a
+player must call `confirm_trial_offer` after the offer was logged. After this
+window the confirmation path refunds the scout's escrow and emits
+`trial_offer_expired`.
 
 - Relevant functions: `initialize`, `update_fee_config`, `get_fee_config` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
