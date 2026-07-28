@@ -7,6 +7,8 @@ pub const VALIDATOR_REVOKED: &str = "validator_revoked";
 pub const VALIDATOR_REVOKED_FOR_CAUSE: &str = "validator_revoked_for_cause";
 pub const CONTRACT_PAUSED: &str = "contract_paused";
 pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
+pub const APPROVE_MILESTONE_PAUSED: &str = "approve_milestone_paused";
+pub const APPROVE_MILESTONE_UNPAUSED: &str = "approve_milestone_unpaused";
 pub const CONTRACT_INITIALIZED: &str = "contract_initialized";
 pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 pub const DISPUTE_RESOLVED: &str = "dispute_resolved";
@@ -107,6 +109,22 @@ pub fn contract_paused(env: &Env, admin: &Address) {
 pub fn contract_unpaused(env: &Env, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "contract_unpaused"), admin.clone()),
+        (),
+    );
+}
+
+/// topics: (event_name, admin)  data: ()
+pub fn approve_milestone_paused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "approve_milestone_paused"), admin.clone()),
+        (),
+    );
+}
+
+/// topics: (event_name, admin)  data: ()
+pub fn approve_milestone_unpaused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "approve_milestone_unpaused"), admin.clone()),
         (),
     );
 }

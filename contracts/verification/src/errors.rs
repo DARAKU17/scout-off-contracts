@@ -57,6 +57,10 @@ pub enum VerificationError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 19,
+
+    // ── Function-scoped pausing ──
+    /// The approve_milestone function is paused independently of whole-contract pause.
+    ApproveMilestonePaused = 20,
 }
 
 impl AdminError for VerificationError {
