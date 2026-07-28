@@ -257,7 +257,7 @@ sequenceDiagram
 
 1. **Tamper-Proof History**: Every milestone approval is an immutable on-chain transaction — scouts see exactly when and how a player progressed
 2. **Authorized Validators Only**: Only admin-registered validators can approve milestones, preventing self-reported fake stats
-3. **Atomic Fee Settlement**: Scout contact fees and token transfers settle in a single transaction
+3. **Atomic Fee Settlement**: Scout contact fees and token transfers settle in a single transaction. Every token-transfer call site (`subscribe`, `pay_to_contact`, `log_trial_offer` escrow, `confirm_trial_offer` expiry-refund, `withdraw_fees`, `refund_subscription`) is enumerated and proven atomic in [`contracts/scout_access/tests/atomic_fee_settlement.rs`](contracts/scout_access/tests/atomic_fee_settlement.rs) — if the XLM transfer fails, no storage mutation from that function persists.
 4. **Authorization Checks**: All state-changing operations require proper Stellar account authorization
 5. **Overflow Protection**: Safe arithmetic throughout all fee calculations
 6. **Circuit Breaker**: Admin can pause the contract in an emergency without losing state
@@ -653,9 +653,13 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | `player_registered` | New player profile created on-chain |
 | `milestone_approved` | Validator confirms a player achievement |
 | `progress_updated` | Player advances to a new level |
-| `scout_subscribed` | Scout purchases a talent access subscription |
+| `scout_subscribed` | Scout purchases a talent access subscription (legacy event, emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | Scout purchases their very first subscription |
+| `subscription_renewed` | Scout renews or upgrades an existing subscription |
 | `player_contacted` | Scout pays to unlock player contact details |
 | `trial_offer_logged` | Scout records a trial offer, advancing player to Level 3 |
+| `trial_offer_confirmed` | Player confirms a pending trial offer before its expiry window closes |
+| `trial_offer_expired` | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | Admin withdraws accumulated platform fees |
 | `admin_transfer_proposed` | Current admin proposes a replacement address |
 | `admin_transferred` | Pending admin accepts control |

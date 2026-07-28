@@ -76,6 +76,16 @@ pub struct TrialEscrow {
     pub expires_at: u64,
 }
 
+/// Proposed fee configuration awaiting activation after a delay
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigProposal {
+    /// The proposed fee configuration
+    pub config: FeeConfig,
+    /// Ledger timestamp when the proposal was created
+    pub proposed_at: u64,
+}
+
 /// Platform fee configuration
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -118,6 +128,8 @@ pub enum DataKey {
     Initialized,
     Paused,
     FeeConfig,
+    /// Proposed fee configuration awaiting activation after a 7-day delay
+    PendingFeeConfig,
     AccumulatedFees,
     /// Native XLM token contract address
     XlmToken,
@@ -135,6 +147,8 @@ pub enum DataKey {
     TrialOffer(u64, u32),
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
+    /// registration contract address for cross-contract scout verification checks
+    RegistrationContract,
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),

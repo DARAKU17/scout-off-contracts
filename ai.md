@@ -556,6 +556,8 @@ When the progress contract is not wired, a `progress_contract_not_set` event is 
 |-------|--------|------|-----------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | ✅ |
 | `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | ✅ |
+| `subscription_created` | event_name, scout (Address) | tier (SubscriptionTier), subscribed_at (u64), expires_at (u64) | ✅ |
+| `subscription_renewed` | event_name, scout (Address) | tier (SubscriptionTier), subscribed_at (u64), expires_at (u64) | ✅ |
 | `player_contacted` | event_name, scout (Address) | player_id (u64), fee_paid (i128) | ✅ |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | ✅ |
 | `trial_offer_confirmed` | event_name, scout (Address) | player_id (u64), index (u32) | ✅ |
