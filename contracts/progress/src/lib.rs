@@ -23,10 +23,6 @@ const PERSISTENT_TTL_MAX: u32 = 518_400;
 // cross-contract admin operations remain valid.
 const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
-
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
-
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Minimal client for the registration contract.
@@ -67,20 +63,6 @@ mod verification_contract {
     #[allow(dead_code)]
     pub trait VerificationContractClient {
         fn get_milestone_count(env: Env, player_id: u64) -> u32;
-    }
-}
-
-// Minimal client for the registration contract.
-// Used to sync a player's progress level into the registration contract
-// whenever advance_level or reset_player_level is called.
-mod registration_contract {
-    use crate::types::ProgressLevel;
-    use soroban_sdk::{contractclient, Env};
-
-    #[contractclient(name = "Client")]
-    #[allow(dead_code)]
-    pub trait RegistrationContractClient {
-        fn set_player_level(env: Env, player_id: u64, level: ProgressLevel);
     }
 }
 
@@ -316,7 +298,10 @@ impl ProgressContract {
         // trigger a disallowed contract re-entry when advance_level called
         // back into it.
         if caller_is_secondary {
-            let ver_client = verification_contract::Client::new(&env, &verification_contract);
+            let ver_addr = verification_contract
+                .as_ref()
+                .ok_or(ProgressError::NotInitialized)?;
+            let ver_client = verification_contract::Client::new(&env, ver_addr);
             let count = ver_client.get_milestone_count(&player_id);
             if milestone_ref == 0 || milestone_ref > count {
                 return Err(ProgressError::InvalidProgressTransition);

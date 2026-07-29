@@ -1,36 +1,6 @@
 pub use scoutchain_shared_types::ContractHealth;
-use soroban_sdk::{contracttype, Address, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 
-const MAX_ISSUERS: u32 = 20;
-
-/// A trusted credential issuer authorized to sign validator attestation claims.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Issuer {
-    /// Issuer wallet address (also the ed25519 public key holder).
-    pub wallet: Address,
-    /// Human-readable issuer name (e.g. "Football Federation", "UEFA").
-    pub name: String,
-    /// Ledger timestamp when the issuer was registered.
-    pub registered_at: u64,
-    /// Whether this issuer is currently authorized to sign attestations.
-    pub active: bool,
-}
-
-/// A signed credential claim produced by an issuer off-chain.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct CredentialAttestation {
-    /// Wallet address of the issuer who signed this attestation.
-    pub issuer_wallet: Address,
-    /// Validator wallet being attested.
-    pub validator_wallet: Address,
-    /// Credential type label (e.g. "UEFA B License").
-    pub credential_type: String,
-    /// Unix timestamp when the credential expires (0 = no expiry).
-    pub expires_at: u64,
-    /// ed25519 signature over (issuer_wallet || validator_wallet || credential_type || expires_at).
-    pub signature: Vec<u8>,
 /// Convenience aggregate returned by `get_validator_activity_report`.
 ///
 /// Bundles the data from four individual queries into one call:
@@ -106,8 +76,7 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
-    /// Admin-verified organization the validator represents.
-    pub affiliation: String,
+    /// Ledger timestamp when the validator was registered, in Unix seconds.
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
@@ -167,14 +136,37 @@ pub struct MilestoneRef {
     pub milestone_index: u32,
 }
 
-/// Rules that gate level-advancing milestones on independent organizations.
+/// Off-chain signed milestone attestation (issue #703).
+///
+/// Canonical signed message (domain-separated):
+/// `ATTESTATION_DOMAIN || contract_id || network_id || validator_wallet
+///  || player_id_be || description_bytes || evidence_hash_bytes || nonce_be`
+///
+/// Field rationale:
+/// - `validator_wallet`: binds the claim to a registry identity; after signature
+///   verification against that wallet's registered pubkey, this is the sole
+///   source of attribution (never a separate caller-supplied Address).
+/// - `player_id` / `description` / `evidence_hash`: exact claim being attested.
+/// - `nonce`: strictly-increasing per-validator counter for replay protection
+///   (raw ed25519 signatures have no Soroban sequence number).
+/// - `contract_id` + `network_id`: prevent cross-deployment / cross-network replay.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct DiversityConfig {
-    /// Minimum number of affiliations required to advance at or above the gate.
-    pub min_distinct_affiliations: u32,
-    /// First milestone index that requires organizational diversity.
-    pub gated_milestone_index: u32,
+pub struct MilestoneAttestation {
+    /// Validator whose registered attestation key must have signed this payload.
+    pub validator_wallet: Address,
+    /// Player receiving the milestone.
+    pub player_id: u64,
+    /// Human-readable milestone description.
+    pub description: String,
+    /// IPFS/Arweave CID of supporting evidence.
+    pub evidence_hash: String,
+    /// Strictly increasing per-validator nonce (must be > last accepted).
+    pub nonce: u64,
+    /// Must equal `env.current_contract_address()` at verification time.
+    pub contract_id: Address,
+    /// Must equal `env.ledger().network_id()` at verification time.
+    pub network_id: BytesN<32>,
 }
 
 #[contracttype]
@@ -191,16 +183,49 @@ pub enum DataKey {
     Validator(Address),
     MilestoneCounter(u64),
     Milestone(u64, u32),
-    /// registration contract address (cross-contract calls)
-    RegistrationContract,
-    /// progress contract address (cross-contract calls)
-    ProgressContract,
-    /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
-    /// Diversity rules for level-advancing milestones.
-    DiversityConfig,
-    /// (player_id, affiliation) → whether that affiliation has approved a milestone.
-    PlayerAffiliationUsed(u64, String),
-    /// player_id → number of distinct affiliations that approved milestones.
-    PlayerAffiliationCount(u64),
+    ValidatorPlayerMilestoneCount(Address, u64),
+    ValidatorVector,
+    TotalMilestoneCount,
+    GlobalMilestoneIndex,
+    /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
+    /// for which that validator has approved at least one milestone.
+    /// Updated on every `approve_milestone` call (duplicates are skipped).
+    ValidatorPlayers(Address),
+    MilestoneDispute(u64, u32),
+    ActiveValidatorCount,
+    TotalValidatorCount,
+    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
+    EvidenceUsed(String),
+    ValidatorMilestones(Address),
+    ActiveDisputesCount,
+    ValidatorRevokedForCause(Address),
+    /// Per-player list of milestone indices that have been disputed.
+    /// player_id → Vec<u32> of milestone_index values.
+    /// Updated on `dispute_milestone`.
+    PlayerDisputes(u64),
+    /// Persistent global index of currently-unresolved (player_id, milestone_index) pairs.
+    /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
+    /// Exposed via `list_disputes_page(offset, limit)`.
+    OpenDisputeIndex,
+
+    // ── Registration cooldown ──
+    /// Last registration timestamp for a validator wallet (Unix seconds).
+    /// Set by `register_validator` and read to enforce the per-caller cooldown.
+    ValidatorRegLastSent(Address),
+    /// Platform-wide validator registration cooldown in seconds.
+    /// 0 disables the cooldown. Configurable by admin via `set_reg_cooldown`.
+    /// The `u64` payload is unused (always written as `RegCooldownSecs(0)`).
+    RegCooldownSecs(u64),
+    /// Minimum distinct validator regions required for Level-2/3 advances.
+    MinRegionQuorum,
+    /// Validator wallet → registered ed25519 public key (32 bytes) for
+    /// off-chain milestone attestation verification.
+    AttestationKey(Address),
+    /// Reverse index: attestation pubkey → validator wallet. Used so identity
+    /// is derived from the verified key, not from a caller-supplied Address.
+    AttestationKeyOwner(BytesN<32>),
+    /// Per-validator monotonic nonce for relayed attestation replay protection.
+    /// Stores the last successfully consumed nonce (starts absent → treat as 0).
+    AttestationNonce(Address),
 }
