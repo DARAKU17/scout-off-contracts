@@ -28,6 +28,14 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v0.2.0`
+- Release date: `2026-07-28`
+- Contracts affected: `scout_access`
+- Summary: `batch_contact_players` now returns `ProContactLimitReached` (20) instead of `ContactQuotaExceeded` (18) when the Pro-tier monthly contact limit is exceeded. Error code 18 is reserved/deprecated. `check_pro_contact_quota_with_count` unified with `pay_to_contact`'s inline quota check on the same error code.
+- Classification: `Breaking (MAJOR)`
+
+> **Migration guide:** Clients that previously matched `ContactQuotaExceeded` (18) from `batch_contact_players` must update to `ProContactLimitReached` (20). Both `pay_to_contact` and `batch_contact_players` now return the same error code for equivalent quota-exceeded states.
+
 ## v0.1.0 - 2025
 
 - Version: `v0.1.0`

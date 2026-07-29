@@ -51,6 +51,11 @@ pub enum ScoutAccessError {
     /// The trial offer record was not found.
     TrialOfferNotFound = 11,
     /// Pro tier scout has exceeded monthly contact limit.
+    ///
+    /// DEPRECATED: this error code is no longer returned by any contract
+    /// function. It is retained here only to reserve slot 18 and prevent
+    /// accidental reassignment, matching the code-13 reservation pattern.
+    /// Callers should handle `ProContactLimitReached` (20) instead.
     ContactQuotaExceeded = 18,
     /// Scout sent a trial offer to the same player within the cooldown window.
     TrialOfferRateLimited = 19,
@@ -140,5 +145,15 @@ mod tests {
 
             next_implicit_code = Some(assigned_code + 1);
         }
+    }
+
+    #[test]
+    fn contact_quota_exceeded_is_deprecated_slot_18_reserved() {
+        assert_eq!(ScoutAccessError::ContactQuotaExceeded as u32, 18);
+    }
+
+    #[test]
+    fn pro_contact_limit_reached_is_code_20() {
+        assert_eq!(ScoutAccessError::ProContactLimitReached as u32, 20);
     }
 }

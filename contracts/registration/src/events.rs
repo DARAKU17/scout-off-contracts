@@ -13,6 +13,7 @@ pub const SCOUT_DEACTIVATED: &str = "scout_deactivated";
 pub const SCOUT_REACTIVATED: &str = "scout_reactivated";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
 pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
+pub const MIGRATION_REDEEMED: &str = "migration_redeemed";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {

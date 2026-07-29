@@ -779,7 +779,7 @@ impl ScoutAccessContract {
         let limit = config.pro_contact_limit;
 
         if current.saturating_add(requested) > limit {
-            return Err(ScoutAccessError::ContactQuotaExceeded);
+            return Err(ScoutAccessError::ProContactLimitReached);
         }
 
         Ok(())

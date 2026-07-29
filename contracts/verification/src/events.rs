@@ -14,6 +14,8 @@ pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 pub const DISPUTE_RESOLVED: &str = "dispute_resolved";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
 pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
+pub const ISSUER_REGISTERED: &str = "issuer_registered";
+pub const ISSUER_REVOKED: &str = "issuer_revoked";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -194,5 +196,21 @@ pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
     env.events().publish(
         (Symbol::new(env, "progress_call_failed"), player_id),
         error_code,
+    );
+}
+
+/// topics: (event_name, issuer_wallet)  data: issuer_name
+pub fn issuer_registered(env: &Env, wallet: &Address, name: &String) {
+    env.events().publish(
+        (Symbol::new(env, "issuer_registered"), wallet.clone()),
+        name.clone(),
+    );
+}
+
+/// topics: (event_name, admin)  data: issuer_wallet
+pub fn issuer_revoked(env: &Env, wallet: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "issuer_revoked"), wallet.clone()),
+        wallet.clone(),
     );
 }

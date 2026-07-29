@@ -1,6 +1,38 @@
 use soroban_sdk::{contracttype, Address, String, Vec};
 
+const MAX_MIGRATION_NONCES: u32 = 1024;
+
 pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+
+/// Role identifier for migration authorizations.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum MigrationRole {
+    Player,
+    Scout,
+}
+
+/// An off-chain signed migration authorization produced by a player or scout.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MigrationAuthorization {
+    /// Wallet address of the player or scout granting consent.
+    pub wallet: Address,
+    /// Role being migrated (player or scout).
+    pub role: MigrationRole,
+    /// Hash of the serialized profile data being authorized for migration.
+    pub profile_data_hash: Vec<u8>,
+    /// Expected address of the new contract that will redeem this authorization.
+    pub new_contract_hint: Address,
+    /// Unique nonce to prevent replay. The signer should increment this for
+    /// each new authorization they grant.
+    pub nonce: u64,
+    /// Unix timestamp after which this authorization expires (0 = no expiry).
+    pub expires_at: u64,
+    /// ed25519 signature over the canonical message:
+    /// `wallet || role || profile_data_hash || new_contract_hint || nonce || expires_at`
+    pub signature: Vec<u8>,
+}
 
 /// Basic player vitals stored on-chain
 #[contracttype]
