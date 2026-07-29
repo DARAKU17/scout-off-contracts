@@ -365,9 +365,212 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Deactivate an issuer (admin only).
-    pub fn revoke_issuer(env: Env, wallet: Address) -> Result<(), VerificationError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+    // -------------------------------------------------------------------------
+    // Milestone disputes
+    // -------------------------------------------------------------------------
+
+    /// File a dispute against an approved milestone.
+    ///
+    /// High-impact disputes are escalated to the validator jury. Lower-impact
+    /// disputes retain the existing admin-resolution path.
+    pub fn dispute_milestone(
+        env: Env,
+        filed_by: Address,
+        player_id: u64,
+        milestone_index: u32,
+        reason: String,
+        impact_score: u64,
+    ) -> Result<(), VerificationError> {
+        Self::require_not_paused(&env)?;
+        filed_by.require_auth();
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Milestone(player_id, milestone_index))
+        {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        if env.storage().persistent().has(&dispute_key) {
+            return Err(VerificationError::DisputeAlreadyExists);
+        }
+
+        let config = Self::jury_config(&env);
+        let jury_required = impact_score >= config.impact_threshold;
+        let filed_at = env.ledger().timestamp();
+        let voting_deadline = if jury_required {
+            filed_at
+                .checked_add(config.voting_window_secs)
+                .ok_or(VerificationError::Overflow)?
+        } else {
+            filed_at
+        };
+        let dispute = MilestoneDispute {
+            player_id,
+            milestone_index,
+            filed_by: filed_by.clone(),
+            reason,
+            impact_score,
+            filed_at,
+            voting_deadline,
+            jury_required,
+            quorum: config.quorum,
+            resolved: false,
+            upheld: false,
+            votes_for: 0,
+            votes_against: 0,
+        };
+
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::milestone_disputed(&env, player_id, milestone_index, &filed_by, jury_required);
+        Ok(())
+    }
+
+    /// Resolve a low-impact dispute through the backwards-compatible admin path.
+    pub fn resolve_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+        upheld: bool,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if dispute.jury_required {
+            return Err(VerificationError::DisputeRequiresJury);
+        }
+
+        dispute.resolved = true;
+        dispute.upheld = upheld;
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_resolved(&env, player_id, milestone_index, upheld);
+        Ok(())
+    }
+
+    /// Cast one immutable vote on a high-impact dispute.
+    pub fn cast_dispute_vote(
+        env: Env,
+        validator_wallet: Address,
+        player_id: u64,
+        milestone_index: u32,
+        upheld: bool,
+    ) -> Result<(), VerificationError> {
+        Self::require_not_paused(&env)?;
+        validator_wallet.require_auth();
+        Self::require_active_validator(&env, &validator_wallet)?;
+
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if !dispute.jury_required {
+            return Err(VerificationError::DisputeDoesNotRequireJury);
+        }
+        if env.ledger().timestamp() >= dispute.voting_deadline {
+            return Err(VerificationError::VotingWindowClosed);
+        }
+
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+            .ok_or(VerificationError::InvalidInput)?;
+        if milestone.validator == validator_wallet {
+            return Err(VerificationError::ConflictedValidator);
+        }
+
+        let vote_key = DataKey::DisputeVote(player_id, milestone_index, validator_wallet.clone());
+        if env.storage().persistent().has(&vote_key) {
+            return Err(VerificationError::VoteAlreadyCast);
+        }
+
+        if upheld {
+            dispute.votes_for = dispute
+                .votes_for
+                .checked_add(1)
+                .ok_or(VerificationError::Overflow)?;
+        } else {
+            dispute.votes_against = dispute
+                .votes_against
+                .checked_add(1)
+                .ok_or(VerificationError::Overflow)?;
+        }
+        let vote = DisputeVote {
+            validator: validator_wallet.clone(),
+            upheld,
+            cast_at: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&vote_key, &vote);
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_vote_cast(&env, player_id, milestone_index, &validator_wallet, upheld);
+        Ok(())
+    }
+
+    /// Finalize a jury dispute once it has a decisive quorum or its window ends.
+    /// Anyone may call this function, so no administrator can suppress a result.
+    pub fn tally_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<bool, VerificationError> {
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if !dispute.jury_required {
+            return Err(VerificationError::DisputeDoesNotRequireJury);
+        }
+
+        let total_votes = dispute
+            .votes_for
+            .checked_add(dispute.votes_against)
+            .ok_or(VerificationError::Overflow)?;
+        let deadline_passed = env.ledger().timestamp() >= dispute.voting_deadline;
+        let decisive_quorum =
+            total_votes >= dispute.quorum && dispute.votes_for != dispute.votes_against;
+        if !decisive_quorum && !deadline_passed {
+            return Err(VerificationError::TallyNotReady);
+        }
+
+        // A tie, or a deadline with no quorum, preserves the original milestone.
+        let upheld = total_votes >= dispute.quorum && dispute.votes_for > dispute.votes_against;
+        dispute.resolved = true;
+        dispute.upheld = upheld;
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_tallied(
+            &env,
+            player_id,
+            milestone_index,
+            upheld,
+            dispute.votes_for,
+            dispute.votes_against,
+        );
+        Ok(upheld)
+    }
+
+    // -------------------------------------------------------------------------
+    // Queries
+    // -------------------------------------------------------------------------
 
         let mut issuer: Issuer = env
             .storage()
@@ -379,9 +582,51 @@ impl VerificationContract {
             .persistent()
             .set(&DataKey::Issuer(wallet.clone()), &issuer);
 
-        events::issuer_revoked(&env, &wallet);
+    pub fn get_jury_config(env: Env) -> JuryConfig {
+        Self::jury_config(&env)
+    }
 
-        Ok(())
+    pub fn get_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<MilestoneDispute, VerificationError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MilestoneDispute(player_id, milestone_index))
+            .ok_or(VerificationError::DisputeNotFound)
+    }
+
+    pub fn get_dispute_vote(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+        validator_wallet: Address,
+    ) -> Result<DisputeVote, VerificationError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeVote(
+                player_id,
+                milestone_index,
+                validator_wallet,
+            ))
+            .ok_or(VerificationError::InvalidInput)
+    }
+
+    pub fn get_dispute_votes(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(u32, u32), VerificationError> {
+        let dispute = Self::get_dispute(env, player_id, milestone_index)?;
+        Ok((dispute.votes_for, dispute.votes_against))
+    }
+
+    pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(wallet))
+            .unwrap_or(0u32)
     }
 
     pub fn get_diversity_config(env: Env) -> DiversityConfig {
@@ -4206,6 +4451,7 @@ mod tests {
     #[test]
     fn test_get_validator_activity_report_matches_individual_queries() {
         let (env, client) = setup();
+        env.ledger().with_mut(|ledger| ledger.sequence_number = 1);
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
@@ -4263,7 +4509,122 @@ mod tests {
         assert_eq!(report.status, types::ValidatorStatus::Active);
     }
 
-    /// Report for an unregistered wallet returns ValidatorNotFound.
+    fn setup_jury_dispute(
+        impact_score: u64,
+        quorum: u32,
+        voting_window_secs: u64,
+    ) -> (
+        Env,
+        VerificationContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_jury_config(&100, &quorum, &voting_window_secs);
+
+        let original_approver = Address::generate(&env);
+        let voter_one = Address::generate(&env);
+        let voter_two = Address::generate(&env);
+        let voter_three = Address::generate(&env);
+        for validator in [&original_approver, &voter_one, &voter_two, &voter_three] {
+            client.register_validator(validator, &String::from_str(&env, "Coach"));
+        }
+
+        client.approve_milestone(
+            &original_approver,
+            &1,
+            &String::from_str(&env, "Regional tournament result"),
+            &String::from_str(&env, "QmEvidence"),
+        );
+        let filer = Address::generate(&env);
+        client.dispute_milestone(
+            &filer,
+            &1,
+            &1,
+            &String::from_str(&env, "Evidence is disputed"),
+            &impact_score,
+        );
+
+        (
+            env,
+            client,
+            original_approver,
+            voter_one,
+            voter_two,
+            voter_three,
+        )
+    }
+
+    #[test]
+    fn test_jury_quorum_upholds_dispute() {
+        let (env, client, _, voter_one, voter_two, voter_three) = setup_jury_dispute(100, 3, 100);
+
+        for voter in [&voter_one, &voter_two, &voter_three] {
+            client.cast_dispute_vote(voter, &1, &1, &true);
+        }
+
+        assert_eq!(client.get_dispute_votes(&1, &1), (3, 0));
+        assert!(client.tally_dispute(&1, &1));
+        let dispute = client.get_dispute(&1, &1);
+        assert!(dispute.resolved);
+        assert!(dispute.upheld);
+        assert_eq!(dispute.voting_deadline, env.ledger().timestamp() + 100);
+    }
+
+    #[test]
+    fn test_jury_quorum_rejects_dispute() {
+        let (_, client, _, voter_one, voter_two, voter_three) = setup_jury_dispute(100, 3, 100);
+
+        client.cast_dispute_vote(&voter_one, &1, &1, &false);
+        client.cast_dispute_vote(&voter_two, &1, &1, &false);
+        client.cast_dispute_vote(&voter_three, &1, &1, &true);
+
+        assert!(!client.tally_dispute(&1, &1));
+        let dispute = client.get_dispute(&1, &1);
+        assert!(dispute.resolved);
+        assert!(!dispute.upheld);
+        assert_eq!(client.get_dispute_votes(&1, &1), (1, 2));
+    }
+
+    #[test]
+    fn test_jury_tie_rejects_after_voting_window() {
+        let (env, client, _, voter_one, voter_two, _) = setup_jury_dispute(100, 2, 100);
+
+        client.cast_dispute_vote(&voter_one, &1, &1, &true);
+        client.cast_dispute_vote(&voter_two, &1, &1, &false);
+        assert!(client.try_tally_dispute(&1, &1).is_err());
+
+        env.ledger().with_mut(|ledger| ledger.timestamp += 100);
+        assert!(!client.tally_dispute(&1, &1));
+        assert!(!client.get_dispute(&1, &1).upheld);
+    }
+
+    #[test]
+    fn test_conflicted_validator_cannot_vote_on_own_milestone() {
+        let (_, client, original_approver, _, _, _) = setup_jury_dispute(100, 3, 100);
+
+        assert!(client
+            .try_cast_dispute_vote(&original_approver, &1, &1, &true)
+            .is_err());
+        assert_eq!(client.get_dispute_votes(&1, &1), (0, 0));
+    }
+
+    #[test]
+    fn test_low_impact_dispute_retains_admin_resolution() {
+        let (_, client, _, _, _, _) = setup_jury_dispute(99, 3, 100);
+
+        let dispute = client.get_dispute(&1, &1);
+        assert!(!dispute.jury_required);
+        client.resolve_dispute(&1, &1, &true);
+        let resolved = client.get_dispute(&1, &1);
+        assert!(resolved.resolved);
+        assert!(resolved.upheld);
+    }
+
     #[test]
     fn test_single_affiliation_cannot_advance_past_diversity_gate() {
         let (env, verification, progress) = setup_with_progress();

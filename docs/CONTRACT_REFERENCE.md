@@ -3097,31 +3097,13 @@ Manages the trusted validator registry and milestone approvals.
 
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
-| `contract_initialized` | event_name, admin (Address) | admin (Address) | Emitted on successful initialization |
-| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
-| `subscription_created` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout's very first subscription (emitted alongside `scout_subscribed`) |
-| `subscription_renewed` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout renews or upgrades an existing subscription (emitted alongside `scout_subscribed`) |
-| `player_contacted` | event_name, scout (Address) | (player_id: u64, fee_paid: i128) | Scout unlocks player contact details |
-| `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
-| `trial_offer_confirmed` | event_name, scout (Address) | (player_id: u64, index: u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
-| `trial_offer_expired` | event_name, scout (Address) | (player_id: u64, index: u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
-| `fees_withdrawn` | event_name, admin (Address) | (to: Address, amount: i128, timestamp: u64) | Admin withdraws accumulated fees |
-| `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
-| `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Admin replacement proposed |
-| `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Admin rights rotated |
-| `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
-| `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
-| `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
-| `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed |
-
-#### Diagnostic Events (scout_access)
-
-The following events are emitted from `confirm_trial_offer` when level advancement via the progress contract is skipped or fails.
-
-| Event | Topics | Data | Description |
-|-------|--------|------|-------------|
-| `progress_contract_not_set` | event_name, player_id (u64) | `()` | `confirm_trial_offer` could not advance the player's level because the progress contract address has not been wired. Emitted before returning `InvalidInput`. Indicates missing wiring — alert in production. Committed to the ledger. |
-| `progress_call_failed` | event_name, player_id (u64) | error_code (u32) | Emitted just before `ProgressCallFailed` is returned from `confirm_trial_offer`. Because that error aborts the entire transaction, this event only appears in the **diagnostic stream** (transaction receipt), not in committed ledger events. `error_code` is the raw error discriminant from `try_advance_level`. |
+| `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
+| `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
+| `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+| `milestone_disputed` | event_name, player_id, milestone_index | filer_address, jury_required | Emitted when a dispute is filed |
+| `dispute_vote_cast` | event_name, player_id, milestone_index | validator_address, upheld | Emitted for each jury vote |
+| `dispute_resolved` | event_name, player_id, milestone_index | upheld | Emitted after an admin resolution |
+| `dispute_tallied` | event_name, player_id, milestone_index | upheld, votes_for, votes_against | Emitted after jury finalization |
 
 ---
 
