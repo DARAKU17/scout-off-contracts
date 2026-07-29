@@ -5,6 +5,7 @@ members = [
     "contracts/verification",
     "contracts/progress",
     "contracts/scout_access",
+    "contracts/chaos-tests",
 ]
 resolver = "2"
 

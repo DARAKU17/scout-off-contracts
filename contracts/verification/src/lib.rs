@@ -252,6 +252,19 @@ impl VerificationContract {
             .persistent()
             .extend_ttl(&DataKey::ValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
+        let mut active_vector: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env));
+        active_vector.push_back(wallet.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveValidatorVector, &active_vector);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ActiveValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
         let active_count: u32 = env
             .storage()
             .instance()
@@ -281,20 +294,10 @@ impl VerificationContract {
         Ok(())
     }
     pub fn get_validators(env: Env) -> Vec<Address> {
-        let all: Vec<Address> = env
-            .storage()
+        env.storage()
             .persistent()
-            .get(&DataKey::ValidatorVector)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut active = Vec::new(&env);
-        for i in 0..all.len() {
-            let wallet = all.get(i).unwrap();
-            let status = Self::get_validator_status(env.clone(), wallet.clone());
-            if status == ValidatorStatus::Active {
-                active.push_back(wallet);
-            }
-        }
-        active
+            .get(&DataKey::ActiveValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Deactivate a validator (admin only).
@@ -350,6 +353,24 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::ValidatorVector, &new_vector);
+
+        if was_active {
+            let mut active_vector: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ActiveValidatorVector)
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut new_active: Vec<Address> = Vec::new(&env);
+            for i in 0..active_vector.len() {
+                let addr = active_vector.get(i).unwrap();
+                if addr != wallet {
+                    new_active.push_back(addr);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::ActiveValidatorVector, &new_active);
+        }
 
         let reason_str = reason.unwrap_or(String::from_str(&env, ""));
         events::validator_revoked(&env, &admin, &wallet, &reason_str);
@@ -409,6 +430,24 @@ impl VerificationContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::ValidatorVector, &new_vector);
+
+            if validator.active {
+                let mut active_vector: Vec<Address> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ActiveValidatorVector)
+                    .unwrap_or_else(|| Vec::new(&env));
+                let mut new_active: Vec<Address> = Vec::new(&env);
+                for j in 0..active_vector.len() {
+                    let addr = active_vector.get(j).unwrap();
+                    if addr != wallet {
+                        new_active.push_back(addr);
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::ActiveValidatorVector, &new_active);
+            }
 
             events::validator_revoked(&env, &admin, &wallet, &reason_str);
             
@@ -500,6 +539,16 @@ impl VerificationContract {
                 .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
             validator_vector.push_back(wallet.clone());
 
+            let mut active_vector: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ActiveValidatorVector)
+                .unwrap_or_else(|| Vec::new(&env));
+            active_vector.push_back(wallet.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::ActiveValidatorVector, &active_vector);
+
             // Increment active validator count.
             let active_count: u32 = env
                 .storage()
@@ -537,6 +586,9 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::ValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ActiveValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         Ok(())
     }
     /// Re-activate a previously revoked validator (admin only).
@@ -571,6 +623,19 @@ impl VerificationContract {
                 &DataKey::ActiveValidatorCount,
                 &count.checked_add(1).ok_or(VerificationError::Overflow)?,
             );
+
+            let mut active_vector: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ActiveValidatorVector)
+                .unwrap_or_else(|| Vec::new(&env));
+            active_vector.push_back(wallet.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::ActiveValidatorVector, &active_vector);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::ActiveValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         }
 
         env.storage()
@@ -723,6 +788,11 @@ impl VerificationContract {
     /// NOTE: Age validation of the evidence is the responsibility of the off-chain
     /// validator review process.
     ///
+    /// `idempotency_nonce` is an optional caller-supplied token. If provided and
+    /// the nonce has already been processed, the function returns the cached
+    /// milestone index without creating a duplicate. This makes retries after
+    /// `ProgressCallFailed` safe even if a future refactor changes write ordering.
+    ///
     /// Returns the milestone index for this player.
     pub fn approve_milestone(
         env: Env,
@@ -730,6 +800,7 @@ impl VerificationContract {
         player_id: u64,
         description: String,
         evidence_hash: String,
+        idempotency_nonce: Option<String>,
     ) -> Result<u32, VerificationError> {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
@@ -755,6 +826,17 @@ impl VerificationContract {
         let evidence_used_key = DataKey::EvidenceUsed(evidence_hash.clone());
         if env.storage().persistent().has(&evidence_used_key) {
             return Err(VerificationError::DuplicateEvidence);
+        }
+
+        // Idempotency check: if the caller supplied a nonce and it has already
+        // been processed, return the cached milestone index. This makes retries
+        // after ProgressCallFailed safe even if a future refactor changes write
+        // ordering (e.g. milestone written before cross-contract call).
+        if let Some(ref nonce) = idempotency_nonce {
+            let nonce_key = DataKey::ApprovalNonce(nonce.clone());
+            if let Some(cached_index) = env.storage().persistent().get::<DataKey, u32>(&nonce_key) {
+                return Ok(cached_index);
+            }
         }
 
         let vp_key = DataKey::ValidatorPlayerMilestoneCount(validator_wallet.clone(), player_id);
@@ -887,6 +969,18 @@ impl VerificationContract {
             &description,
             &evidence_hash,
         );
+
+        // Persist idempotency nonce before the cross-contract call so that a
+        // retry after ProgressCallFailed can safely return the cached result.
+        // The nonce is set after all local writes but before the external call,
+        // matching the evidence-hash-uniqueness write ordering.
+        if let Some(ref nonce) = idempotency_nonce {
+            let nonce_key = DataKey::ApprovalNonce(nonce.clone());
+            env.storage().persistent().set(&nonce_key, &next_index);
+            env.storage()
+                .persistent()
+                .extend_ttl(&nonce_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
 
         // Cross-contract call: advance the player's progress level.
         // If the progress contract is not wired (e.g. during testing without a

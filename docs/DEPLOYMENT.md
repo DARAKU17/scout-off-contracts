@@ -199,6 +199,7 @@ replace `0` with the desired starting ledger sequence number.
 ## Mainnet checklist
 
 - [ ] Audit all four contracts
+- [ ] Review storage TTL cost model (`docs/STORAGE_COST_MODEL.md`) and budget for ongoing TTL renewal
 - [ ] Replace testnet XLM token address with mainnet address in `.env`
 - [ ] Set `STELLAR_NETWORK=mainnet` and update RPC/Horizon URLs
 - [ ] Run `./scripts/deploy.sh mainnet`

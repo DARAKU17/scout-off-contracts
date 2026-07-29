@@ -156,4 +156,9 @@ pub enum DataKey {
     /// Bounded on-chain history of the last N FeeConfig values, oldest-first.
     /// Updated by `update_fee_config`. Exposed via `get_fee_config_history`.
     FeeConfigHistory,
+    /// Idempotency nonce for `confirm_trial_offer` retries.
+    /// Maps caller-supplied nonce → () so a retried call after a
+    /// `ProgressCallFailed` can safely detect that the offer was already
+    /// confirmed and skip the escrow cleanup / level-advance replay.
+    ConfirmationNonce(String),
 }

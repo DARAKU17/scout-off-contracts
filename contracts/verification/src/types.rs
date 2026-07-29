@@ -116,6 +116,10 @@ pub enum DataKey {
     ValidatorMilestoneCount(Address),
     ValidatorPlayerMilestoneCount(Address, u64),
     ValidatorVector,
+    /// Active-only validator vector for O(active) get_validators lookups.
+    /// Updated on registration, revocation, and restoration to avoid scanning
+    /// revoked entries. See docs/gas-griefing-audit.md V1.
+    ActiveValidatorVector,
     TotalMilestoneCount,
     GlobalMilestoneIndex,
     /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
@@ -138,4 +142,9 @@ pub enum DataKey {
     /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
     /// Exposed via `list_disputes_page(offset, limit)`.
     OpenDisputeIndex,
+    /// Idempotency nonce for `approve_milestone` retries.
+    /// Maps caller-supplied nonce → milestone_index so a retried call after a
+    /// genuine ProgressCallFailed can safely return the same result without
+    /// creating a duplicate milestone.
+    ApprovalNonce(String),
 }

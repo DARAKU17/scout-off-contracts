@@ -27,6 +27,8 @@ pub enum ScoutChainError {
     PlayerNotFound = 3,
     /// Invalid `scout_id`.
     ScoutNotFound = 12,
+    /// Player registration cap reached.
+    PlayerCapReached = 15,
 
     // ── Business logic ──
     /// Skipping or reversing a level.
