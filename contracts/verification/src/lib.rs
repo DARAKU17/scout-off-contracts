@@ -11,12 +11,16 @@
 // The easiest way is to run `./scripts/initialize.sh` which does this for you.
 // Without this step, milestones are recorded but player levels will NOT advance.
 
+#![no_std]
+
 mod errors;
 mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{DataKey, Milestone, Validator};
+use types::{
+    DataKey, Milestone, RevocationRecord, RevocationSeverity, Validator, ValidatorMilestoneRef,
+};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String};
 
@@ -24,8 +28,10 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String};
 // The progress contract must be deployed and its address registered via
 // `set_progress_contract` before `approve_milestone` can advance levels.
 mod progress_contract {
+    use scoutchain_shared_types::ProgressLevel;
+
     soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/scoutchain_progress.wasm"
+        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
     );
 }
 
@@ -93,8 +99,13 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Deactivate a validator (admin only).
-    pub fn revoke_validator(env: Env, wallet: Address) -> Result<(), VerificationError> {
+    /// Deactivate a validator and record whether prior approvals need re-review.
+    pub fn revoke_validator(
+        env: Env,
+        wallet: Address,
+        severity: RevocationSeverity,
+        reason: String,
+    ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         let mut validator: Validator = env
             .storage()
@@ -105,7 +116,21 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
-        events::validator_revoked(&env, &wallet);
+
+        let record = RevocationRecord {
+            severity: severity.clone(),
+            reason: reason.clone(),
+            revoked_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorRevocation(wallet.clone()), &record);
+
+        if severity == RevocationSeverity::ForCause {
+            Self::flag_validator_milestones_for_rereview(&env, &wallet)?;
+        }
+
+        events::validator_revoked(&env, &wallet, &severity, &reason);
         Ok(())
     }
 
@@ -158,11 +183,7 @@ impl VerificationContract {
 
         // Increment milestone counter for this player
         let counter_key = DataKey::MilestoneCounter(player_id);
-        let index: u32 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u32);
+        let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
         let next_index = index.checked_add(1).ok_or(VerificationError::Overflow)?;
 
         let milestone = Milestone {
@@ -177,18 +198,33 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Milestone(player_id, next_index), &milestone);
-        env.storage()
-            .persistent()
-            .set(&counter_key, &next_index);
+        env.storage().persistent().set(&counter_key, &next_index);
 
         // Increment per-validator milestone count
         let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
         let val_count: u32 = env.storage().persistent().get(&val_key).unwrap_or(0u32);
+        let validator_milestone_index = val_count
+            .checked_add(1)
+            .ok_or(VerificationError::Overflow)?;
         env.storage()
             .persistent()
-            .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
+            .set(&val_key, &validator_milestone_index);
+        env.storage().persistent().set(
+            &DataKey::ValidatorMilestone(validator_wallet.clone(), validator_milestone_index),
+            &ValidatorMilestoneRef {
+                player_id,
+                milestone_index: next_index,
+            },
+        );
 
-        events::milestone_approved(&env, player_id, &validator_wallet);
+        events::milestone_approved(
+            &env,
+            player_id,
+            &validator_wallet,
+            next_index,
+            &milestone.description,
+            &milestone.evidence_hash,
+        );
 
         // Cross-contract call: advance the player's progress level.
         // This is a best-effort call — if the progress contract is not set
@@ -203,14 +239,39 @@ impl VerificationContract {
             // advance_level will return AlreadyAtMaxLevel if the player is
             // already at EliteTier — we intentionally ignore that error here
             // so the milestone is still recorded even at max level.
-            let _ = progress_client.try_advance_level(
-                &validator_wallet,
-                &player_id,
-                &next_index,
-            );
+            let _ = progress_client.try_advance_level(&validator_wallet, &player_id, &next_index);
         }
 
         Ok(next_index)
+    }
+
+    /// Clear a misconduct flag after an independent active validator re-confirms it.
+    pub fn rereview_milestone(
+        env: Env,
+        validator_wallet: Address,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        Self::require_not_paused(&env)?;
+        validator_wallet.require_auth();
+        Self::require_active_validator(&env, &validator_wallet)?;
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Milestone(player_id, milestone_index))
+        {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        let flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
+        if !env.storage().persistent().get(&flag_key).unwrap_or(false) {
+            return Err(VerificationError::MilestoneNotPendingReReview);
+        }
+
+        env.storage().persistent().set(&flag_key, &false);
+        events::milestone_rereviewed(&env, player_id, milestone_index, &validator_wallet);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -240,6 +301,37 @@ impl VerificationContract {
             .persistent()
             .get(&DataKey::ValidatorMilestoneCount(wallet))
             .unwrap_or(0u32)
+    }
+
+    pub fn get_validator_milestone(
+        env: Env,
+        wallet: Address,
+        approval_index: u32,
+    ) -> Result<ValidatorMilestoneRef, VerificationError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestone(wallet, approval_index))
+            .ok_or(VerificationError::InvalidInput)
+    }
+
+    pub fn get_validator_revocation(
+        env: Env,
+        wallet: Address,
+    ) -> Result<RevocationRecord, VerificationError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorRevocation(wallet))
+            .ok_or(VerificationError::InvalidInput)
+    }
+
+    pub fn is_milestone_flagged(env: Env, player_id: u64, milestone_index: u32) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MilestonePendingReReview(
+                player_id,
+                milestone_index,
+            ))
+            .unwrap_or(false)
     }
 
     pub fn get_validator(env: Env, wallet: Address) -> Result<Validator, VerificationError> {
@@ -289,6 +381,51 @@ impl VerificationContract {
         }
         Ok(())
     }
+
+    fn require_active_validator(env: &Env, wallet: &Address) -> Result<(), VerificationError> {
+        let validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+        if !validator.active {
+            return Err(VerificationError::ValidatorInactive);
+        }
+        Ok(())
+    }
+
+    fn flag_validator_milestones_for_rereview(
+        env: &Env,
+        validator_wallet: &Address,
+    ) -> Result<(), VerificationError> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(validator_wallet.clone()))
+            .unwrap_or(0u32);
+
+        for approval_index in 1..=count {
+            let milestone: ValidatorMilestoneRef = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ValidatorMilestone(
+                    validator_wallet.clone(),
+                    approval_index,
+                ))
+                .ok_or(VerificationError::InvalidInput)?;
+            env.storage().persistent().set(
+                &DataKey::MilestonePendingReReview(milestone.player_id, milestone.milestone_index),
+                &true,
+            );
+            events::milestone_flagged_for_rereview(
+                env,
+                milestone.player_id,
+                milestone.milestone_index,
+                validator_wallet,
+            );
+        }
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -297,10 +434,15 @@ impl VerificationContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, EnvTestConfig, Ledger as _},
+        Env, String,
+    };
 
     fn setup() -> (Env, VerificationContractClient<'static>) {
-        let env = Env::default();
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
         env.mock_all_auths();
         let id = env.register_contract(None, VerificationContract);
         let client = VerificationContractClient::new(&env, &id);
@@ -317,7 +459,10 @@ mod tests {
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
 
         // Unknown wallet returns 0
-        assert_eq!(client.get_validator_milestone_count(&Address::generate(&env)), 0);
+        assert_eq!(
+            client.get_validator_milestone_count(&Address::generate(&env)),
+            0
+        );
 
         for i in 1u64..=3 {
             client.approve_milestone(
@@ -340,6 +485,7 @@ mod tests {
     #[test]
     fn test_register_and_approve() {
         let (env, client) = setup();
+        env.ledger().with_mut(|ledger| ledger.sequence_number = 1);
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
@@ -360,6 +506,100 @@ mod tests {
 
         let milestone = client.get_milestone(&1u64, &1);
         assert!(milestone.ledger_sequence > 0);
+    }
+
+    #[test]
+    fn test_routine_revocation_does_not_flag_milestones() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.approve_milestone(
+            &validator,
+            &1,
+            &String::from_str(&env, "Verified identity"),
+            &String::from_str(&env, "QmEvidence"),
+        );
+
+        client.revoke_validator(
+            &validator,
+            &RevocationSeverity::Routine,
+            &String::from_str(&env, "Contract ended"),
+        );
+
+        assert!(!client.is_milestone_flagged(&1, &1));
+        assert_eq!(
+            client.get_validator_revocation(&validator).severity,
+            RevocationSeverity::Routine
+        );
+    }
+
+    #[test]
+    fn test_for_cause_revocation_flags_only_approving_validator_milestones() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let revoked = Address::generate(&env);
+        let unaffected = Address::generate(&env);
+        client.register_validator(&revoked, &String::from_str(&env, "Coach A"));
+        client.register_validator(&unaffected, &String::from_str(&env, "Coach B"));
+
+        client.approve_milestone(
+            &revoked,
+            &1,
+            &String::from_str(&env, "Player one achievement"),
+            &String::from_str(&env, "QmEvidence1"),
+        );
+        client.approve_milestone(
+            &unaffected,
+            &1,
+            &String::from_str(&env, "Player one second achievement"),
+            &String::from_str(&env, "QmEvidence2"),
+        );
+        client.approve_milestone(
+            &revoked,
+            &2,
+            &String::from_str(&env, "Player two achievement"),
+            &String::from_str(&env, "QmEvidence3"),
+        );
+
+        client.revoke_validator(
+            &revoked,
+            &RevocationSeverity::ForCause,
+            &String::from_str(&env, "Fraud investigation"),
+        );
+
+        assert!(client.is_milestone_flagged(&1, &1));
+        assert!(!client.is_milestone_flagged(&1, &2));
+        assert!(client.is_milestone_flagged(&2, &1));
+        assert_eq!(client.get_validator_milestone(&revoked, &2).player_id, 2);
+    }
+
+    #[test]
+    fn test_active_validator_can_clear_pending_rereview_flag() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let revoked = Address::generate(&env);
+        let reviewer = Address::generate(&env);
+        client.register_validator(&revoked, &String::from_str(&env, "Coach A"));
+        client.register_validator(&reviewer, &String::from_str(&env, "Coach B"));
+        client.approve_milestone(
+            &revoked,
+            &1,
+            &String::from_str(&env, "Verified achievement"),
+            &String::from_str(&env, "QmEvidence"),
+        );
+        client.revoke_validator(
+            &revoked,
+            &RevocationSeverity::ForCause,
+            &String::from_str(&env, "Misconduct"),
+        );
+        assert!(client.is_milestone_flagged(&1, &1));
+
+        client.rereview_milestone(&reviewer, &1, &1);
+        assert!(!client.is_milestone_flagged(&1, &1));
     }
 
     #[test]
@@ -396,7 +636,11 @@ mod tests {
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(&validator);
+        client.revoke_validator(
+            &validator,
+            &RevocationSeverity::Routine,
+            &String::from_str(&env, "Voluntary departure"),
+        );
 
         assert!(!client.is_active_validator(&validator));
     }
@@ -410,7 +654,11 @@ mod tests {
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(&validator);
+        client.revoke_validator(
+            &validator,
+            &RevocationSeverity::Routine,
+            &String::from_str(&env, "Voluntary departure"),
+        );
 
         // Should panic — validator is inactive
         client.approve_milestone(

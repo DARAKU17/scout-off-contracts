@@ -37,10 +37,14 @@ Manages the trusted validator registry and milestone approvals.
 | `initialize(admin)` | admin | One-time setup |
 | `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
 | `register_validator(wallet, credentials)` | admin | Add trusted validator |
-| `revoke_validator(wallet)` | admin | Deactivate validator |
+| `revoke_validator(wallet, severity, reason)` | admin | Deactivate validator; for-cause revocations flag prior approvals |
 | `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
+| `rereview_milestone(validator_wallet, player_id, milestone_index)` | active validator | Clear one pending re-review flag after re-confirmation |
 | `get_milestone(player_id, index)` | — | Read a specific milestone |
 | `get_milestone_count(player_id)` | — | Total milestones for a player |
+| `get_validator_milestone(wallet, approval_index)` | — | Read a validator approval-history entry |
+| `get_validator_revocation(wallet)` | — | Read revocation severity, reason, and timestamp |
+| `is_milestone_flagged(player_id, milestone_index)` | — | Return whether a milestone is pending re-review |
 | `get_validator(wallet)` | — | Read validator record |
 | `is_active_validator(wallet)` | — | Boolean check |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
@@ -52,7 +56,9 @@ Manages the trusted validator registry and milestone approvals.
 |-------|--------|------|-------------|
 | `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
 | `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
-| `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+| `validator_revoked` | event_name | validator_address, severity, reason | Emitted when a validator is deactivated |
+| `milestone_flagged` | event_name, player_id, milestone_index | revoked_validator_address | Emitted when a for-cause cascade flags a milestone |
+| `milestone_rereviewed` | event_name, player_id, milestone_index | reviewing_validator_address | Emitted when a re-review clears a flag |
 
 ---
 

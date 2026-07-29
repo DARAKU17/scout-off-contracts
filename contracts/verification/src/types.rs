@@ -25,6 +25,31 @@ pub struct Validator {
     pub active: bool,
 }
 
+/// Whether a validator revocation requires re-review of prior approvals.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RevocationSeverity {
+    Routine,
+    ForCause,
+}
+
+/// The reason and severity recorded when a validator is revoked.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationRecord {
+    pub severity: RevocationSeverity,
+    pub reason: String,
+    pub revoked_at: u64,
+}
+
+/// Identifies one milestone in a validator's approval history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ValidatorMilestoneRef {
+    pub player_id: u64,
+    pub milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -38,6 +63,14 @@ pub enum DataKey {
     Milestone(u64, u32),
     /// registration contract address (cross-contract calls)
     RegistrationContract,
+    /// progress contract address (cross-contract calls)
+    ProgressContract,
     /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
+    /// (validator wallet, approval index) → approved milestone reference
+    ValidatorMilestone(Address, u32),
+    /// validator wallet → RevocationRecord
+    ValidatorRevocation(Address),
+    /// (player_id, milestone_index) → whether re-review is pending
+    MilestonePendingReReview(u64, u32),
 }
