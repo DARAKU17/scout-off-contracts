@@ -47,7 +47,18 @@ mod registration_contract {
         pub wallet: Address,
         pub region: String,
         pub verified: bool,
+        pub verification: ScoutVerificationRecord,
         pub registered_at: u64,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct ScoutVerificationRecord {
+        pub verified: bool,
+        pub verified_by: Option<Address>,
+        pub verified_at: Option<u64>,
+        pub evidence_ref: Option<String>,
+        pub method: Option<String>,
     }
 
     #[contracterror]
@@ -84,6 +95,16 @@ const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 // carry the same lifetime significance as identity records, so they follow their own (longer than default but reasonable) schedule.
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
+const PERSISTENT_TTL_MIN: u32 = 1_000;
+const PERSISTENT_TTL_MAX: u32 = 2_000;
+
+mod progress_contract {
+    use scoutchain_shared_types::ProgressLevel;
+
+    soroban_sdk::contractimport!(
+        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
+    );
+}
 
 // #795: upper bound on how many OutstandingTrialEscrows entries
 // expire_trial_offers will examine in a single call, so a large backlog
@@ -108,6 +129,12 @@ const MIN_SUB_FEE_STROOPS: i128 = 1_000_000; // 0.1 XLM
 // 5s/ledger ≈ 120,960 ledgers. Scouts have one full week to react to a
 // proposed fee increase before it takes effect.
 const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
+
+// #826: Bounded on-chain fee config history. 5 entries is enough to cover the
+// immediate past plus the pending proposal window (7 days), while keeping the
+// storage footprint fixed and predictable regardless of how many times fees
+// are updated over the contract's lifetime.
+const FEE_CONFIG_HISTORY_CAP: usize = 5;
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -474,7 +501,7 @@ impl ScoutAccessContract {
                 let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
                 match reg_client.try_get_scout_by_wallet(&scout) {
                     Ok(scout_profile) => {
-                        if !scout_profile.verified {
+                        if !scout_profile.verification.verified {
                             return Err(ScoutAccessError::ScoutNotVerified);
                         }
                     }
@@ -1223,6 +1250,11 @@ impl ScoutAccessContract {
             return Err(ScoutAccessError::TrialOfferExpired);
         }
 
+        // Maintain bounded enumeration index for sweep operations.
+        Self::trial_escrow_index_insert(&env, player_id, next_index);
+
+        // Cross-contract call: advance the player to Level 3 if progress contract is set.
+        if let Some(progress_addr) = env
         // Call progress contract to advance level (using the index as milestone reference)
         let progress_addr = match env
             .storage()
@@ -1262,6 +1294,29 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Confirm a trial offer (admin-only for now; later may be called by escrow logic).
+    /// Removes the offer from the bounded enumeration index so it no longer appears
+    /// in sweep iterations.
+    pub fn confirm_trial_offer(env: Env, player_id: u64, trial_index: u32) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_admin(&env)?;
+
+        // Verify the offer exists before removing it from the index.
+        let _offer: TrialOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrialOffer(player_id, trial_index))
+            .ok_or(ScoutAccessError::InvalidInput)?;
+
+        Self::trial_escrow_index_remove(&env, player_id, trial_index);
+        events::trial_offer_confirmed(&env, player_id, trial_index);
+        Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ScoutAccessError> {
+        Self::require_admin(&env)?;
+        let old_admin = Self::get_admin(&env);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
     /// Admin helper to sweep pending trial offers that have passed their
     /// expiry window: refunds the escrowed XLM to the originating scout,
     /// removes the `TrialEscrow` record, and emits `trial_offer_expired`
@@ -1901,6 +1956,11 @@ impl ScoutAccessContract {
         Self::accumulate_fee(env, amount)
     }
 
+    /// Validate that every fee field is positive and durations are non-zero.
+    ///
+    /// This is the single authoritative validation entry point for `FeeConfig`.
+    /// Both `initialize` and `update_fee_config` call this method, and any
+    /// future field added to `FeeConfig` must be validated here.
     /// Validate that every fee field meets the minimum floor and sub_duration_secs is non-zero.
     fn validate_fee_config(config: &FeeConfig) -> Result<(), ScoutAccessError> {
         if config.contact_fee_stroops < MIN_CONTACT_FEE_STROOPS
@@ -1908,6 +1968,8 @@ impl ScoutAccessContract {
             || config.pro_sub_stroops < MIN_SUB_FEE_STROOPS
             || config.elite_sub_stroops < MIN_SUB_FEE_STROOPS
             || config.sub_duration_secs == 0
+            || config.trial_offer_escrow_stroops < 0
+            || config.trial_offer_expiry_secs == 0
             || config.pro_contact_limit == 0
         {
             return Err(ScoutAccessError::InvalidInput);
@@ -1922,6 +1984,56 @@ impl ScoutAccessContract {
             SubscriptionTier::Pro => 2,
             SubscriptionTier::Elite => 3,
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #821: Bounded trial-escrow enumeration index
+    // -------------------------------------------------------------------------
+    //
+    // A swap-remove Vec stored under `DataKey::TrialEscrowIndex` provides
+    // O(1) insertion, O(1) removal, and iteration cost bounded by the number
+    // of *currently outstanding* trial offers, not total historical volume.
+
+    fn trial_escrow_index_insert(env: &Env, player_id: u64, trial_index: u32) {
+        let mut index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrialEscrowIndex)
+            .unwrap_or_else(|| Vec::new(env));
+        index.push_back((player_id, trial_index));
+        env.storage()
+            .persistent()
+            .set(&DataKey::TrialEscrowIndex, &index);
+    }
+
+    fn trial_escrow_index_remove(env: &Env, player_id: u64, trial_index: u32) {
+        let mut index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrialEscrowIndex)
+            .unwrap_or_else(|| Vec::new(env));
+
+        if let Some(pos) = index.iter().position(|(pid, tid)| *pid == player_id && *tid == trial_index) {
+            // Swap-remove: move last element into the removed slot, then pop.
+            let last = index.len() - 1;
+            if pos != last {
+                index.swap(pos, last);
+            }
+            index.pop();
+            env.storage()
+                .persistent()
+                .set(&DataKey::TrialEscrowIndex, &index);
+        }
+    }
+
+    /// Iterate all outstanding trial escrows. Used by `expire_trial_offers`.
+    pub(crate) fn trial_escrow_index_iter(env: &Env) -> Vec<(u64, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TrialEscrowIndex)
+            .unwrap_or_else(|| Vec::new(env))
+            .iter()
+            .collect::<Vec<_>>()
     }
 }
 
@@ -2075,6 +2187,8 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
             pro_contact_limit: 20,
             trial_offer_escrow_stroops: 1_000_000,
             trial_offer_expiry_secs: 7_200,
@@ -3133,6 +3247,8 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            trial_offer_escrow_stroops: 500_000,
+            trial_offer_expiry_secs: 3_600,
             pro_contact_limit: 15,
             trial_offer_escrow_stroops: 1_000_000,
             trial_offer_expiry_secs: 7_200,
@@ -3141,6 +3257,119 @@ mod tests {
         assert!(result.is_ok());
         let stored = client.get_fee_config();
         assert_eq!(stored.contact_fee_stroops, 200_000);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #822: FeeConfig validation for trial-offer escrow fields
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_initialize_zero_trial_escrow_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            trial_offer_escrow_stroops: 0,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_zero_trial_expiry_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            trial_offer_expiry_secs: 0,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_negative_trial_escrow_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            trial_offer_escrow_stroops: -1,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_update_fee_config_zero_trial_escrow_returns_invalid_input() {
+        let (_, _, _, _, client) = setup();
+        let bad_fees = FeeConfig {
+            trial_offer_escrow_stroops: 0,
+            ..default_fees()
+        };
+        let result = client.try_update_fee_config(&bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_update_fee_config_zero_trial_expiry_returns_invalid_input() {
+        let (_, _, _, _, client) = setup();
+        let bad_fees = FeeConfig {
+            trial_offer_expiry_secs: 0,
+            ..default_fees()
+        };
+        let result = client.try_update_fee_config(&bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #821: Trial escrow enumeration index tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_trial_escrow_index_insert_and_iter() {
+        let (env, admin, xlm, client) = make_contract();
+        let scout = Address::generate(&env);
+        let player_id = 1u64;
+
+        // Log two trial offers for the same player.
+        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
+        let idx2 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash2"));
+
+        // The index should contain both entries.
+        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
+        assert_eq!(index.len(), 2);
+        assert!(index.contains(&(player_id, idx1)));
+        assert!(index.contains(&(player_id, idx2)));
+    }
+
+    #[test]
+    fn test_trial_escrow_index_remove_does_not_grow() {
+        let (env, admin, xlm, client) = make_contract();
+        let scout = Address::generate(&env);
+        let player_id = 1u64;
+
+        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
+        let idx2 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash2"));
+        let _idx3 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash3"));
+
+        // Confirm the middle entry out of order.
+        client.confirm_trial_offer(&player_id, &idx2);
+
+        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
+        assert_eq!(index.len(), 2);
+        assert!(!index.contains(&(player_id, idx2)));
+        assert!(index.contains(&(player_id, idx1)));
+        assert!(index.contains(&(player_id, _idx3)));
+    }
+
+    #[test]
+    fn test_trial_escrow_index_remove_all() {
+        let (env, admin, xlm, client) = make_contract();
+        let scout = Address::generate(&env);
+        let player_id = 1u64;
+
+        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
+        client.confirm_trial_offer(&player_id, &idx1);
+
+        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
+        assert!(index.is_empty());
     }
 
     // -------------------------------------------------------------------------
@@ -3554,7 +3783,7 @@ mod tests {
         // Register a milestone so the trial-offer's milestone_ref (index 1)
         // validates against the verification contract's milestone count.
         let validator = Address::generate(&env);
-        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
         ver_client.approve_milestone(
             &validator,
             &player_id,
@@ -3631,7 +3860,7 @@ mod tests {
         // Register a milestone so the trial-offer's milestone_ref (index 1)
         // validates against the verification contract's milestone count.
         let validator = Address::generate(&env);
-        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
+        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
         ver_client.approve_milestone(
             &validator,
             &player_id,
