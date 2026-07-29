@@ -150,4 +150,19 @@ pub enum DataKey {
     /// hidden from `filter_players` results while their profile and history are
     /// fully preserved. Set by `deactivate_player`, cleared by `reactivate_player`.
     PlayerDeactivated(u64),
+
+    // ── Registration cooldown ──
+    /// Last registration timestamp for a player wallet (Unix seconds).
+    /// Set by `register_player` and read to enforce the per-caller cooldown.
+    PlayerRegLastSent(Address),
+    /// Last registration timestamp for a scout wallet (Unix seconds).
+    /// Set by `register_scout` and read to enforce the per-caller cooldown.
+    ScoutRegLastSent(Address),
+    /// Last registration timestamp for a validator wallet (Unix seconds).
+    /// Set by `register_validator` in the verification contract; mirrored here
+    /// via the same DataKey convention for cross-contract inspection.
+    ValidatorRegLastSent(Address),
+    /// Cooldown in seconds between repeated registration attempts from the
+    /// same wallet. 0 means no cooldown. Configurable by admin.
+    RegCooldownSecs(u64),
 }

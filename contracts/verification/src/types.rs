@@ -140,4 +140,12 @@ pub enum DataKey {
     /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
     /// Exposed via `list_disputes_page(offset, limit)`.
     OpenDisputeIndex,
+
+    // ── Registration cooldown ──
+    /// Last registration timestamp for a validator wallet (Unix seconds).
+    /// Set by `register_validator` and read to enforce the per-caller cooldown.
+    ValidatorRegLastSent(Address),
+    /// Platform-wide validator registration cooldown in seconds.
+    /// 0 disables the cooldown. Configurable by admin via `set_reg_cooldown`.
+    RegCooldownSecs(u64),
 }

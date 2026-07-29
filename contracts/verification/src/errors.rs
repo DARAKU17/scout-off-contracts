@@ -61,6 +61,10 @@ pub enum VerificationError {
     // ── Function-scoped pausing ──
     /// The approve_milestone function is paused independently of whole-contract pause.
     ApproveMilestonePaused = 20,
+
+    // ── Rate limiting ──
+    /// Caller attempted to register again before the cooldown period elapsed.
+    RegistrationCooldown = 21,
 }
 
 impl AdminError for VerificationError {
