@@ -248,7 +248,15 @@ impl VerificationContract {
             .persistent()
             .extend_ttl(&DataKey::ValidatorVector, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
-        let active_count: u32 = env
+    /// Deactivate a validator and record whether prior approvals need re-review.
+    pub fn revoke_validator(
+        env: Env,
+        wallet: Address,
+        severity: RevocationSeverity,
+        reason: String,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        let mut validator: Validator = env
             .storage()
             .instance()
             .get(&DataKey::ActiveValidatorCount)
@@ -274,12 +282,24 @@ impl VerificationContract {
         let now = env.ledger().timestamp();
         env.storage()
             .persistent()
-            .set(&DataKey::ValidatorRegLastSent(wallet.clone()), &now);
-        env.storage().persistent().extend_ttl(
-            &DataKey::ValidatorRegLastSent(wallet.clone()),
-            PERSISTENT_TTL_MIN,
-            PERSISTENT_TTL_MAX,
-        );
+            .set(&DataKey::Validator(wallet.clone()), &validator);
+
+        let record = RevocationRecord {
+            severity: severity.clone(),
+            reason: reason.clone(),
+            revoked_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorRevocation(wallet.clone()), &record);
+
+        if severity == RevocationSeverity::ForCause {
+            Self::flag_validator_milestones_for_rereview(&env, &wallet)?;
+        }
+
+        events::validator_revoked(&env, &wallet, &severity, &reason);
+        Ok(())
+    }
 
         Ok(())
     }
