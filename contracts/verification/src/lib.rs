@@ -23,7 +23,7 @@ use types::{
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_sub_u32}};
+use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32}};
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
 /// Minimum credentials length for validator registration.
@@ -319,7 +319,37 @@ impl VerificationContract {
 
         events::validator_registered(&env, &wallet, &validator.credentials);
 
+        // Record cooldown timestamp for future re-registration attempts.
+        let now = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ValidatorRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         Ok(())
+    }
+
+    /// Set the per-wallet validator registration cooldown in seconds (admin only).
+    /// Pass `0` to disable the cooldown entirely.
+    pub fn set_reg_cooldown(env: Env, cooldown_secs: u64) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegCooldownSecs(0), &cooldown_secs);
+        Ok(())
+    }
+
+    /// Return the current validator registration cooldown in seconds.
+    /// Returns `DEFAULT_REG_COOLDOWN_SECS` if no override has been set.
+    pub fn get_reg_cooldown(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RegCooldownSecs(0))
+            .unwrap_or(DEFAULT_REG_COOLDOWN_SECS)
     }
     pub fn get_validators(env: Env) -> Vec<Address> {
         let all: Vec<Address> = env
@@ -1823,6 +1853,41 @@ impl VerificationContract {
             .unwrap_or(false)
         {
             return Err(VerificationError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Enforce the per-wallet validator registration cooldown.
+    ///
+    /// Reads the last-sent timestamp stored under `last_sent_key`.  If a
+    /// timestamp is present and the current ledger time is before
+    /// `last_sent + cooldown_secs`, returns `RegistrationCooldown`.
+    /// A cooldown of 0 disables the check entirely.
+    fn enforce_reg_cooldown(
+        env: &Env,
+        last_sent_key: &DataKey,
+    ) -> Result<(), VerificationError> {
+        let cooldown_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegCooldownSecs(0))
+            .unwrap_or(DEFAULT_REG_COOLDOWN_SECS);
+
+        if cooldown_secs == 0 {
+            return Ok(());
+        }
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(last_sent_key)
+        {
+            let next_allowed = safe_add_u64(last_sent, cooldown_secs)
+                .map_err(|_| VerificationError::Overflow)?;
+            if now < next_allowed {
+                return Err(VerificationError::RegistrationCooldown);
+            }
         }
         Ok(())
     }
