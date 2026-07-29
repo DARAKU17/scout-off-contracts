@@ -90,6 +90,15 @@ pub enum PlayerStatus {
     Deactivated,
 }
 
+/// Direct status for a registered scout.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScoutStatus {
+    Active,
+    Deactivated,
+    NotRegistered,
+}
+
 /// Scout profile stored on-chain
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -150,4 +159,9 @@ pub enum DataKey {
     /// hidden from `filter_players` results while their profile and history are
     /// fully preserved. Set by `deactivate_player`, cleared by `reactivate_player`.
     PlayerDeactivated(u64),
+    /// Deactivation flag for a scout. When present and `true`, the scout is
+    /// considered deactivated. Profile data is fully preserved and still
+    /// accessible via `get_scout`. Set by `deactivate_scout`, cleared by
+    /// `reactivate_scout`.
+    ScoutDeactivated(u64),
 }

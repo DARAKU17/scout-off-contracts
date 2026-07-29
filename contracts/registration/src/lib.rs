@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, StoredPlayerProfile,
+    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated
@@ -60,10 +60,8 @@ const INSTANCE_TTL_MAX: u32 = 500;
 // and must live as long as the profiles they index.
 const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 518_400;
-const ADMIN_BUMP_LEDGERS: u32 = 518_400;
-
 // Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -625,6 +623,31 @@ impl RegistrationContract {
         }
     }
 
+    /// Return the current status of a scout account.
+    ///
+    /// - `Active`      — scout exists and has not been deactivated.
+    /// - `Deactivated` — scout exists but has been soft-deactivated by admin.
+    /// - `NotRegistered` — no scout profile found for the given `scout_id`.
+    pub fn get_scout_status(env: Env, scout_id: u64) -> ScoutStatus {
+        let exists = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id));
+        if !exists {
+            return ScoutStatus::NotRegistered;
+        }
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ScoutDeactivated(scout_id))
+            .unwrap_or(false)
+        {
+            ScoutStatus::Deactivated
+        } else {
+            ScoutStatus::Active
+        }
+    }
+
     pub fn get_scout(env: Env, scout_id: u64) -> Result<ScoutProfile, ScoutChainError> {
         let profile: ScoutProfile = env
             .storage()
@@ -652,6 +675,45 @@ impl RegistrationContract {
             .persistent()
             .set(&DataKey::Scout(scout_id), &profile);
         events::scout_verified(&env, scout_id, &profile.wallet);
+        Ok(())
+    }
+
+    /// Deactivate a scout (admin only).
+    ///
+    /// Sets a `ScoutDeactivated(scout_id)` flag that marks the scout as
+    /// inactive. The on-chain profile is fully preserved and still accessible
+    /// via `get_scout`. Use `get_scout_status` to query the current state.
+    pub fn deactivate_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        // Ensure the scout actually exists before setting the flag.
+        let _profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutDeactivated(scout_id), &true);
+        events::scout_deactivated(&env, scout_id, &admin);
+        Ok(())
+    }
+
+    /// Reactivate a previously deactivated scout (admin only).
+    ///
+    /// Clears the `ScoutDeactivated(scout_id)` flag, restoring the scout to
+    /// active status.
+    pub fn reactivate_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        // Ensure the scout actually exists.
+        let _profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ScoutDeactivated(scout_id));
+        events::scout_reactivated(&env, scout_id, &admin);
         Ok(())
     }
 
@@ -2835,5 +2897,186 @@ mod tests {
         assert_eq!(profile_updated.vitals.region, vitals_max.region);
         assert_eq!(profile_updated.vitals.nationality, vitals_max.nationality);
         assert_eq!(profile_updated.vitals.age, vitals_max.age);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #844: deactivate_scout / reactivate_scout
+    // -------------------------------------------------------------------------
+
+    /// A newly registered scout must have Active status.
+    #[test]
+    fn test_new_scout_status_is_active() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Europe"));
+
+        assert_eq!(client.get_scout_status(&scout_id), types::ScoutStatus::Active);
+    }
+
+    /// Querying a scout_id that has never been registered returns NotRegistered.
+    #[test]
+    fn test_get_scout_status_not_registered() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_scout_status(&999u64), types::ScoutStatus::NotRegistered);
+    }
+
+    /// Admin can deactivate a scout; status changes to Deactivated.
+    #[test]
+    fn test_deactivate_scout_changes_status() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Europe"));
+
+        client.deactivate_scout(&scout_id);
+
+        assert_eq!(
+            client.get_scout_status(&scout_id),
+            types::ScoutStatus::Deactivated
+        );
+    }
+
+    /// Deactivating a scout does NOT remove the scout profile (data preserved).
+    #[test]
+    fn test_deactivated_scout_profile_preserved_via_get_scout() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "South America"));
+
+        client.deactivate_scout(&scout_id);
+
+        // Profile must still be readable
+        let profile = client.get_scout(&scout_id);
+        assert_eq!(profile.wallet, wallet);
+        assert_eq!(profile.scout_id, scout_id);
+    }
+
+    /// Admin can reactivate a deactivated scout; status returns to Active.
+    #[test]
+    fn test_reactivate_scout_restores_active_status() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Europe"));
+
+        client.deactivate_scout(&scout_id);
+        assert_eq!(
+            client.get_scout_status(&scout_id),
+            types::ScoutStatus::Deactivated
+        );
+
+        client.reactivate_scout(&scout_id);
+        assert_eq!(
+            client.get_scout_status(&scout_id),
+            types::ScoutStatus::Active
+        );
+    }
+
+    /// deactivate_scout emits a `scout_deactivated` event with the admin and scout_id.
+    #[test]
+    fn test_deactivate_scout_emits_event() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::IntoVal;
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Europe"));
+
+        // Clear registration events.
+        let _ = env.events().all();
+
+        client.deactivate_scout(&scout_id);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        soroban_sdk::Symbol::new(&env, "scout_deactivated"),
+                        admin.clone(),
+                    )
+                        .into_val(&env),
+                    scout_id.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    /// reactivate_scout emits a `scout_reactivated` event with the admin and scout_id.
+    #[test]
+    fn test_reactivate_scout_emits_event() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::IntoVal;
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.register_scout(&wallet, &String::from_str(&env, "Europe"));
+
+        client.deactivate_scout(&scout_id);
+        // Clear deactivation event.
+        let _ = env.events().all();
+
+        client.reactivate_scout(&scout_id);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        soroban_sdk::Symbol::new(&env, "scout_reactivated"),
+                        admin.clone(),
+                    )
+                        .into_val(&env),
+                    scout_id.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    /// deactivate_scout on a non-existent scout_id returns ScoutNotFound.
+    #[test]
+    fn test_deactivate_nonexistent_scout_returns_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_deactivate_scout(&999u64);
+        assert_eq!(result, Err(Ok(ScoutChainError::ScoutNotFound)));
+    }
+
+    /// reactivate_scout on a non-existent scout_id returns ScoutNotFound.
+    #[test]
+    fn test_reactivate_nonexistent_scout_returns_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_reactivate_scout(&999u64);
+        assert_eq!(result, Err(Ok(ScoutChainError::ScoutNotFound)));
     }
 }
