@@ -57,6 +57,16 @@ pub enum VerificationError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 19,
+
+    // ── Function-scoped pausing ──
+    /// The approve_milestone function is paused independently of whole-contract pause.
+    ApproveMilestonePaused = 20,
+
+    // ── Specialization ──
+    /// Validator is not tagged for the requested milestone category.
+    /// Only raised when a `milestone_category` is supplied to `approve_milestone`
+    /// and the validator's `specializations` list does not contain that category.
+    SpecializationMismatch = 21,
 }
 
 impl AdminError for VerificationError {
@@ -86,7 +96,7 @@ mod tests {
         let admin = Address::generate(&env);
         let validator = Address::generate(&env);
         client.initialize(&admin);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
 
         let description_256 = String::from_str(&env, &"a".repeat(256));
         let evidence = String::from_str(&env, VALID_CID_V0);
@@ -101,7 +111,7 @@ mod tests {
         let admin = Address::generate(&env);
         let validator = Address::generate(&env);
         client.initialize(&admin);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
 
         let description_257 = String::from_str(&env, &"a".repeat(257));
         let evidence = String::from_str(&env, VALID_CID_V0);

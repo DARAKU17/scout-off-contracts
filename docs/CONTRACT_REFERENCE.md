@@ -341,6 +341,39 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- get_player_count
 
 ---
 
+#### `get_player_summary(player_id: u64) -> Result<PlayerSummary, ScoutChainError>`
+
+Return a lightweight player summary (vitals + level, no IPFS hashes or wallet)
+for efficient list rendering on the scout discovery dashboard.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_player_summary --player_id 1
+```
+
+---
+
+#### `get_players(ids: Vec<u64>) -> Result<Vec<PlayerSummary>, ScoutChainError>`
+
+Batch-fetch player summaries for a list of IDs. Unknown IDs are skipped.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `NotInitialized` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_players --ids '[1,2,3]'
+```
+
+---
+
 #### `get_scout_count() -> u64`
 
 Return the total number of registered scouts. Returns `0` before the contract
@@ -460,6 +493,30 @@ For cost rationale behind batch-size caps, see the batch-operation entries in [`
 ```bash
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- get_players --ids '[1,2,3]'
+```
+
+---
+
+#### `get_scouts(ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError>`
+
+Batch-fetch full scout profiles for up to 20 IDs in a single call. Mirrors
+`get_players` semantics exactly: missing IDs are silently skipped with partial
+hits returned successfully, and the same 20-ID cap applies.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `InvalidInput` (more than 20 IDs provided) |
+
+**Examples**:
+```bash
+# Fetch three scouts by ID
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,2,3]'
+
+# Mixed batch with one nonexistent ID — returns two profiles only
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scouts --ids '[1,999,2]'
 ```
 
 ---
@@ -592,23 +649,29 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `register_validator(wallet: Address, credentials: String) -> Result<(), VerificationError>`
+#### `register_validator(wallet: Address, credentials: String, specializations: Vec<String>) -> Result<(), VerificationError>`
 
 Onboard a new trusted validator (coach, academy director, certified trainer).
 `credentials` is a human-readable label (max 256 bytes, e.g. `"UEFA B License"`).
+`specializations` is an optional list of category tags (max 10 tags, each tag
+max 64 bytes, e.g. `["physical-stats", "identity-kyc"]`). Pass an empty `Vec`
+for a general-purpose validator that can approve any untagged (general-category)
+milestone. When a tagged milestone category is provided to `approve_milestone`,
+only validators whose `specializations` list contains that category can approve it.
 
 The contract enforces a cap of **100 simultaneously registered validators**. This limit exists because all validator addresses are stored in a single persistent entry; exceeding Soroban's 64 KB per-entry limit would cause the entry to become unreadable. Raising the cap requires a contract upgrade.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
+| **Errors** | `ValidatorAlreadyRegistered` · `InvalidInput` (credentials >256 bytes, or >10 specializations, or empty/oversized tag) · `ValidatorCapReached` (100-validator limit reached) · `NotInitialized` · `ContractPaused` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- register_validator \
   --wallet $VALIDATOR_ADDRESS \
-  --credentials '"UEFA B License"'
+  --credentials '"UEFA B License"' \
+  --specializations '["physical-stats"]'
 ```
 
 ---
@@ -671,6 +734,31 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `set_validator_specializations(wallet: Address, specializations: Vec<String>) -> Result<(), VerificationError>`
+
+Update the specialization tags for an existing validator. Replaces the
+validator's current `specializations` list with the supplied one. Pass an
+empty `Vec` to make the validator general-purpose (untagged, can approve any
+untagged milestone). Max 10 tags, each max 64 bytes.
+
+This is additive/non-breaking: validators with no specializations remain
+fully functional for untagged milestones; specialization checks only engage
+when `approve_milestone` is called with a non-`None` `milestone_category`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `InvalidInput` (>10 tags or empty/oversized tag) · `NotInitialized` · `ContractPaused` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_validator_specializations \
+  --wallet $VALIDATOR_ADDRESS \
+  --specializations '["physical-stats","match-performance"]'
+```
+
+---
+
 #### `transfer_validator(old_wallet: Address, new_wallet: Address) -> Result<(), VerificationError>`
 
 Migrate a validator's identity to a new wallet address. Copies the
@@ -692,11 +780,26 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<u32, VerificationError>`
+#### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String, milestone_category: Option<String>) -> Result<u32, VerificationError>`
 
 Record a verified milestone for a player. Caller must be a registered, active
 validator. Evidence hash must be a valid IPFS (`Qm…`) or Arweave (`bafy…`) CID
 of 2–128 bytes.
+
+`milestone_category` is an optional specialization tag (max 64 bytes, e.g.
+`"physical-stats"` or `"identity-kyc"`). When supplied, the validator's
+`specializations` list must contain this category — if not, the call is
+rejected with `SpecializationMismatch`. When omitted (`None`), the
+specialization check is skipped entirely and any active validator can approve,
+preserving the existing untagged behaviour for backwards compatibility.
+
+**Milestone Examples:**
+
+| Description | Category | Required validator specialization |
+|---|---|---|
+| "Scored 5 goals in Local Cup" | `None` (untagged) | Any active validator |
+| "Top speed clocked at 32 km/h" | `"physical-stats"` | Validator with `"physical-stats"` |
+| "Academy confirms active membership" | `"identity-kyc"` | Validator with `"identity-kyc"` |
 
 After storing the milestone this function cross-calls `progress.advance_level`
 atomically so both state changes occur in the same Stellar transaction. Returns
@@ -705,14 +808,44 @@ the milestone index.
 | | |
 |---|---|
 | **Auth** | `validator_wallet` must sign |
-| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `Overflow` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash or category tag >64 bytes) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `SpecializationMismatch` (category provided but validator not tagged for it) · `Overflow` · `ProgressCallFailed` |
 
 ```bash
+# Untagged milestone (any active validator)
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- approve_milestone \
   --validator_wallet $VALIDATOR_ADDRESS \
   --player_id 1 \
   --description '"Scored 5 goals in Local Cup"' \
+  --evidence_hash '"QmEvidence123"' \
+  --milestone_category null
+
+# Tagged milestone (only validators specialised in physical-stats)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- approve_milestone \
+  --validator_wallet $TRAINER_ADDRESS \
+  --player_id 1 \
+  --description '"Top speed clocked at 32 km/h"' \
+  --evidence_hash '"QmEvidence456"' \
+  --milestone_category '"physical-stats"'
+```
+
+---
+
+#### `get_evidence_hash_usage(evidence_hash: String) -> Option<(u64, u32)>`
+
+Return the original milestone consumer for an evidence hash that has already
+been used by `approve_milestone`. Returns `Some((player_id, milestone_index))`
+when the hash has been consumed, or `None` when it is still available for use.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_evidence_hash_usage \
   --evidence_hash '"QmEvidence123"'
 ```
 
@@ -848,6 +981,32 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `get_milestones_since(player_id: u64, since_timestamp: u64) -> Vec<Milestone>`
+
+Return all milestones for a player where `approved_at >= since_timestamp`, in
+approval order (oldest first).
+
+This function mirrors [`progress.get_history_since`](#get_history_sinceplayerid-u64-sincetimestamp-u64---vecprogressentry)
+in signature and semantics: an indexer that already tracks the timestamp of the
+last milestone it processed can pass that timestamp to fetch only newly
+approved milestones, avoiding a full re-fetch of the player's entire milestone
+list on every sync cycle.
+
+Returns an empty `Vec` when the player has no milestones, or when none satisfy
+the timestamp predicate.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_milestones_since --player_id 1 --since_timestamp 1700000000
+```
+
+---
+
 #### `get_validator(wallet: Address) -> Result<Validator, VerificationError>`
 
 Read the full validator record including credentials, registration timestamp,
@@ -915,6 +1074,39 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), VerificationError>`
+
+Upgrade the contract WASM to a new hash. Admin auth required. Persistent
+storage (including the admin key) survives the upgrade.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_total_milestone_count() -> u32`
+
+Return the global total number of milestones approved across all players and
+validators since contract initialization.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_total_milestone_count
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -975,6 +1167,35 @@ appears at most once.
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- get_validator_players --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `get_validator_activity_report(wallet: Address) -> Result<ValidatorActivityReport, VerificationError>`
+
+Convenience aggregate query — bundles the data from four individual queries into
+one call, reducing round-trips for admin dashboards and monitoring tools.
+
+Internally aggregates exactly:
+1. `get_validator(wallet)` → `credentials`, `registered_at`, `active`
+2. `get_validator_status(wallet)` → `status`
+3. `get_validator_milestone_count(wallet)` → `milestone_count`
+4. `get_validator_players(wallet)` → `distinct_players` (and `distinct_player_count`)
+
+This is a **pure read-only aggregation** — no new storage, no new business logic.
+The returned values are byte-for-byte identical to calling the four individual
+queries separately.
+
+Returns `ValidatorNotFound` if the wallet has never been registered.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ValidatorNotFound` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_validator_activity_report --wallet $VALIDATOR_ADDRESS
 ```
 
 ---
@@ -1695,6 +1916,9 @@ greater than zero; either function returns `InvalidInput` otherwise.
 | `pro_sub_stroops` | `i128` | stroops | > 0 | `3000000` (0.3 XLM) |
 | `elite_sub_stroops` | `i128` | stroops | > 0 | `7000000` (0.7 XLM) |
 | `sub_duration_secs` | `u64` | duration in seconds (not a Unix timestamp) | > 0 | `2592000` (30 days = 30 × 24 × 3600) |
+| `pro_contact_limit` | `u32` | count | > 0 | `10` (10 contacts/period) |
+| `trial_offer_escrow_stroops` | `i128` | stroops | > 0 | `500000` (0.05 XLM) |
+| `trial_offer_expiry_secs` | `u64` | duration in seconds | > 0 | `3600` (1 hour) |
 
 **Validation rules:**
 - Every `i128` fee field must be > 0 (zero or negative → `InvalidInput` error code 15).
@@ -1705,6 +1929,8 @@ greater than zero; either function returns `InvalidInput` otherwise.
   `ProContactLimitReached` (code 20) for that scout until their subscription
   renews. **Elite-tier scouts are exempt** from this limit and may contact any
   number of players regardless of `pro_contact_limit`.
+- `trial_offer_escrow_stroops` must be > 0 (zero or negative → `InvalidInput`). This is the XLM amount held in escrow when a scout logs a trial offer.
+- `trial_offer_expiry_secs` must be > 0 (zero → `InvalidInput`). This defines the window within which a player must confirm a trial offer before it expires and the escrow is refunded.
 - There is no enforced upper bound on fee fields, but values larger than the XLM supply
   (≈ 500 000 000 XLM = 5 × 10¹⁵ stroops) will cause `Overflow` errors at fee
   settlement time.
@@ -1758,7 +1984,7 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- initialize \
   --admin $ADMIN_ADDRESS \
   --xlm_token $XLM_TOKEN_ADDRESS \
-  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10}'
+  --fee_config '{"contact_fee_stroops":100000,"basic_sub_stroops":1000000,"pro_sub_stroops":3000000,"elite_sub_stroops":7000000,"sub_duration_secs":2592000,"pro_contact_limit":10,"trial_offer_escrow_stroops":500000,"trial_offer_expiry_secs":3600}'
 ```
 
 ---
@@ -1859,7 +2085,171 @@ Adjust subscription and contact fee rates. Same validation rules as
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_fee_config \
-  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+  --fee_config '{"contact_fee_stroops":200000,"basic_sub_stroops":2000000,"pro_sub_stroops":5000000,"elite_sub_stroops":10000000,"sub_duration_secs":2592000,"pro_contact_limit":20,"trial_offer_escrow_stroops":1000000,"trial_offer_expiry_secs":7200}'
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
+```
+
+---
+
+#### `propose_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
+
+Propose a new fee configuration. If all fees are ≤ current fees (decreases only), the config is immediately activated. Otherwise, it is stored as pending and requires `activate_fee_config` after a 7-day delay to take effect, giving scouts on-chain-enforced advance notice of any increase.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `InvalidInput` · `PendingFeeConfigAlreadyExists` (another proposal already pending) |
+| **Emits** | `fee_config_proposed` (always); may also emit `fee_config_updated` for decreases |
+
+> [!NOTE]
+> **Fee Increases vs Decreases**
+> Fee *decreases* (all fees ≤ current) are immediately activated in the same transaction, with both `fee_config_proposed` and `fee_config_updated` events emitted.
+> Fee *increases* (at least one fee > current) are stored as pending and require a 7-day activation delay, emitting only `fee_config_proposed`.
+> This design ensures scouts benefit immediately from decreases while having one full week to react to increases.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- propose_fee_config \
+  --fee_config '{"contact_fee_stroops":300000,"basic_sub_stroops":2000000,"pro_sub_stroops":6000000,"elite_sub_stroops":15000000,"sub_duration_secs":2592000,"pro_contact_limit":20}'
+```
+
+---
+
+#### `activate_fee_config() -> Result<(), ScoutAccessError>`
+
+Activate a pending fee configuration proposal after the 7-day delay has elapsed.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NoPendingFeeConfig` · `FeeConfigProposalNotReady` (delay not yet elapsed) |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- activate_fee_config
 ```
 
 ---
@@ -1951,6 +2341,77 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- subscribe \
   --scout $SCOUT_ADDRESS \
   --tier '"Elite"'
+```
+
+---
+
+#### `set_auto_renew(scout: Address, enabled: bool) -> Result<(), ScoutAccessError>`
+
+Opt a scout wallet in (`true`) or out (`false`) of automatic subscription renewal.
+
+Once enabled, a keeper (off-chain cron job or bot) can call `renew_if_due` when
+the scout's subscription is approaching expiry. The flag is stored in persistent
+storage and survives upgrades.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_auto_renew \
+  --scout $SCOUT_ADDRESS \
+  --enabled true
+```
+
+---
+
+#### `get_auto_renew(scout: Address) -> bool`
+
+Returns `true` if the scout has opted in to automatic subscription renewal,
+`false` otherwise (including for scouts who have never called `set_auto_renew`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_auto_renew \
+  --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `renew_if_due(scout: Address) -> Result<(), ScoutAccessError>`
+
+Renew a scout's subscription if auto-renewal is enabled and the subscription is
+at or near expiry.
+
+**Renewal window**: fires when the current timestamp is within the last 10 % of
+`sub_duration_secs` before `expires_at`, **or** after `expires_at` has already
+passed. Outside this window the function is a no-op and returns `Ok(())` without
+charging — safe to call on a schedule.
+
+**Auth model**: Soroban's `token::Client::transfer` always requires the sender's
+authorization *in the same transaction*. A third-party keeper bot cannot pull XLM
+from the scout's wallet on its own; the scout must sign the `renew_if_due`
+transaction, just as they sign `subscribe`. The keeper's role is to remind the
+scout to sign before expiry, not to charge them autonomously. A future
+allowance-based (`token::approve`) pattern could enable truly permissionless
+renewal, but is not implemented in this version.
+
+| | |
+|---|---|
+| **Auth** | `scout` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `AutoRenewNotEnabled` · `ScoutNotSubscribed` · `Overflow` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- renew_if_due \
+  --scout $SCOUT_ADDRESS
 ```
 
 ---
@@ -2080,15 +2541,11 @@ true, the first matching check in this list wins):
 | 8 | Trial counter increment overflows | `Overflow` (10) |
 | 9 | Cross-contract `advance_level` fails for a reason other than `AlreadyAtMaxLevel` | `ProgressCallFailed` (14) |
 
-> ⚠️ **Design note — missing `require_initialized` check**: `log_trial_offer`
-> does **not** call `require_initialized`, unlike `subscribe`, `pay_to_contact`,
-> and `batch_contact_players`, which all call it immediately after
-> `require_not_paused`. This is an asymmetry in the current implementation.
-> In practice the function cannot succeed on an uninitialized contract (the
-> subscription lookup returns `ScoutNotSubscribed` before any write occurs), but
-> callers should not rely on this indirect guard — a dedicated initialized check
-> would be safer and consistent. This should be addressed in a follow-up
-> contract upgrade. See [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized).
+> ✅ **Design note — `require_initialized` check added**: `log_trial_offer`
+> now calls `require_initialized` immediately after `require_not_paused`,
+> matching `subscribe`, `pay_to_contact`, and `batch_contact_players`.
+> Fixed by the full guard-ordering audit (PR feat/797-798-801-835). See
+> [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized--resolved).
 
 > **Design note — `InvalidInput` before subscription check (Priority 3 before 4)**:
 > `details_hash` is validated before the subscription is looked up. This means
@@ -2297,6 +2754,56 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
+
+Upgrade the contract WASM. Admin auth required. Persistent storage survives.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- upgrade --new_wasm_hash $NEW_WASM_HASH
+```
+
+---
+
+#### `get_scout_contacts(scout: Address) -> Vec<u64>`
+
+Return the list of player IDs that a scout has unlocked via `pay_to_contact`
+or `batch_contact_players`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_contacts --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_all_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers logged for a player in index order. Returns an
+empty Vec if none exist.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_all_trial_offers --player_id 1
+```
+
+---
+
 #### `health() -> ContractHealth`
 
 Return the contract's initialization and pause status.
@@ -2396,6 +2903,25 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
+#### `get_expiring_subscriptions(before_timestamp: u64, limit: u32) -> Vec<Subscription>`
+
+Return subscriptions whose `expires_at` is at or before `before_timestamp`.
+This query uses a day-granularity expiry bucket index to avoid scanning every
+subscription, and it filters renewals by re-checking the live stored
+`Subscription.expires_at`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_expiring_subscriptions --before_timestamp 1700000000 --limit 50
+```
+
+---
+
 #### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
 
 Return the full `ContactRecord` for a `(scout, player_id)` pair, or `None`
@@ -2484,9 +3010,13 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Emitted on successful initialization |
-| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription |
+| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout's very first subscription (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout renews or upgrades an existing subscription (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | (player_id: u64, fee_paid: i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | (player_id: u64, index: u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | (player_id: u64, index: u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | (to: Address, amount: i128, timestamp: u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Admin replacement proposed |
@@ -2495,8 +3025,6 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
 | `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed |
-| `subscription_created` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | New subscription purchased (first-ever for this scout) |
-| `subscription_renewed` | event_name, scout (Address) | (tier, subscribed_at, expires_at) | Existing subscription renewed or upgraded |
 
 #### Diagnostic Events (scout_access)
 
@@ -2601,11 +3129,19 @@ pub struct ScoutProfile {
 ```rust
 pub struct Validator {
     pub wallet: Address,
-    pub credentials: String, // max 256 bytes
-    pub registered_at: u64, // Unix seconds
+    pub credentials: String,       // max 256 bytes
+    pub registered_at: u64,        // Unix seconds
     pub active: bool,
+    pub specializations: Vec<String>, // max 10 tags, each max 64 bytes
 }
 ```
+
+`specializations` is the list of milestone category tags this validator is
+authorised to approve. An empty list means the validator is general-purpose
+(can approve any untagged milestone). Tags are case-sensitive short strings
+(e.g. `"physical-stats"`, `"identity-kyc"`, `"match-performance"`). Set at
+registration time via `register_validator` or updated later via
+`set_validator_specializations`.
 
 ### `ValidatorStatus`
 
@@ -2614,6 +3150,36 @@ pub enum ValidatorStatus {
     NotRegistered,
     Active,
     Revoked,
+    RevokedForCause,
+}
+```
+
+### `ValidatorActivityReport`
+
+Convenience aggregate struct returned by `get_validator_activity_report`.
+Bundles the fields from four individual queries into one response:
+
+| Field | Source query | Description |
+|---|---|---|
+| `wallet` | — | Validator wallet address |
+| `credentials` | `get_validator` | Human-readable credential label |
+| `registered_at` | `get_validator` | Unix timestamp of registration |
+| `active` | `get_validator` | Whether the validator is currently active |
+| `status` | `get_validator_status` | Richer status (Active / Revoked / RevokedForCause / NotRegistered) |
+| `milestone_count` | `get_validator_milestone_count` | Total milestones approved across all players |
+| `distinct_player_count` | `get_validator_players` | Number of distinct players with at least one milestone |
+| `distinct_players` | `get_validator_players` | List of distinct player IDs |
+
+```rust
+pub struct ValidatorActivityReport {
+    pub wallet: Address,
+    pub credentials: String,
+    pub registered_at: u64,
+    pub active: bool,
+    pub status: ValidatorStatus,
+    pub milestone_count: u32,
+    pub distinct_player_count: u32,
+    pub distinct_players: Vec<u64>,
 }
 ```
 
@@ -2692,17 +3258,26 @@ pub struct ContactRecord {
 
 ```rust
 pub struct FeeConfig {
-    pub contact_fee_stroops: i128,   // must be > 0
-    pub basic_sub_stroops: i128,     // must be > 0
-    pub pro_sub_stroops: i128,       // must be > 0
-    pub elite_sub_stroops: i128,     // must be > 0
-    pub sub_duration_secs: u64,      // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub contact_fee_stroops: i128,          // must be > 0
+    pub basic_sub_stroops: i128,            // must be > 0
+    pub pro_sub_stroops: i128,              // must be > 0
+    pub elite_sub_stroops: i128,            // must be > 0
+    pub sub_duration_secs: u64,             // duration in seconds, must be > 0 (not a Unix timestamp)
+    pub pro_contact_limit: u32,             // must be > 0; Elite scouts bypass this cap
+    pub trial_offer_escrow_stroops: i128,   // escrow held per trial offer, must be > 0
+    pub trial_offer_expiry_secs: u64,       // confirmation window in seconds, must be > 0
 }
 ```
 
 > [!NOTE]
-> **Historical Fee Configs & Auditability**
-> The `scout_access` contract only stores the *current* `FeeConfig` on-chain. Historical fee configurations are event-log-only and must be reconstructed off-chain by replaying `fee_config_updated` events into the indexer's `fee_config_history` table (defined in [001_initial_schema.sql](file:///c:/Users/USER/scout-off-contracts/migrations/001_initial_schema.sql#L135-L148)).
+> **Historical Fee Configs & Auditability (Proposal + Activation Pattern)**
+> The `scout_access` contract stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`) and optionally a pending proposal (when an increase is being staged for activation).
+> 
+> Historical fee configurations must be reconstructed off-chain by replaying events into the indexer's `fee_config_history` table:
+> - `fee_config_proposed` marks when an increase is staged (proposal timestamp, proposed config).
+> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases).
+> 
+> The audit trail is complete: every config change is visible via one of these two events, and subscribers can be notified of coming increases well in advance.
 
 
 ### `ProContactPeriod`
@@ -2760,7 +3335,7 @@ pub struct TrialOffer {
 | 6 | `ValidatorInactive` | Validator has been revoked |
 | 7 | `ValidatorAlreadyRegistered` | Wallet already registered as validator |
 | 8 | `PlayerNotFound` | Invalid `player_id` |
-| 9 | `InvalidInput` | Bad evidence hash or credentials too long |
+| 9 | `InvalidInput` | Bad evidence hash, credentials too long, or region too long |
 | 10 | `ReasonTooLong` | Revocation reason exceeds 128 bytes |
 | 11 | `AlreadyConfigured` | `set_progress_contract` called twice |
 | 12 | `ProgressCallFailed` | Cross-contract `advance_level` failed |
@@ -2771,6 +3346,8 @@ pub struct TrialOffer {
 | 17 | `MilestoneLimitExceeded` | Validator has already approved 5 milestones for this player |
 | 18 | `DisputeAlreadyResolved` | Dispute was already resolved and cannot be resolved again |
 | 19 | `PendingAdminNotSet` | `accept_admin` called without a pending proposal |
+| 20 | `ApproveMilestonePaused` | `approve_milestone` is paused independently of the whole-contract pause |
+| 21 | `SpecializationMismatch` | `milestone_category` supplied to `approve_milestone` but validator is not tagged for that category |
 
 ### `ProgressError` (progress contract)
 
@@ -2871,11 +3448,13 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
 | `contract_initialized` | event_name, admin (Address) | admin (Address) | Contract initialized |
-| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription |
-| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout |
-| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded |
+| `scout_subscribed` | event_name, scout (Address) | tier (SubscriptionTier), fee_paid (i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | First-ever subscription for this scout (emitted alongside `scout_subscribed`) |
+| `subscription_renewed` | event_name, scout (Address) | tier, subscribed_at (u64), expires_at (u64) | Existing subscription renewed or upgraded (emitted alongside `scout_subscribed`) |
 | `player_contacted` | event_name, scout (Address) | player_id (u64), fee_paid (i128) | Scout unlocks player contact details |
 | `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
+| `trial_offer_confirmed` | event_name, scout (Address) | player_id (u64), index (u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
+| `trial_offer_expired` | event_name, scout (Address) | player_id (u64), index (u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | to (Address), amount (i128), timestamp (u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
 | `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed |
@@ -2898,42 +3477,17 @@ current behavior, why it may be suboptimal, and the recommended change.
 
 ---
 
-### 1. `log_trial_offer` is missing `require_initialized`
+### 1. `log_trial_offer` is missing `require_initialized` — ✅ RESOLVED
 
-**Current behavior**: `log_trial_offer` does not call `require_initialized`,
-unlike every other state-changing function in this contract (`subscribe`,
-`pay_to_contact`, and `batch_contact_players` all call it immediately after
-`require_not_paused`).
+**Resolved in**: PR feat/797-798-801-835 (full guard-ordering audit).
 
-**Why this matters**: On an uninitialized contract, `log_trial_offer` does not
-return `NotInitialized`. Instead it falls through to the subscription lookup,
-which returns `ScoutNotSubscribed` because no storage has been written. This
-means an uninitialized contract appears to a caller as if the scout simply
-has no subscription — an indirect, misleading error rather than the definitive
-"contract not set up" signal.
-
-**When it can surface**: Only on a freshly deployed contract that has never had
-`initialize` called. In production the initialize-then-use deployment flow
-makes this unlikely, but a mis-wired deployment or a test environment that
-calls `log_trial_offer` before `initialize` would observe `ScoutNotSubscribed`
-instead of `NotInitialized`.
-
-**Recommended fix**: Add `Self::require_initialized(&env)?;` immediately after
-`Self::require_not_paused(&env)?;` in `log_trial_offer`, matching the ordering
-of the other three state-changing functions. This is a one-line change, is
-backward-compatible (it makes an already-failing path fail with a more specific
-error), and requires no storage or API changes.
-
-```rust
-// Proposed change in log_trial_offer (contracts/scout_access/src/lib.rs):
-Self::bump_instance_ttl(&env);
-Self::require_not_paused(&env)?;
-Self::require_initialized(&env)?;   // ← add this line
-scout.require_auth();
-```
-
-**Risk**: None. On an initialized contract `require_initialized` always
-succeeds, so existing callers are unaffected.
+All state-changing functions in all four contracts — including `log_trial_offer`,
+`register_player`, `update_profile`, `register_scout`, `admin_seed_player`,
+`admin_seed_scout`, `register_validator`, `batch_register_validators`,
+`approve_milestone`, `resolve_dispute`, and `reset_player_level` — now call
+`require_not_paused` before `require_initialized`, matching the dominant
+convention. `scripts/check-guard-ordering.sh` (wired into the CI lint job)
+enforces this ordering automatically on every future PR.
 
 ---
 

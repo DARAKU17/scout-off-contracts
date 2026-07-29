@@ -98,8 +98,8 @@ Progress levels are configured per player and enforced on-chain by authorized va
 |-------|------|-------------|
 | 0 | Unverified | Player creates profile and uploads data |
 | 1 | Verified Identity | KYC passed or academy confirms active club membership |
-| 2 | Performance Milestones | Match footage or physical stats verified by approved third party |
-| 3 | Elite Tier | Scout feedback or trial offers logged on-chain |
+| 2 | Performance Milestones | Match footage or physical stats verified by approved third party; if `min_region_quorum` ≥ 2 is configured, approving validators must span at least that many distinct geographic regions |
+| 3 | Elite Tier | Scout feedback or trial offers logged on-chain; same region-quorum requirement applies if configured |
 
 ## Tech Stack
 
@@ -136,15 +136,15 @@ Each tier controls which player progress levels a scout can view and what action
 
 | Tier | Accessible Player Levels | Pay-to-Contact | Trial Offer (`log_trial_offer`) |
 |------|--------------------------|----------------|---------------------------------|
-| **Basic** | Level 1 (VerifiedIdentity) and above | ❌ Not available | ❌ Not available |
-| **Pro** | Level 0–3 (all levels) | ✅ Available (contact fee applies) | ❌ Not available |
+| **Basic** | Level 0–1 (Unverified, VerifiedIdentity) | ❌ Not available | ❌ Not available |
+| **Pro** | Level 0–2 (Unverified, VerifiedIdentity, PerformanceMilestones) | ✅ Available (contact fee applies) | ❌ Not available |
 | **Elite** | Level 0–3 (all levels) | ✅ Available (contact fee applies) | ✅ Available (advances player to Level 3) |
 
 **Notes:**
 - A scout without any active subscription cannot call `pay_to_contact` — the contract returns `ScoutNotSubscribed` (code 6).
 - An expired subscription is treated the same as no subscription — renew via `subscribe` before contacting players.
 - `log_trial_offer` is restricted to **Elite** tier only; calling it with Basic or Pro returns `Unauthorized` (code 4).
-- Basic tier scouts can browse and filter players at Level 1 and above but cannot contact or make trial offers.
+- Basic tier scouts can browse and filter players at Level 1 (VerifiedIdentity) only — they cannot see Level 2 or Level 3 players, cannot contact players, and cannot make trial offers.
 - Subscription downgrade to a lower tier is blocked while the current subscription is active (`SubscriptionDowngradeNotAllowed`, code 12).
 
 ### Admin Functions
@@ -177,9 +177,12 @@ Each tier controls which player progress levels a scout can view and what action
 
 ### Milestone Examples
 
-- "Scored 5 goals in Local Cup" → Level 2 milestone, approved by registered coach
-- "Top speed clocked at 32 km/h" → Level 2 milestone, approved by certified trainer
+- "Scored 5 goals in Local Cup" → Level 2 milestone, approved by registered coach (untagged — any active validator)
+- "Top speed clocked at 32 km/h" → Level 2 milestone, approved by certified trainer (`milestone_category: "physical-stats"` — only validators tagged for physical-stats)
+- "Academy confirms active membership" → Level 1 milestone, approved by KYC agent (`milestone_category: "identity-kyc"` — only validators tagged for identity-kyc)
 - "Trial offer received from FC Example" → Level 3 milestone, logged by scout
+
+Validators gain optional **specialization tags** (e.g. `"physical-stats"`, `"identity-kyc"`, `"match-performance"`) when registered. When `approve_milestone` is called with a `milestone_category`, the contract enforces that the validator holds a matching tag — preventing, for example, a pure identity-KYC agent from approving physical performance data. Untagged milestones (category omitted) remain open to any active validator, preserving backward compatibility.
 
 ## Player Lifecycle — Sequence Diagram
 
@@ -257,7 +260,7 @@ sequenceDiagram
 
 1. **Tamper-Proof History**: Every milestone approval is an immutable on-chain transaction — scouts see exactly when and how a player progressed
 2. **Authorized Validators Only**: Only admin-registered validators can approve milestones, preventing self-reported fake stats
-3. **Atomic Fee Settlement**: Scout contact fees and token transfers settle in a single transaction
+3. **Atomic Fee Settlement**: Scout contact fees and token transfers settle in a single transaction. Every token-transfer call site (`subscribe`, `pay_to_contact`, `log_trial_offer` escrow, `confirm_trial_offer` expiry-refund, `withdraw_fees`, `refund_subscription`) is enumerated and proven atomic in [`contracts/scout_access/tests/atomic_fee_settlement.rs`](contracts/scout_access/tests/atomic_fee_settlement.rs) — if the XLM transfer fails, no storage mutation from that function persists.
 4. **Authorization Checks**: All state-changing operations require proper Stellar account authorization
 5. **Overflow Protection**: Safe arithmetic throughout all fee calculations
 6. **Circuit Breaker**: Admin can pause the contract in an emergency without losing state
@@ -603,6 +606,8 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | 15 | `ValidatorCapReached` | 100-validator platform limit reached | Contract upgrade required to raise the cap; contact admin |
 | 16 | `DuplicateEvidence` | Evidence hash already used in a prior `approve_milestone` call | Use a unique evidence CID for each milestone approval |
 | 17 | `MilestoneLimitExceeded` | Validator has already approved 5 milestones for this player | A different validator must approve further milestones for this player |
+| 20 | `ApproveMilestonePaused` | `approve_milestone` is paused independently of the whole-contract pause | Wait for admin to unpause the function |
+| 21 | `SpecializationMismatch` | `milestone_category` provided but the validator is not tagged for that category | Use a validator whose `specializations` includes the required category, or omit the category |
 
 ### `ProgressError` (progress contract)
 
@@ -644,6 +649,7 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed | Call `propose_admin` first, then have the proposed address call `accept_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same offer | No action; the offer was already confirmed |
 | 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's expiry window | Log a new trial offer |
+| 24 | `AutoRenewNotEnabled` | `renew_if_due` called but the scout has not opted in to auto-renewal | Call `set_auto_renew` with `enabled = true` first |
 
 ## Events
 
@@ -652,9 +658,13 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | `player_registered` | New player profile created on-chain |
 | `milestone_approved` | Validator confirms a player achievement |
 | `progress_updated` | Player advances to a new level |
-| `scout_subscribed` | Scout purchases a talent access subscription |
+| `scout_subscribed` | Scout purchases a talent access subscription (legacy event, emitted alongside `subscription_created` or `subscription_renewed`) |
+| `subscription_created` | Scout purchases their very first subscription |
+| `subscription_renewed` | Scout renews or upgrades an existing subscription |
 | `player_contacted` | Scout pays to unlock player contact details |
 | `trial_offer_logged` | Scout records a trial offer, advancing player to Level 3 |
+| `trial_offer_confirmed` | Player confirms a pending trial offer before its expiry window closes |
+| `trial_offer_expired` | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | Admin withdraws accumulated platform fees |
 | `admin_transfer_proposed` | Current admin proposes a replacement address |
 | `admin_transferred` | Pending admin accepts control |
@@ -679,7 +689,7 @@ MIT
 
 ## Support
 
-- GitHub Issues: [Create an issue](https://github.com/your-org/scoutchain/issues)
+- GitHub Issues: [Create an issue](https://github.com/scout-off/scout-off-contracts/issues)
 - **Security Reports**: See [SECURITY.md](SECURITY.md) for our security policy and private vulnerability reporting process
 - Stellar Discord: https://discord.gg/stellar
 - Stellar Developers: https://developers.stellar.org

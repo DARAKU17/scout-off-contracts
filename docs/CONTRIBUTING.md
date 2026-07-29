@@ -42,6 +42,8 @@ cp .env.example .env
 git config core.hooksPath scripts/git-hooks
 ```
 
+Reminder: `core.hooksPath` is a per-clone git config setting, so re-apply it after every fresh clone or when working from a new machine.
+
 ## Before opening a PR
 
 ```bash
@@ -61,7 +63,7 @@ The repository defines five CI jobs across `.github/workflows/ci.yml` and `.gith
 | `check-todos` | `ci.yml` | Scans `contracts/` for `TODO`/`FIXME`/`HACK`/`XXX` markers — fails if any are found | Yes |
 | `test` | `contract-ci.yml` | Runs `cargo test --workspace` (including each contract's `tests/cost_budget.rs` CPU-instruction cost budget), tests `scoutchain-progress`, uploads a `cpu-cost-budget-<sha>` report artifact, builds WASM release | Yes |
 | `lint` | `contract-ci.yml` | Clippy (deny warnings), `rustfmt` check, shellcheck on shell scripts, docs completeness (`scripts/check-docs.sh`), bindings template validation (`scripts/check-bindings.sh`) | Yes |
-| `bindings-smoke-test` | `contract-ci.yml` | Deploys all contracts to a local Soroban sandbox, generates TypeScript bindings, verifies their structure, builds each binding package, and runs `scripts/migrate-contract-smoke-test.sh` against the already-running sandbox to continuously verify the deploy-old→seed→migrate→replay→before/after-comparison path | Yes |
+| `bindings-smoke-test` | `contract-ci.yml` | Deploys all contracts to a local Soroban sandbox, generates TypeScript bindings, verifies their structure, builds each binding package, **verifies that every ABI-declared function has a corresponding export in the generated binding** (fails with a clear list of missing exports if any), and runs `scripts/migrate-contract-smoke-test.sh` against the already-running sandbox to continuously verify the deploy-old→seed→migrate→replay→before/after-comparison path | Yes |
 | `abi-export` | `contract-ci.yml` | Exports contract ABIs to `abi/*.json` using `stellar contract info interface`, validates JSON parseability, measures each contract's optimized WASM size against `ci/wasm-size-budget.json`, and uploads the artifacts; per `docs/VERSIONING.md` the ABI diff is how breaking changes are detected | Yes |
 
 > **Note on the audit:** The required-status configuration above reflects the actual branch-protection rules on `main` at the time of writing. Because changing branch-protection settings requires repository admin access, any future update to the required checks must be performed by a maintainer in the repository settings (`Settings > Branches > main > Require status checks`).
@@ -83,7 +85,8 @@ Both files document their own process for intentionally raising a budget when a 
 
 - [ ] New functions have unit tests covering the happy path and at least one error case
 - [ ] Any new `DataKey` variant is documented with a comment
-- [ ] Cross-contract calls are documented with a comment explaining the atomicity guarantee
+- [ ] Cross-contract calls are documented with a `**Cross-contract calls:**` row in the
+  function's `CONTRACT_REFERENCE.md` entry and a comment explaining the atomicity guarantee
 - [ ] `ai.md` is updated if shared types, events, or env vars changed
 - [ ] `docs/CONTRACT_REFERENCE.md` is updated with new functions, events, and error codes *(enforced automatically by `scripts/check-docs.sh` in the CI lint job — the PR will fail if a `pub fn` from any `#[contractimpl]` block lacks a corresponding heading in the docs)*
 

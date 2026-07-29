@@ -70,10 +70,25 @@ pub struct ProContactPeriod {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrialEscrow {
-    /// Escrowed trial-offer amount in stroops.
+    /// Escrowed trial-offer amount in stroops, set from
+    /// `FeeConfig.trial_offer_escrow_stroops` when `log_trial_offer` creates
+    /// the escrow.
     pub amount: i128,
-    /// Ledger timestamp after which the escrow may be expired, in Unix seconds.
+    /// Ledger timestamp deadline, in Unix seconds, computed as the current
+    /// ledger timestamp plus `FeeConfig.trial_offer_expiry_secs`; checked by
+    /// `confirm_trial_offer` when deciding whether the trial offer is still
+    /// valid.
     pub expires_at: u64,
+}
+
+/// Proposed fee configuration awaiting activation after a delay
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigProposal {
+    /// The proposed fee configuration
+    pub config: FeeConfig,
+    /// Ledger timestamp when the proposal was created
+    pub proposed_at: u64,
 }
 
 /// Platform fee configuration
@@ -90,7 +105,17 @@ pub struct FeeConfig {
     pub elite_sub_stroops: i128,
     /// Subscription duration in seconds (default: 30 days)
     pub sub_duration_secs: u64,
+    /// Trial offer escrow hold amount in stroops.
+    /// Must be > 0 when trial offers are enabled; 0 disables trial offers.
+    pub trial_offer_escrow_stroops: i128,
+    /// Trial offer expiry window in seconds.
+    /// Must be > 0; defines how long an escrowed trial offer remains valid.
+    pub trial_offer_expiry_secs: u64,
     /// Maximum contacts per month for Pro tier (default: 10)
+    /// Elite-tier scouts are exempt from this cap (no limit applies).
+    /// See `docs/CONTRACT_REFERENCE.md` — `FeeConfig` and `ProContactLimitReached`
+    /// (error 20) for the full per-tier access semantics, and `docs/GLOSSARY.md`
+    /// for the definition of "Pro tier" and the contact quota model.
     pub pro_contact_limit: u32,
     /// Escrow amount for trial offers (stroops)
     pub trial_offer_escrow_stroops: i128,
@@ -118,6 +143,8 @@ pub enum DataKey {
     Initialized,
     Paused,
     FeeConfig,
+    /// Proposed fee configuration awaiting activation after a 7-day delay
+    PendingFeeConfig,
     AccumulatedFees,
     /// Native XLM token contract address
     XlmToken,
@@ -133,8 +160,13 @@ pub enum DataKey {
     TrialCounter(u64),
     /// (player_id, trial_index) → TrialOffer
     TrialOffer(u64, u32),
+    /// Bounded enumeration of outstanding trial escrows.
+    /// Each entry is `(player_id, trial_index)` for a currently-open trial offer.
+    TrialEscrowIndex,
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
+    /// registration contract address for cross-contract scout verification checks
+    RegistrationContract,
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),
@@ -161,4 +193,7 @@ pub enum DataKey {
     /// `ProgressCallFailed` can safely detect that the offer was already
     /// confirmed and skip the escrow cleanup / level-advance replay.
     ConfirmationNonce(String),
+    /// scout wallet → bool; true if the scout has opted in to auto-renewal.
+    /// Set by `set_auto_renew`, consumed by `renew_if_due`.
+    AutoRenew(Address),
 }
