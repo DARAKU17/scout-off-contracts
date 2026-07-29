@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use soroban_sdk::{Address, Env, String, Symbol};
 
 pub const MILESTONE_APPROVED: &str = "milestone_approved";
@@ -62,155 +61,12 @@ pub fn validator_registered(env: &Env, wallet: &Address, credentials: &String) {
     );
 }
 
-/// topics: (event_name, admin)  data: (wallet, reason)
-pub fn validator_revoked(env: &Env, admin: &Address, wallet: &Address, reason: &String) {
-    env.events().publish(
-        (Symbol::new(env, "validator_revoked"), admin.clone()),
-        (wallet.clone(), reason.clone()),
-    );
+pub fn validator_registered(env: &Env, wallet: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "validator_registered"),), wallet.clone());
 }
 
-/// topics: (event_name, admin)  data: (wallet, reason)
-pub fn validator_revoked_for_cause(env: &Env, admin: &Address, wallet: &Address, reason: &String) {
-    env.events().publish(
-        (Symbol::new(env, "validator_revoked_for_cause"), admin.clone()),
-        (wallet.clone(), reason.clone()),
-    );
-}
-
-/// topics: (event_name, admin)  data: wallet
-pub fn validator_restored(env: &Env, admin: &Address, wallet: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "validator_restored"), admin.clone()),
-        wallet.clone(),
-    );
-}
-
-/// topics: (event_name, admin)  data: (old_wallet, new_wallet)
-pub fn validator_transferred(
-    env: &Env,
-    admin: &Address,
-    old_wallet: &Address,
-    new_wallet: &Address,
-) {
-    env.events().publish(
-        (Symbol::new(env, "validator_transferred"), admin.clone()),
-        (old_wallet.clone(), new_wallet.clone()),
-    );
-}
-
-/// topics: (event_name, admin)  data: ()
-pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"), admin.clone()),
-        (),
-    );
-}
-
-/// topics: (event_name, admin)  data: ()
-pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"), admin.clone()),
-        (),
-    );
-}
-
-/// topics: (event_name, admin)  data: ()
-pub fn approve_milestone_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "approve_milestone_paused"), admin.clone()),
-        (),
-    );
-}
-
-/// topics: (event_name, admin)  data: ()
-pub fn approve_milestone_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "approve_milestone_unpaused"), admin.clone()),
-        (),
-    );
-}
-
-/// topics: (event_name, admin)  data: ()
-pub fn contract_initialized(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_initialized"), admin.clone()),
-        (),
-    );
-}
-
-/// topics: (event_name, admin)  data: progress_contract
-pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "progress_contract_updated"), admin.clone()),
-        progress_contract.clone(),
-    );
-}
-
-/// Emitted when a player disputes a milestone (issue #471)
-/// topics: (event_name, player_wallet)  data: (player_id, milestone_index, reason)
-pub fn milestone_disputed(env: &Env, player_wallet: &Address, player_id: u64, milestone_index: u32, reason: &String) {
-    env.events().publish(
-        (Symbol::new(env, "milestone_disputed"), player_wallet.clone()),
-        (player_id, milestone_index, reason.clone()),
-    );
-}
-
-/// Emitted when an admin resolves a milestone dispute.
-/// topics: (event_name, admin)  data: (player_id, milestone_index, upheld)
-pub fn dispute_resolved(env: &Env, admin: &Address, player_id: u64, milestone_index: u32, upheld: bool) {
-    env.events().publish(
-        (Symbol::new(env, "dispute_resolved"), admin.clone()),
-        (player_id, milestone_index, upheld),
-    );
-}
-
-/// Emitted when a milestone is recorded but level advancement is skipped because
-/// the player is already at the maximum level (EliteTier).  The milestone itself
-/// is still persisted; only the cross-contract advance_level call is omitted.
-/// `reason` is always "AlreadyAtMaxLevel".
-pub fn level_advancement_skipped(env: &Env, player_id: u64, reason: &String) {
-    env.events().publish(
-        (Symbol::new(env, "level_advancement_skipped"), player_id),
-        reason.clone(),
-    );
-}
-
-/// Emitted when level advancement is skipped because the progress contract
-/// address has not been configured.  Common during testing without a full
-/// deployment.  In production this indicates a missing wiring step and the
-/// indexer should alert on it.  The milestone is still persisted.
-pub fn progress_contract_not_set(env: &Env, player_id: u64) {
-    env.events().publish(
-        (Symbol::new(env, "progress_contract_not_set"), player_id),
-        (),
-    );
-}
-
-/// Emitted just before a ProgressCallFailed error is returned, so the
-/// off-chain indexer can detect the failure by scanning transaction receipts.
-/// Because ProgressCallFailed aborts the entire transaction, this event only
-/// appears in the diagnostic stream — it is not committed to the ledger.
-/// Payload is the raw error discriminant returned by try_advance_level.
-pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
-    env.events().publish(
-        (Symbol::new(env, "progress_call_failed"), player_id),
-        error_code,
-    );
-}
-
-/// topics: (event_name, issuer_wallet)  data: issuer_name
-pub fn issuer_registered(env: &Env, wallet: &Address, name: &String) {
-    env.events().publish(
-        (Symbol::new(env, "issuer_registered"), wallet.clone()),
-        name.clone(),
-    );
-}
-
-/// topics: (event_name, admin)  data: issuer_wallet
-pub fn issuer_revoked(env: &Env, wallet: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "issuer_revoked"), wallet.clone()),
-        wallet.clone(),
-    );
+pub fn validator_revoked(env: &Env, wallet: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "validator_revoked"),), wallet.clone());
 }

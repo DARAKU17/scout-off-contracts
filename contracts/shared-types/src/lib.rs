@@ -1,5 +1,6 @@
 #![no_std]
-use soroban_sdk::{contracttype, Address, Env, IntoVal, String};
+
+use soroban_sdk::contracttype;
 
 /// Four-tier progress level for a player profile
 #[contracttype]

@@ -3074,88 +3074,24 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
-#### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
+Manages the trusted validator registry and milestone approvals.
 
-Return the full `ContactRecord` for a `(scout, player_id)` pair, or `None`
-if the scout has never contacted this player.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_contact_record --scout $SCOUT_ADDRESS --player_id 1
-```
-
----
-
-#### `get_player_contacts(player_id: u64) -> Vec<Address>`
-
-Return all scout addresses that have contacted a player, as an O(1) index
-lookup (backed by the `PlayerContacts` persistent storage key).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_player_contacts --player_id 1
-```
-
----
-
-#### `get_player_trial_offers(player_id: u64) -> Vec<TrialOffer>`
-
-Return every trial offer logged for a player, reading the full range from
-the player's `TrialCounter`. Unlike `get_all_trial_offers`, this is not
-capped at 20 entries.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_player_trial_offers --player_id 1
-```
-
----
-
-#### `get_scout_trial_offers(scout: Address) -> Vec<(u64, u32)>`
-
-Return every `(player_id, trial_offer_index)` pair a scout has logged, as
-an O(1) index lookup (backed by the `ScoutTrialOffers` persistent storage
-key).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_scout_trial_offers --scout $SCOUT_ADDRESS
-```
-
----
-
-#### `version() -> String`
-
-Return the deployed contract version string (from `Cargo.toml` at build time).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
-```
+| Function | Auth | Description |
+|----------|------|-------------|
+| `initialize(admin)` | admin | One-time setup, including default diversity configuration |
+| `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
+| `set_diversity_config(min_distinct_affiliations, gated_milestone_index)` | admin | Configure organizational diversity required for level advancement |
+| `register_validator(wallet, credentials, affiliation)` | admin | Add a trusted validator with verified organization affiliation |
+| `revoke_validator(wallet)` | admin | Deactivate validator |
+| `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
+| `get_milestone(player_id, index)` | — | Read a specific milestone |
+| `get_milestone_count(player_id)` | — | Total milestones for a player |
+| `get_diversity_config()` | — | Read affiliation diversity rules |
+| `get_player_affiliation_count(player_id)` | — | Count distinct affiliated milestone approvers |
+| `get_validator(wallet)` | — | Read validator record |
+| `is_active_validator(wallet)` | — | Boolean check |
+| `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
+| `health()` | — | Returns true if initialized |
 
 ### Events
 

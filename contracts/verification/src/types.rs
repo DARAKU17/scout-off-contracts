@@ -106,7 +106,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
-    /// Ledger timestamp when the validator was registered, in Unix seconds.
+    /// Admin-verified organization the validator represents.
+    pub affiliation: String,
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
@@ -166,6 +167,16 @@ pub struct MilestoneRef {
     pub milestone_index: u32,
 }
 
+/// Rules that gate level-advancing milestones on independent organizations.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DiversityConfig {
+    /// Minimum number of affiliations required to advance at or above the gate.
+    pub min_distinct_affiliations: u32,
+    /// First milestone index that requires organizational diversity.
+    pub gated_milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -180,37 +191,16 @@ pub enum DataKey {
     Validator(Address),
     MilestoneCounter(u64),
     Milestone(u64, u32),
+    /// registration contract address (cross-contract calls)
+    RegistrationContract,
+    /// progress contract address (cross-contract calls)
+    ProgressContract,
+    /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
-    ValidatorPlayerMilestoneCount(Address, u64),
-    ValidatorVector,
-    TotalMilestoneCount,
-    GlobalMilestoneIndex,
-    /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
-    /// for which that validator has approved at least one milestone.
-    /// Updated on every `approve_milestone` call (duplicates are skipped).
-    ValidatorPlayers(Address),
-    MilestoneDispute(u64, u32),
-    ActiveValidatorCount,
-    TotalValidatorCount,
-    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
-    EvidenceUsed(String),
-    ValidatorMilestones(Address),
-    ActiveDisputesCount,
-    ValidatorRevokedForCause(Address),
-    /// Per-player list of milestone indices that have been disputed.
-    /// player_id → Vec<u32> of milestone_index values.
-    /// Updated on `dispute_milestone`.
-    PlayerDisputes(u64),
-    /// Persistent global index of currently-unresolved (player_id, milestone_index) pairs.
-    /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
-    /// Exposed via `list_disputes_page(offset, limit)`.
-    OpenDisputeIndex,
-
-    // ── Registration cooldown ──
-    /// Last registration timestamp for a validator wallet (Unix seconds).
-    /// Set by `register_validator` and read to enforce the per-caller cooldown.
-    ValidatorRegLastSent(Address),
-    /// Platform-wide validator registration cooldown in seconds.
-    /// 0 disables the cooldown. Configurable by admin via `set_reg_cooldown`.
-    RegCooldownSecs(u64),
+    /// Diversity rules for level-advancing milestones.
+    DiversityConfig,
+    /// (player_id, affiliation) → whether that affiliation has approved a milestone.
+    PlayerAffiliationUsed(u64, String),
+    /// player_id → number of distinct affiliations that approved milestones.
+    PlayerAffiliationCount(u64),
 }
