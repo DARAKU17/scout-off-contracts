@@ -34,13 +34,22 @@ Manages the trusted validator registry and milestone approvals.
 
 | Function | Auth | Description |
 |----------|------|-------------|
-| `initialize(admin)` | admin | One-time setup |
+| `initialize(admin)` | admin | One-time setup, including default jury configuration |
 | `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
+| `set_jury_config(impact_threshold, quorum, voting_window_secs)` | admin | Configure future jury disputes |
 | `register_validator(wallet, credentials)` | admin | Add trusted validator |
 | `revoke_validator(wallet)` | admin | Deactivate validator |
 | `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
+| `dispute_milestone(filed_by, player_id, milestone_index, reason, impact_score)` | filer | File a low-impact or jury-required dispute |
+| `resolve_dispute(player_id, milestone_index, upheld)` | admin | Finalize a low-impact dispute |
+| `cast_dispute_vote(validator_wallet, player_id, milestone_index, upheld)` | active, non-conflicted validator | Cast one jury vote |
+| `tally_dispute(player_id, milestone_index)` | — | Finalize a decisive quorum or expired jury vote |
 | `get_milestone(player_id, index)` | — | Read a specific milestone |
 | `get_milestone_count(player_id)` | — | Total milestones for a player |
+| `get_jury_config()` | — | Read jury threshold, quorum, and voting window |
+| `get_dispute(player_id, milestone_index)` | — | Read a dispute and its tally |
+| `get_dispute_vote(player_id, milestone_index, validator_wallet)` | — | Read one validator vote |
+| `get_dispute_votes(player_id, milestone_index)` | — | Read upheld and rejected vote totals |
 | `get_validator(wallet)` | — | Read validator record |
 | `is_active_validator(wallet)` | — | Boolean check |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
@@ -53,6 +62,10 @@ Manages the trusted validator registry and milestone approvals.
 | `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
 | `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
 | `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+| `milestone_disputed` | event_name, player_id, milestone_index | filer_address, jury_required | Emitted when a dispute is filed |
+| `dispute_vote_cast` | event_name, player_id, milestone_index | validator_address, upheld | Emitted for each jury vote |
+| `dispute_resolved` | event_name, player_id, milestone_index | upheld | Emitted after an admin resolution |
+| `dispute_tallied` | event_name, player_id, milestone_index | upheld, votes_for, votes_against | Emitted after jury finalization |
 
 ---
 
