@@ -46,11 +46,9 @@ pub enum ScoutChainError {
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 14,
 
-    // ── Migration tickets ──
-    /// Migration authorization signature is invalid or expired.
-    InvalidMigrationAuthorization = 15,
-    /// Migration nonce has already been used (replay detected).
-    MigrationNonceAlreadyUsed = 16,
+    // ── Rate limiting ──
+    /// Caller attempted to register again before the cooldown period elapsed.
+    RegistrationCooldown = 15,
 }
 
 impl AdminError for ScoutChainError {
