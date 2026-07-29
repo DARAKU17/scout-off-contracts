@@ -53,6 +53,85 @@ pub enum VerificationError {
     ProgressCallFailed = 12,
     /// Milestone counter overflowed.
     Overflow = 13,
-    InvalidAffiliation = 14,
-    InvalidDiversityConfig = 15,
+
+    // ── Admin transfer ──
+    /// `accept_admin` called before an admin transfer was proposed.
+    PendingAdminNotSet = 19,
+
+    // ── Function-scoped pausing ──
+    /// The approve_milestone function is paused independently of whole-contract pause.
+    ApproveMilestonePaused = 20,
+
+    // ── Specialization ──
+    /// Validator is not tagged for the requested milestone category.
+    /// Only raised when a `milestone_category` is supplied to `approve_milestone`
+    /// and the validator's `specializations` list does not contain that category.
+    SpecializationMismatch = 21,
+
+    // ── Off-chain attestation (issue #703) ──
+    /// ed25519 signature over the attestation payload failed verification,
+    /// or the payload's contract/network binding does not match this instance.
+    InvalidAttestation = 22,
+    /// No attestation public key has been registered for this validator.
+    AttestationKeyNotFound = 23,
+    /// Attestation nonce is not strictly greater than the last accepted nonce.
+    InvalidNonce = 24,
+    /// Validator registration attempted before the cooldown window elapsed.
+    RegistrationCooldown = 25,
+}
+
+impl AdminError for VerificationError {
+    fn not_initialized() -> Self {
+        VerificationError::NotInitialized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+
+    const VALID_CID_V0: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB";
+
+    fn setup() -> (Env, crate::VerificationContractClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, crate::VerificationContract);
+        let client = crate::VerificationContractClient::new(&env, &id);
+        (env, client)
+    }
+
+    #[test]
+    fn test_approve_milestone_description_at_boundary_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let validator = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
+
+        let description_256 = String::from_str(&env, &"a".repeat(256));
+        let evidence = String::from_str(&env, VALID_CID_V0);
+
+        let result = client.try_approve_milestone(&validator, &1u64, &description_256, &evidence);
+        assert!(result.is_ok(), "256-byte description should succeed");
+    }
+
+    #[test]
+    fn test_approve_milestone_description_over_limit_returns_invalid_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let validator = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
+
+        let description_257 = String::from_str(&env, &"a".repeat(257));
+        let evidence = String::from_str(&env, VALID_CID_V0);
+
+        let result = client.try_approve_milestone(&validator, &1u64, &description_257, &evidence);
+        assert_eq!(
+            result,
+            Err(Ok(VerificationError::InvalidInput)),
+            "257-byte description should return InvalidInput"
+        );
+    }
 }
