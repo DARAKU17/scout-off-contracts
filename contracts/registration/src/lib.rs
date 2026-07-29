@@ -62,8 +62,10 @@ const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 518_400;
 const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
-// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+/// Default registration cooldown: 24 hours in seconds.
+/// Applies to register_player, register_scout, and register_validator.
+/// Configurable by admin via `set_reg_cooldown`.  0 disables the cooldown.
+const DEFAULT_REG_COOLDOWN_SECS: u64 = 86_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -361,6 +363,14 @@ impl RegistrationContract {
         Self::require_initialized(&env)?;
         wallet.require_auth();
 
+        // Per-caller cooldown: reject rapid re-registration attempts from the
+        // same wallet.  The cooldown protects against sybil registrations where
+        // a set of freshly-generated wallets spam the entrypoint.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+        )?;
+
         // Prevent duplicate registrations
         if env
             .storage()
@@ -439,6 +449,17 @@ impl RegistrationContract {
             player_id,
         );
         Self::level_index_add(&env, &ProgressLevel::Unverified, player_id);
+
+        // Record cooldown timestamp so a repeated attempt from the same wallet
+        // within the cooldown window is rejected.
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         events::player_registered(&env, player_id, &wallet);
         Ok(player_id)
@@ -549,6 +570,12 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
+        // Per-caller cooldown: same pattern as register_player.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+        )?;
+
         if env
             .storage()
             .persistent()
@@ -558,6 +585,7 @@ impl RegistrationContract {
         }
 
         let scout_id = Self::next_scout_id(&env)?;
+        let now = env.ledger().timestamp();
         let profile = ScoutProfile {
             scout_id,
             wallet: wallet.clone(),
@@ -583,6 +611,16 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
+
+        // Record cooldown timestamp.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         events::scout_registered(&env, scout_id, &wallet);
         Ok(scout_id)
@@ -1054,6 +1092,38 @@ impl RegistrationContract {
             .unwrap_or(false)
         {
             return Err(ScoutChainError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Enforce the per-caller registration cooldown.
+    ///
+    /// Reads the last-sent timestamp stored under `last_sent_key`.  If a
+    /// timestamp is present and the current ledger time is before
+    /// `last_sent + cooldown_secs`, returns `RegistrationCooldown`.
+    /// A cooldown of 0 disables the check entirely.
+    fn enforce_reg_cooldown(env: &Env, last_sent_key: &DataKey) -> Result<(), ScoutChainError> {
+        let cooldown_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegCooldownSecs(0))
+            .unwrap_or(DEFAULT_REG_COOLDOWN_SECS);
+
+        if cooldown_secs == 0 {
+            return Ok(());
+        }
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(last_sent_key)
+        {
+            let next_allowed =
+                safe_add_u64(last_sent, cooldown_secs).map_err(|_| ScoutChainError::Overflow)?;
+            if now < next_allowed {
+                return Err(ScoutChainError::RegistrationCooldown);
+            }
         }
         Ok(())
     }
