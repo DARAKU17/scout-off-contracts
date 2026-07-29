@@ -3078,17 +3078,16 @@ Manages the trusted validator registry and milestone approvals.
 
 | Function | Auth | Description |
 |----------|------|-------------|
-| `initialize(admin)` | admin | One-time setup |
+| `initialize(admin)` | admin | One-time setup, including default diversity configuration |
 | `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
-| `register_validator(wallet, credentials)` | admin | Add trusted validator |
-| `revoke_validator(wallet, severity, reason)` | admin | Deactivate validator; for-cause revocations flag prior approvals |
+| `set_diversity_config(min_distinct_affiliations, gated_milestone_index)` | admin | Configure organizational diversity required for level advancement |
+| `register_validator(wallet, credentials, affiliation)` | admin | Add a trusted validator with verified organization affiliation |
+| `revoke_validator(wallet)` | admin | Deactivate validator |
 | `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
-| `rereview_milestone(validator_wallet, player_id, milestone_index)` | active validator | Clear one pending re-review flag after re-confirmation |
 | `get_milestone(player_id, index)` | — | Read a specific milestone |
 | `get_milestone_count(player_id)` | — | Total milestones for a player |
-| `get_validator_milestone(wallet, approval_index)` | — | Read a validator approval-history entry |
-| `get_validator_revocation(wallet)` | — | Read revocation severity, reason, and timestamp |
-| `is_milestone_flagged(player_id, milestone_index)` | — | Return whether a milestone is pending re-review |
+| `get_diversity_config()` | — | Read affiliation diversity rules |
+| `get_player_affiliation_count(player_id)` | — | Count distinct affiliated milestone approvers |
 | `get_validator(wallet)` | — | Read validator record |
 | `is_active_validator(wallet)` | — | Boolean check |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
@@ -3100,9 +3099,11 @@ Manages the trusted validator registry and milestone approvals.
 |-------|--------|------|-------------|
 | `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
 | `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
-| `validator_revoked` | event_name | validator_address, severity, reason | Emitted when a validator is deactivated |
-| `milestone_flagged` | event_name, player_id, milestone_index | revoked_validator_address | Emitted when a for-cause cascade flags a milestone |
-| `milestone_rereviewed` | event_name, player_id, milestone_index | reviewing_validator_address | Emitted when a re-review clears a flag |
+| `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+| `milestone_disputed` | event_name, player_id, milestone_index | filer_address, jury_required | Emitted when a dispute is filed |
+| `dispute_vote_cast` | event_name, player_id, milestone_index | validator_address, upheld | Emitted for each jury vote |
+| `dispute_resolved` | event_name, player_id, milestone_index | upheld | Emitted after an admin resolution |
+| `dispute_tallied` | event_name, player_id, milestone_index | upheld, votes_for, votes_against | Emitted after jury finalization |
 
 ---
 

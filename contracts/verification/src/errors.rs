@@ -53,5 +53,6 @@ pub enum VerificationError {
     ProgressCallFailed = 12,
     /// Milestone counter overflowed.
     Overflow = 13,
-    MilestoneNotPendingReReview = 14,
+    InvalidAffiliation = 14,
+    InvalidDiversityConfig = 15,
 }

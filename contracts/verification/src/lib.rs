@@ -18,9 +18,7 @@ pub mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{
-    DataKey, Milestone, RevocationRecord, RevocationSeverity, Validator, ValidatorMilestoneRef,
-};
+use types::{DataKey, DiversityConfig, Milestone, Validator};
 
 /// Maximum length for milestone description in bytes.
 const MAX_DESCRIPTION_LEN: u32 = 256;
@@ -40,6 +38,9 @@ const MAX_SPECIALIZATIONS: u32 = 10;
 const MAX_SPECIALIZATION_TAG_LEN: u32 = 64;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const DEFAULT_MIN_DISTINCT_AFFILIATIONS: u32 = 2;
+const DEFAULT_GATED_MILESTONE_INDEX: u32 = 2;
 
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
@@ -76,57 +77,7 @@ impl VerificationContract {
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
-            .set(&DataKey::TotalMilestoneCount, &0u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveValidatorCount, &0u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalValidatorCount, &0u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveDisputesCount, &0u32);
-        events::contract_initialized(&env, &admin);
-        Ok(())
-    }
-
-    /// Propose a replacement administrator. The current admin remains active
-    /// until the proposed address calls `accept_admin`.
-    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), VerificationError> {
-        let old_admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::PendingAdmin, &new_admin);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PendingAdmin,
-            ADMIN_BUMP_LEDGERS,
-            ADMIN_BUMP_LEDGERS,
-        );
-        events::admin_transfer_proposed(&env, &old_admin, &new_admin);
-        Ok(())
-    }
-
-    /// Accept a pending admin transfer. Only the proposed address can accept.
-    pub fn accept_admin(env: Env) -> Result<(), VerificationError> {
-        let old_admin: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(VerificationError::NotInitialized)?;
-        let new_admin: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PendingAdmin)
-            .ok_or(VerificationError::PendingAdminNotSet)?;
-        new_admin.require_auth();
-        env.storage().persistent().set(&DataKey::Admin, &new_admin);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Admin,
-            ADMIN_BUMP_LEDGERS,
-            ADMIN_BUMP_LEDGERS,
-        );
-        env.storage().persistent().remove(&DataKey::PendingAdmin);
-        events::admin_transferred(&env, &old_admin, &new_admin);
+            .set(&DataKey::DiversityConfig, &Self::default_diversity_config());
         Ok(())
     }
 
@@ -189,13 +140,25 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Return the current minimum-distinct-region quorum for Level-2/3 advances.
-    /// Returns `0` if never configured (quorum check disabled).
-    pub fn get_min_region_quorum(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get::<DataKey, u32>(&DataKey::MinRegionQuorum)
-            .unwrap_or(0u32)
+    /// Configure the affiliation diversity required for future level advances.
+    pub fn set_diversity_config(
+        env: Env,
+        min_distinct_affiliations: u32,
+        gated_milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        if min_distinct_affiliations == 0 || gated_milestone_index < 2 {
+            return Err(VerificationError::InvalidDiversityConfig);
+        }
+
+        env.storage().instance().set(
+            &DataKey::DiversityConfig,
+            &DiversityConfig {
+                min_distinct_affiliations,
+                gated_milestone_index,
+            },
+        );
+        Ok(())
     }
 
     /// Register a trusted validator (admin only).
@@ -205,7 +168,7 @@ impl VerificationContract {
         env: Env,
         wallet: Address,
         credentials: String,
-        specializations: Vec<String>,
+        affiliation: String,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
@@ -246,6 +209,10 @@ impl VerificationContract {
             .get(&DataKey::ValidatorVector)
             .unwrap_or_else(|| Vec::new(&env));
 
+        if affiliation.len() == 0 {
+            return Err(VerificationError::InvalidAffiliation);
+        }
+
         if env
             .storage()
             .persistent()
@@ -257,6 +224,7 @@ impl VerificationContract {
         let validator = Validator {
             wallet: wallet.clone(),
             credentials,
+            affiliation,
             registered_at: env.ledger().timestamp(),
             active: true,
             specializations,
@@ -377,22 +345,12 @@ impl VerificationContract {
             .set(&DataKey::Milestone(player_id, next_index), &milestone);
         env.storage().persistent().set(&counter_key, &next_index);
 
-        // Increment per-validator milestone count
-        let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
-        let val_count: u32 = env.storage().persistent().get(&val_key).unwrap_or(0u32);
-        let validator_milestone_index = val_count
-            .checked_add(1)
-            .ok_or(VerificationError::Overflow)?;
+        issuer_vector.push_back(wallet.clone());
         env.storage()
             .persistent()
-            .set(&val_key, &validator_milestone_index);
-        env.storage().persistent().set(
-            &DataKey::ValidatorMilestone(validator_wallet.clone(), validator_milestone_index),
-            &ValidatorMilestoneRef {
-                player_id,
-                milestone_index: next_index,
-            },
-        );
+            .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
+
+        Self::record_player_affiliation(&env, player_id, &validator.affiliation)?;
 
         events::milestone_approved(
             &env,
@@ -403,16 +361,23 @@ impl VerificationContract {
             &milestone.evidence_hash,
         );
 
-        let total_count: u32 = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ProgressContract)
-        {
-            let progress_client = progress_contract::Client::new(&env, &progress_addr);
-            // advance_level will return AlreadyAtMaxLevel if the player is
-            // already at EliteTier — we intentionally ignore that error here
-            // so the milestone is still recorded even at max level.
-            let _ = progress_client.try_advance_level(&validator_wallet, &player_id, &next_index);
+        // Cross-contract call: advance the player's progress level.
+        // This is a best-effort call — if the progress contract is not set
+        // (e.g. during testing without a full deployment), we skip it.
+        // In production, always call set_progress_contract before going live.
+        if Self::is_eligible_for_level_advance(&env, player_id, next_index) {
+            if let Some(progress_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::ProgressContract)
+            {
+                let progress_client = progress_contract::Client::new(&env, &progress_addr);
+                // advance_level will return AlreadyAtMaxLevel if the player is
+                // already at EliteTier — we intentionally ignore that error here
+                // so the milestone is still recorded even at max level.
+                let _ =
+                    progress_client.try_advance_level(&validator_wallet, &player_id, &next_index);
+            }
         }
 
         events::issuer_registered(&env, &wallet, &name);
@@ -420,16 +385,24 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Clear a misconduct flag after an independent active validator re-confirms it.
-    pub fn rereview_milestone(
+    // -------------------------------------------------------------------------
+    // Milestone disputes
+    // -------------------------------------------------------------------------
+
+    /// File a dispute against an approved milestone.
+    ///
+    /// High-impact disputes are escalated to the validator jury. Lower-impact
+    /// disputes retain the existing admin-resolution path.
+    pub fn dispute_milestone(
         env: Env,
-        validator_wallet: Address,
+        filed_by: Address,
         player_id: u64,
         milestone_index: u32,
+        reason: String,
+        impact_score: u64,
     ) -> Result<(), VerificationError> {
         Self::require_not_paused(&env)?;
-        validator_wallet.require_auth();
-        Self::require_active_validator(&env, &validator_wallet)?;
+        filed_by.require_auth();
 
         if !env
             .storage()
@@ -439,14 +412,180 @@ impl VerificationContract {
             return Err(VerificationError::InvalidInput);
         }
 
-        let flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
-        if !env.storage().persistent().get(&flag_key).unwrap_or(false) {
-            return Err(VerificationError::MilestoneNotPendingReReview);
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        if env.storage().persistent().has(&dispute_key) {
+            return Err(VerificationError::DisputeAlreadyExists);
         }
 
-        env.storage().persistent().set(&flag_key, &false);
-        events::milestone_rereviewed(&env, player_id, milestone_index, &validator_wallet);
+        let config = Self::jury_config(&env);
+        let jury_required = impact_score >= config.impact_threshold;
+        let filed_at = env.ledger().timestamp();
+        let voting_deadline = if jury_required {
+            filed_at
+                .checked_add(config.voting_window_secs)
+                .ok_or(VerificationError::Overflow)?
+        } else {
+            filed_at
+        };
+        let dispute = MilestoneDispute {
+            player_id,
+            milestone_index,
+            filed_by: filed_by.clone(),
+            reason,
+            impact_score,
+            filed_at,
+            voting_deadline,
+            jury_required,
+            quorum: config.quorum,
+            resolved: false,
+            upheld: false,
+            votes_for: 0,
+            votes_against: 0,
+        };
+
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::milestone_disputed(&env, player_id, milestone_index, &filed_by, jury_required);
         Ok(())
+    }
+
+    /// Resolve a low-impact dispute through the backwards-compatible admin path.
+    pub fn resolve_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+        upheld: bool,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if dispute.jury_required {
+            return Err(VerificationError::DisputeRequiresJury);
+        }
+
+        dispute.resolved = true;
+        dispute.upheld = upheld;
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_resolved(&env, player_id, milestone_index, upheld);
+        Ok(())
+    }
+
+    /// Cast one immutable vote on a high-impact dispute.
+    pub fn cast_dispute_vote(
+        env: Env,
+        validator_wallet: Address,
+        player_id: u64,
+        milestone_index: u32,
+        upheld: bool,
+    ) -> Result<(), VerificationError> {
+        Self::require_not_paused(&env)?;
+        validator_wallet.require_auth();
+        Self::require_active_validator(&env, &validator_wallet)?;
+
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if !dispute.jury_required {
+            return Err(VerificationError::DisputeDoesNotRequireJury);
+        }
+        if env.ledger().timestamp() >= dispute.voting_deadline {
+            return Err(VerificationError::VotingWindowClosed);
+        }
+
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+            .ok_or(VerificationError::InvalidInput)?;
+        if milestone.validator == validator_wallet {
+            return Err(VerificationError::ConflictedValidator);
+        }
+
+        let vote_key = DataKey::DisputeVote(player_id, milestone_index, validator_wallet.clone());
+        if env.storage().persistent().has(&vote_key) {
+            return Err(VerificationError::VoteAlreadyCast);
+        }
+
+        if upheld {
+            dispute.votes_for = dispute
+                .votes_for
+                .checked_add(1)
+                .ok_or(VerificationError::Overflow)?;
+        } else {
+            dispute.votes_against = dispute
+                .votes_against
+                .checked_add(1)
+                .ok_or(VerificationError::Overflow)?;
+        }
+        let vote = DisputeVote {
+            validator: validator_wallet.clone(),
+            upheld,
+            cast_at: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&vote_key, &vote);
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_vote_cast(&env, player_id, milestone_index, &validator_wallet, upheld);
+        Ok(())
+    }
+
+    /// Finalize a jury dispute once it has a decisive quorum or its window ends.
+    /// Anyone may call this function, so no administrator can suppress a result.
+    pub fn tally_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<bool, VerificationError> {
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::DisputeNotFound)?;
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+        if !dispute.jury_required {
+            return Err(VerificationError::DisputeDoesNotRequireJury);
+        }
+
+        let total_votes = dispute
+            .votes_for
+            .checked_add(dispute.votes_against)
+            .ok_or(VerificationError::Overflow)?;
+        let deadline_passed = env.ledger().timestamp() >= dispute.voting_deadline;
+        let decisive_quorum =
+            total_votes >= dispute.quorum && dispute.votes_for != dispute.votes_against;
+        if !decisive_quorum && !deadline_passed {
+            return Err(VerificationError::TallyNotReady);
+        }
+
+        // A tie, or a deadline with no quorum, preserves the original milestone.
+        let upheld = total_votes >= dispute.quorum && dispute.votes_for > dispute.votes_against;
+        dispute.resolved = true;
+        dispute.upheld = upheld;
+        env.storage().persistent().set(&dispute_key, &dispute);
+        events::dispute_tallied(
+            &env,
+            player_id,
+            milestone_index,
+            upheld,
+            dispute.votes_for,
+            dispute.votes_against,
+        );
+        Ok(upheld)
     }
 
     // -------------------------------------------------------------------------
@@ -463,40 +602,62 @@ impl VerificationContract {
             .persistent()
             .set(&DataKey::Issuer(wallet.clone()), &issuer);
 
-        events::issuer_revoked(&env, &wallet);
-
-        Ok(())
+    pub fn get_jury_config(env: Env) -> JuryConfig {
+        Self::jury_config(&env)
     }
 
-    pub fn get_validator_milestone(
+    pub fn get_dispute(
         env: Env,
-        wallet: Address,
-        approval_index: u32,
-    ) -> Result<ValidatorMilestoneRef, VerificationError> {
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<MilestoneDispute, VerificationError> {
         env.storage()
             .persistent()
-            .get(&DataKey::ValidatorMilestone(wallet, approval_index))
-            .ok_or(VerificationError::InvalidInput)
+            .get(&DataKey::MilestoneDispute(player_id, milestone_index))
+            .ok_or(VerificationError::DisputeNotFound)
     }
 
-    pub fn get_validator_revocation(
+    pub fn get_dispute_vote(
         env: Env,
-        wallet: Address,
-    ) -> Result<RevocationRecord, VerificationError> {
+        player_id: u64,
+        milestone_index: u32,
+        validator_wallet: Address,
+    ) -> Result<DisputeVote, VerificationError> {
         env.storage()
             .persistent()
-            .get(&DataKey::ValidatorRevocation(wallet))
-            .ok_or(VerificationError::InvalidInput)
-    }
-
-    pub fn is_milestone_flagged(env: Env, player_id: u64, milestone_index: u32) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::MilestonePendingReReview(
+            .get(&DataKey::DisputeVote(
                 player_id,
                 milestone_index,
+                validator_wallet,
             ))
-            .unwrap_or(false)
+            .ok_or(VerificationError::InvalidInput)
+    }
+
+    pub fn get_dispute_votes(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(u32, u32), VerificationError> {
+        let dispute = Self::get_dispute(env, player_id, milestone_index)?;
+        Ok((dispute.votes_for, dispute.votes_against))
+    }
+
+    pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(wallet))
+            .unwrap_or(0u32)
+    }
+
+    pub fn get_diversity_config(env: Env) -> DiversityConfig {
+        Self::diversity_config(&env)
+    }
+
+    pub fn get_player_affiliation_count(env: Env, player_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlayerAffiliationCount(player_id))
+            .unwrap_or(0u32)
     }
 
     pub fn get_validator(env: Env, wallet: Address) -> Result<Validator, VerificationError> {
@@ -4138,49 +4299,43 @@ mod tests {
         }
     }
 
-    fn require_active_validator(env: &Env, wallet: &Address) -> Result<(), VerificationError> {
-        let validator: Validator = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Validator(wallet.clone()))
-            .ok_or(VerificationError::ValidatorNotFound)?;
-        if !validator.active {
-            return Err(VerificationError::ValidatorInactive);
+    fn record_player_affiliation(
+        env: &Env,
+        player_id: u64,
+        affiliation: &String,
+    ) -> Result<(), VerificationError> {
+        let affiliation_key = DataKey::PlayerAffiliationUsed(player_id, affiliation.clone());
+        if env.storage().persistent().has(&affiliation_key) {
+            return Ok(());
         }
+
+        let count_key = DataKey::PlayerAffiliationCount(player_id);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
+        let next_count = count.checked_add(1).ok_or(VerificationError::Overflow)?;
+        env.storage().persistent().set(&affiliation_key, &true);
+        env.storage().persistent().set(&count_key, &next_count);
         Ok(())
     }
 
-    fn flag_validator_milestones_for_rereview(
-        env: &Env,
-        validator_wallet: &Address,
-    ) -> Result<(), VerificationError> {
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ValidatorMilestoneCount(validator_wallet.clone()))
-            .unwrap_or(0u32);
+    fn is_eligible_for_level_advance(env: &Env, player_id: u64, milestone_index: u32) -> bool {
+        let config = Self::diversity_config(env);
+        milestone_index < config.gated_milestone_index
+            || Self::get_player_affiliation_count(env.clone(), player_id)
+                >= config.min_distinct_affiliations
+    }
 
-        for approval_index in 1..=count {
-            let milestone: ValidatorMilestoneRef = env
-                .storage()
-                .persistent()
-                .get(&DataKey::ValidatorMilestone(
-                    validator_wallet.clone(),
-                    approval_index,
-                ))
-                .ok_or(VerificationError::InvalidInput)?;
-            env.storage().persistent().set(
-                &DataKey::MilestonePendingReReview(milestone.player_id, milestone.milestone_index),
-                &true,
-            );
-            events::milestone_flagged_for_rereview(
-                env,
-                milestone.player_id,
-                milestone.milestone_index,
-                validator_wallet,
-            );
+    fn diversity_config(env: &Env) -> DiversityConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::DiversityConfig)
+            .unwrap_or_else(Self::default_diversity_config)
+    }
+
+    fn default_diversity_config() -> DiversityConfig {
+        DiversityConfig {
+            min_distinct_affiliations: DEFAULT_MIN_DISTINCT_AFFILIATIONS,
+            gated_milestone_index: DEFAULT_GATED_MILESTONE_INDEX,
         }
-        Ok(())
     }
 }
 
@@ -4190,6 +4345,7 @@ mod tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scoutchain_progress::{ProgressContract, ProgressContractClient};
     use soroban_sdk::{
         testutils::{Address as _, EnvTestConfig, Ledger as _},
         Env, String,
@@ -4205,13 +4361,34 @@ mod tests {
         (env, client)
     }
 
-    // -------------------------------------------------------------------------
-    // #860: get_milestones_since — mirrors progress.get_history_since semantics
-    // -------------------------------------------------------------------------
+    fn register_validator(
+        env: &Env,
+        client: &VerificationContractClient<'static>,
+        wallet: &Address,
+        affiliation: &str,
+    ) {
+        client.register_validator(
+            wallet,
+            &String::from_str(env, "Coach"),
+            &String::from_str(env, affiliation),
+        );
+    }
 
-    /// Returns only milestones with `approved_at >= since_timestamp`,
-    /// matching the established `get_history_since` contract in the progress
-    /// contract (issue #860).
+    fn setup_with_progress() -> (
+        Env,
+        VerificationContractClient<'static>,
+        ProgressContractClient<'static>,
+    ) {
+        let (env, verification) = setup();
+        let progress_id = env.register_contract(None, ProgressContract);
+        let progress = ProgressContractClient::new(&env, &progress_id);
+        let admin = Address::generate(&env);
+        verification.initialize(&admin);
+        progress.initialize(&admin);
+        verification.set_progress_contract(&progress_id);
+        (env, verification, progress)
+    }
+
     #[test]
     fn test_get_milestones_since_filters_by_approved_at() {
         let (env, client) = setup();
@@ -4219,7 +4396,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
+        register_validator(&env, &client, &validator, "Academy A");
 
         // Unknown wallet returns 0
         assert_eq!(
@@ -4299,8 +4476,12 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        let player_id: u64 = 1;
-        let player_id_2: u64 = 2;
+        env.ledger().with_mut(|ledger| ledger.sequence_number = 1);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Academy A"),
+        );
 
         // Register the validator with specializations
         let mut specs = Vec::new(&env);
@@ -4348,99 +4529,164 @@ mod tests {
         assert_eq!(report.status, types::ValidatorStatus::Active);
     }
 
-    /// Report for an unregistered wallet returns ValidatorNotFound.
-    #[test]
-    fn test_routine_revocation_does_not_flag_milestones() {
+    fn setup_jury_dispute(
+        impact_score: u64,
+        quorum: u32,
+        voting_window_secs: u64,
+    ) -> (
+        Env,
+        VerificationContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.set_jury_config(&100, &quorum, &voting_window_secs);
+
+        let original_approver = Address::generate(&env);
+        let voter_one = Address::generate(&env);
+        let voter_two = Address::generate(&env);
+        let voter_three = Address::generate(&env);
+        for validator in [&original_approver, &voter_one, &voter_two, &voter_three] {
+            client.register_validator(validator, &String::from_str(&env, "Coach"));
+        }
+
         client.approve_milestone(
-            &validator,
+            &original_approver,
             &1,
-            &String::from_str(&env, "Verified identity"),
+            &String::from_str(&env, "Regional tournament result"),
             &String::from_str(&env, "QmEvidence"),
         );
-
-        client.revoke_validator(
-            &validator,
-            &RevocationSeverity::Routine,
-            &String::from_str(&env, "Contract ended"),
+        let filer = Address::generate(&env);
+        client.dispute_milestone(
+            &filer,
+            &1,
+            &1,
+            &String::from_str(&env, "Evidence is disputed"),
+            &impact_score,
         );
 
-        assert!(!client.is_milestone_flagged(&1, &1));
-        assert_eq!(
-            client.get_validator_revocation(&validator).severity,
-            RevocationSeverity::Routine
-        );
+        (
+            env,
+            client,
+            original_approver,
+            voter_one,
+            voter_two,
+            voter_three,
+        )
     }
 
     #[test]
-    fn test_for_cause_revocation_flags_only_approving_validator_milestones() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-        let revoked = Address::generate(&env);
-        let unaffected = Address::generate(&env);
-        client.register_validator(&revoked, &String::from_str(&env, "Coach A"));
-        client.register_validator(&unaffected, &String::from_str(&env, "Coach B"));
+    fn test_jury_quorum_upholds_dispute() {
+        let (env, client, _, voter_one, voter_two, voter_three) = setup_jury_dispute(100, 3, 100);
 
-        client.approve_milestone(
-            &revoked,
-            &1,
-            &String::from_str(&env, "Player one achievement"),
-            &String::from_str(&env, "QmEvidence1"),
-        );
-        client.approve_milestone(
-            &unaffected,
-            &1,
-            &String::from_str(&env, "Player one second achievement"),
-            &String::from_str(&env, "QmEvidence2"),
-        );
-        client.approve_milestone(
-            &revoked,
-            &2,
-            &String::from_str(&env, "Player two achievement"),
-            &String::from_str(&env, "QmEvidence3"),
-        );
+        for voter in [&voter_one, &voter_two, &voter_three] {
+            client.cast_dispute_vote(voter, &1, &1, &true);
+        }
 
-        client.revoke_validator(
-            &revoked,
-            &RevocationSeverity::ForCause,
-            &String::from_str(&env, "Fraud investigation"),
-        );
-
-        assert!(client.is_milestone_flagged(&1, &1));
-        assert!(!client.is_milestone_flagged(&1, &2));
-        assert!(client.is_milestone_flagged(&2, &1));
-        assert_eq!(client.get_validator_milestone(&revoked, &2).player_id, 2);
+        assert_eq!(client.get_dispute_votes(&1, &1), (3, 0));
+        assert!(client.tally_dispute(&1, &1));
+        let dispute = client.get_dispute(&1, &1);
+        assert!(dispute.resolved);
+        assert!(dispute.upheld);
+        assert_eq!(dispute.voting_deadline, env.ledger().timestamp() + 100);
     }
 
     #[test]
-    fn test_active_validator_can_clear_pending_rereview_flag() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-        let revoked = Address::generate(&env);
-        let reviewer = Address::generate(&env);
-        client.register_validator(&revoked, &String::from_str(&env, "Coach A"));
-        client.register_validator(&reviewer, &String::from_str(&env, "Coach B"));
-        client.approve_milestone(
-            &revoked,
-            &1,
-            &String::from_str(&env, "Verified achievement"),
-            &String::from_str(&env, "QmEvidence"),
-        );
-        client.revoke_validator(
-            &revoked,
-            &RevocationSeverity::ForCause,
-            &String::from_str(&env, "Misconduct"),
-        );
-        assert!(client.is_milestone_flagged(&1, &1));
+    fn test_jury_quorum_rejects_dispute() {
+        let (_, client, _, voter_one, voter_two, voter_three) = setup_jury_dispute(100, 3, 100);
 
-        client.rereview_milestone(&reviewer, &1, &1);
-        assert!(!client.is_milestone_flagged(&1, &1));
+        client.cast_dispute_vote(&voter_one, &1, &1, &false);
+        client.cast_dispute_vote(&voter_two, &1, &1, &false);
+        client.cast_dispute_vote(&voter_three, &1, &1, &true);
+
+        assert!(!client.tally_dispute(&1, &1));
+        let dispute = client.get_dispute(&1, &1);
+        assert!(dispute.resolved);
+        assert!(!dispute.upheld);
+        assert_eq!(client.get_dispute_votes(&1, &1), (1, 2));
+    }
+
+    #[test]
+    fn test_jury_tie_rejects_after_voting_window() {
+        let (env, client, _, voter_one, voter_two, _) = setup_jury_dispute(100, 2, 100);
+
+        client.cast_dispute_vote(&voter_one, &1, &1, &true);
+        client.cast_dispute_vote(&voter_two, &1, &1, &false);
+        assert!(client.try_tally_dispute(&1, &1).is_err());
+
+        env.ledger().with_mut(|ledger| ledger.timestamp += 100);
+        assert!(!client.tally_dispute(&1, &1));
+        assert!(!client.get_dispute(&1, &1).upheld);
+    }
+
+    #[test]
+    fn test_conflicted_validator_cannot_vote_on_own_milestone() {
+        let (_, client, original_approver, _, _, _) = setup_jury_dispute(100, 3, 100);
+
+        assert!(client
+            .try_cast_dispute_vote(&original_approver, &1, &1, &true)
+            .is_err());
+        assert_eq!(client.get_dispute_votes(&1, &1), (0, 0));
+    }
+
+    #[test]
+    fn test_low_impact_dispute_retains_admin_resolution() {
+        let (_, client, _, _, _, _) = setup_jury_dispute(99, 3, 100);
+
+        let dispute = client.get_dispute(&1, &1);
+        assert!(!dispute.jury_required);
+        client.resolve_dispute(&1, &1, &true);
+        let resolved = client.get_dispute(&1, &1);
+        assert!(resolved.resolved);
+        assert!(resolved.upheld);
+    }
+
+    #[test]
+    fn test_single_affiliation_cannot_advance_past_diversity_gate() {
+        let (env, verification, progress) = setup_with_progress();
+        let player_id = 1u64;
+
+        for _ in 0..5 {
+            let validator = Address::generate(&env);
+            register_validator(&env, &verification, &validator, "Shared Academy");
+            verification.approve_milestone(
+                &validator,
+                &player_id,
+                &String::from_str(&env, "Claimed achievement"),
+                &String::from_str(&env, "QmEvidence"),
+            );
+        }
+
+        assert_eq!(verification.get_player_affiliation_count(&player_id), 1);
+        assert_eq!(progress.get_history_count(&player_id), 1);
+    }
+
+    #[test]
+    fn test_diverse_affiliations_allow_level_advancement() {
+        let (env, verification, progress) = setup_with_progress();
+        let player_id = 1u64;
+        let academy_a = Address::generate(&env);
+        let academy_b = Address::generate(&env);
+        let academy_c = Address::generate(&env);
+        register_validator(&env, &verification, &academy_a, "Academy A");
+        register_validator(&env, &verification, &academy_b, "Academy B");
+        register_validator(&env, &verification, &academy_c, "Academy C");
+
+        for validator in [&academy_a, &academy_b, &academy_c] {
+            verification.approve_milestone(
+                validator,
+                &player_id,
+                &String::from_str(&env, "Verified achievement"),
+                &String::from_str(&env, "QmEvidence"),
+            );
+        }
+
+        assert_eq!(verification.get_player_affiliation_count(&player_id), 3);
+        assert_eq!(progress.get_history_count(&player_id), 3);
     }
 
     #[test]
@@ -4450,7 +4696,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        register_validator(&env, &client, &validator, "Academy A");
 
         // Approve 3 milestones for different players
         let player1: u64 = 1;
@@ -4509,12 +4755,8 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(
-            &validator,
-            &RevocationSeverity::Routine,
-            &String::from_str(&env, "Voluntary departure"),
-        );
+        register_validator(&env, &client, &validator, "Academy A");
+        client.revoke_validator(&validator);
 
         client.approve_milestone(
             &validator, &1u64,
@@ -4548,12 +4790,8 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(
-            &validator,
-            &RevocationSeverity::Routine,
-            &String::from_str(&env, "Voluntary departure"),
-        );
+        register_validator(&env, &client, &validator, "Academy A");
+        client.revoke_validator(&validator);
 
         // Approve and dispute 5 milestones for 5 distinct players
         for player_id in 1u64..=5 {
@@ -4627,8 +4865,18 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        // Set quorum of 3 — but the very first milestone should still go through
-        client.set_min_region_quorum(&3u32);
+        let validator1 = Address::generate(&env);
+        let validator2 = Address::generate(&env);
+        client.register_validator(
+            &validator1,
+            &String::from_str(&env, "Coach A"),
+            &String::from_str(&env, "Academy A"),
+        );
+        client.register_validator(
+            &validator2,
+            &String::from_str(&env, "Coach B"),
+            &String::from_str(&env, "Academy B"),
+        );
 
         let validator = Address::generate(&env);
         client.register_validator(
@@ -4655,8 +4903,8 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        // Require 2 distinct regions
-        client.set_min_region_quorum(&2u32);
+        let validator = Address::generate(&env);
+        register_validator(&env, &client, &validator, "Academy A");
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
@@ -4697,8 +4945,8 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        // Require 2 distinct regions
-        client.set_min_region_quorum(&2u32);
+        let validator = Address::generate(&env);
+        register_validator(&env, &client, &validator, "Academy A");
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);

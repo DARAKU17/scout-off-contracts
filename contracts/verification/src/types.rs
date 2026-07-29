@@ -106,7 +106,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
-    /// Ledger timestamp when the validator was registered, in Unix seconds.
+    /// Admin-verified organization the validator represents.
+    pub affiliation: String,
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
@@ -166,29 +167,14 @@ pub struct MilestoneRef {
     pub milestone_index: u32,
 }
 
-/// Whether a validator revocation requires re-review of prior approvals.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RevocationSeverity {
-    Routine,
-    ForCause,
-}
-
-/// The reason and severity recorded when a validator is revoked.
+/// Rules that gate level-advancing milestones on independent organizations.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct RevocationRecord {
-    pub severity: RevocationSeverity,
-    pub reason: String,
-    pub revoked_at: u64,
-}
-
-/// Identifies one milestone in a validator's approval history.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ValidatorMilestoneRef {
-    pub player_id: u64,
-    pub milestone_index: u32,
+pub struct DiversityConfig {
+    /// Minimum number of affiliations required to advance at or above the gate.
+    pub min_distinct_affiliations: u32,
+    /// First milestone index that requires organizational diversity.
+    pub gated_milestone_index: u32,
 }
 
 #[contracttype]
@@ -211,10 +197,10 @@ pub enum DataKey {
     ProgressContract,
     /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
-    /// (validator wallet, approval index) → approved milestone reference
-    ValidatorMilestone(Address, u32),
-    /// validator wallet → RevocationRecord
-    ValidatorRevocation(Address),
-    /// (player_id, milestone_index) → whether re-review is pending
-    MilestonePendingReReview(u64, u32),
+    /// Diversity rules for level-advancing milestones.
+    DiversityConfig,
+    /// (player_id, affiliation) → whether that affiliation has approved a milestone.
+    PlayerAffiliationUsed(u64, String),
+    /// player_id → number of distinct affiliations that approved milestones.
+    PlayerAffiliationCount(u64),
 }
