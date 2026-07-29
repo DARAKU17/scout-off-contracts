@@ -169,6 +169,57 @@ pub struct MilestoneAttestation {
     pub network_id: BytesN<32>,
 }
 
+/// Bounded, fixed-size accumulator for a k-of-n milestone attestation claim
+/// (issue: threshold milestone approval). Keyed by canonical claim identity
+/// (player_id, evidence_hash) — see `attest_milestone` for why description
+/// text is intentionally excluded from the identity.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingMilestoneClaim {
+    pub player_id: u64,
+    pub evidence_hash: String,
+    /// Description locked in by the first attestation of this (player_id,
+    /// evidence_hash, round). Later voters' description text does not
+    /// overwrite it, so the threshold-reaching validator cannot rewrite the
+    /// claim's narrative at the last moment.
+    pub description: String,
+    /// Distinct, currently-valid active-validator votes accumulated so far
+    /// in this round.
+    pub vote_count: u32,
+    /// Bumped on every voting-window expiry; invalidates all prior votes
+    /// without touching their storage — see `DataKey::PendingMilestoneVote`.
+    pub round: u32,
+    /// Ledger timestamp (Unix seconds) this round started.
+    pub created_at: u64,
+    /// Threshold snapshotted when this round started, so an admin changing
+    /// the global threshold mid-vote cannot retroactively fast-track or
+    /// invalidate an in-flight claim.
+    pub threshold: u32,
+}
+
+/// Reference to one of a validator's currently-open pending-claim votes.
+/// Stored (bounded, capped) under `DataKey::ValidatorPendingVotes` purely so
+/// `revoke_validator` can find and retract this validator's contribution to
+/// any still-pending claim without an unbounded storage scan.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingVoteRef {
+    pub player_id: u64,
+    pub evidence_hash: String,
+    pub round: u32,
+}
+
+/// Result of `attest_milestone` — whether this vote just crossed threshold.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestationStatus {
+    /// Vote recorded; still short of threshold. Payload is the new vote count.
+    Pending(u32),
+    /// This vote reached threshold; the milestone was committed and
+    /// `progress.advance_level` was invoked. Payload is the milestone index.
+    Committed(u32),
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -228,4 +279,29 @@ pub enum DataKey {
     /// Per-validator monotonic nonce for relayed attestation replay protection.
     /// Stores the last successfully consumed nonce (starts absent → treat as 0).
     AttestationNonce(Address),
+
+    // ── k-of-n threshold milestone attestation ──
+    /// Pending (sub-threshold) milestone attestation accumulator, keyed by
+    /// the canonical claim identity (player_id, evidence_hash). See
+    /// `attest_milestone`.
+    PendingMilestoneClaim(u64, String),
+    /// One validator's vote on a specific (player_id, evidence_hash, round).
+    /// `round` is bumped whenever a sub-threshold claim expires, which makes
+    /// every vote cast in a prior round unreachable without needing to
+    /// delete or enumerate it — see `attest_milestone` for the expiry
+    /// mechanism.
+    PendingMilestoneVote(u64, String, u32, Address),
+    /// Bounded list (capped at MAX_PENDING_VOTES_PER_VALIDATOR) of claims a
+    /// validator currently has an open, uncommitted, unexpired vote on. Used
+    /// solely so `revoke_validator` can retroactively invalidate that
+    /// validator's contribution to any still-pending claim without an
+    /// unbounded storage scan.
+    ValidatorPendingVotes(Address),
+    /// k-of-n distinct-active-validator threshold required before a
+    /// milestone claim accumulated via `attest_milestone` is committed.
+    /// Defaults to 1 — see `get_milestone_threshold`.
+    MilestoneApprovalThreshold,
+    /// Voting window (seconds) within which `threshold` distinct votes must
+    /// accumulate before a claim expires. See `get_voting_window_secs`.
+    AttestationVotingWindowSecs,
 }

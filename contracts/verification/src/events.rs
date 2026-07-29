@@ -14,6 +14,9 @@ pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 pub const DISPUTE_RESOLVED: &str = "dispute_resolved";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
 pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
+pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
+pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
+pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -182,6 +185,51 @@ pub fn progress_contract_not_set(env: &Env, player_id: u64) {
     env.events().publish(
         (Symbol::new(env, "progress_contract_not_set"), player_id),
         (),
+    );
+}
+
+/// Emitted on every accepted `attest_milestone` vote (including the
+/// threshold-crossing one).
+/// topics: (event_name, validator)  data: (player_id, evidence_hash, vote_count, threshold)
+pub fn attestation_recorded(
+    env: &Env,
+    validator: &Address,
+    player_id: u64,
+    evidence_hash: &String,
+    vote_count: u32,
+    threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, ATTESTATION_RECORDED), validator.clone()),
+        (player_id, evidence_hash.clone(), vote_count, threshold),
+    );
+}
+
+/// Emitted when a sub-threshold claim's voting window has elapsed and a new
+/// vote resets it to a fresh round, discarding all prior votes.
+/// topics: (event_name, player_id)  data: (evidence_hash, new_round)
+pub fn attestation_window_expired(env: &Env, player_id: u64, evidence_hash: &String, new_round: u32) {
+    env.events().publish(
+        (Symbol::new(env, ATTESTATION_WINDOW_EXPIRED), player_id),
+        (evidence_hash.clone(), new_round),
+    );
+}
+
+/// Emitted when `revoke_validator` retroactively strips a revoked
+/// validator's contribution from still-pending (sub-threshold) claims.
+/// topics: (event_name, admin)  data: (wallet, invalidated_count)
+pub fn validator_pending_votes_invalidated(
+    env: &Env,
+    admin: &Address,
+    wallet: &Address,
+    invalidated_count: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, VALIDATOR_PENDING_VOTES_INVALIDATED),
+            admin.clone(),
+        ),
+        (wallet.clone(), invalidated_count),
     );
 }
 

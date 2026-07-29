@@ -957,10 +957,24 @@ After storing the milestone this function cross-calls `progress.advance_level`
 atomically so both state changes occur in the same Stellar transaction. Returns
 the milestone index.
 
+**Single-validator trust model — closed once k-of-n mode is configured.**
+`approve_milestone` commits on the strength of exactly one validator's
+signature. As soon as an operator calls `set_milestone_threshold(n)` with
+`n >= 2`, `approve_milestone` starts rejecting every call with
+`ThresholdModeRequiresAttestation` — there is no single-signature bypass once
+k-of-n mode is active. The default threshold is `1`, which reproduces
+`approve_milestone`'s historical behaviour unchanged; this is a deliberate,
+well-gated degenerate case kept so every existing integrator (registration,
+scout_access, chaos-tests, and this contract's own pre-existing callers) keeps
+working without a coordinated migration, not a silent escape hatch. Operators
+who actually want to close the single-compromised-validator gap described in
+the k-of-n threshold attestation design below must call
+`set_milestone_threshold(n)` with `n >= 2`. See `attest_milestone`.
+
 | | |
 |---|---|
 | **Auth** | `validator_wallet` must sign |
-| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash or category tag >64 bytes) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `SpecializationMismatch` (category provided but validator not tagged for it) · `Overflow` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `ThresholdModeRequiresAttestation` (k-of-n mode is configured — use `attest_milestone` instead) · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` (bad evidence hash or category tag >64 bytes) · `DuplicateEvidence` (evidence hash already used) · `MilestoneLimitExceeded` (5 milestones/player/validator cap) · `SpecializationMismatch` (category provided but validator not tagged for it) · `Overflow` · `ProgressCallFailed` |
 
 ```bash
 # Untagged milestone (any active validator)
@@ -981,6 +995,169 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   --evidence_hash '"QmEvidence456"' \
   --milestone_category '"physical-stats"'
 ```
+
+---
+
+### k-of-n threshold milestone attestation
+
+`approve_milestone`'s single-signature trust model means one compromised,
+colluding, or simply mistaken validator can unilaterally mint a milestone and
+trigger an irreversible-by-default player-tier advance. `attest_milestone`
+replaces that with an on-chain **accumulation** pattern: since this platform's
+validators are geographically distributed coaches/academy directors (see
+[README "Validator Network"](../README.md)) who cannot practically co-sign a
+single Soroban transaction together, each validator submits their own
+attestation independently — potentially hours or days apart — and the
+contract tallies distinct votes in bounded storage until a configurable
+`threshold` is reached, only then committing the milestone and cross-calling
+`progress.advance_level`.
+
+**Claim identity: `(player_id, evidence_hash)`, not `description`.** Two
+validators attesting with independently-worded descriptions for the same
+evidence still corroborate the same claim. The alternative — requiring an
+exact `description` match — was rejected: wording variance alone would
+fracture legitimate consensus (a validator who paraphrases "hat-trick in cup
+final" as "3 goals, regional final" would silently open a second, disjoint
+claim instead of corroborating the first), which is a subtler and
+easier-to-trigger griefing vector than trusting the immutable evidence
+artifact the CID already represents. The description recorded on the
+committed `Milestone` is locked in by the first vote in each round and is
+never overwritten by later voters, so the threshold-reaching validator cannot
+rewrite the claim's narrative at the last moment either.
+
+**Bounded, O(1)-per-vote storage.** Each claim is one fixed-size
+`PendingMilestoneClaim` record (a vote counter, not a growing list of voter
+addresses) plus one fixed-size existence marker per `(claim, validator)` pair
+used for duplicate-vote rejection. This deliberately avoids the
+monolithic-Vec-rewrite anti-pattern present elsewhere in this codebase — see
+`cost_attest_milestone_threshold_reach_does_not_scale_with_vote_count` in
+`contracts/verification/tests/threshold_milestone_attestation.rs`, which
+measures the CPU-instruction cost (via `env.cost_estimate().budget()`) of the
+threshold-reaching call at `threshold = 5` and `threshold = 20` and asserts
+the growth stays well under what an O(n) voter-list rewrite would produce.
+
+**Duplicate votes** from the same validator on the same claim/round are
+rejected with `DuplicateAttestation` — a distinct, differentiated result from
+a first-time `AttestationStatus::Pending`/`Committed`, not a silent no-op.
+
+**Revoke-during-pending-vote policy: retroactive invalidation.** If
+`revoke_validator` (or `batch_revoke_validators`) is called against a
+validator with a still-open vote on a sub-threshold claim, that vote is
+stripped from the claim's tally immediately, in the same transaction — the
+claim then needs a fresh vote from a different active validator to make up
+the difference. This is enforced by a bounded, capped
+(`MAX_PENDING_VOTES_PER_VALIDATOR` = 25) per-validator index of open votes
+that revocation walks and reverses, not merely documented behaviour. The
+alternative (grandfathering a revoked validator's vote) would mean a
+validator revoked specifically *because* they were caught attesting
+fraudulently could still contribute to a commit after revocation, defeating
+the purpose of this mechanism.
+
+**Voting-window expiry: round-based reset, not unbounded growth.** Each claim
+carries a `round` counter. A vote arriving after `get_voting_window_secs()`
+has elapsed since the round started bumps `round` and resets the tally to 1
+(this vote), rather than accumulating forever — prior votes for the old round
+become unreachable (their storage key is scoped to that round number) without
+needing to enumerate or delete them. A validator whose vote was on an expired
+round may vote again once a new round starts; their stale round-0 marker does
+not block a fresh vote in round 1. The claim's storage record itself is
+reused in place (not deleted), so it never becomes silently-unreachable dead
+storage — `is_attestation_window_expired` reports its state explicitly.
+
+#### `attest_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<AttestationStatus, VerificationError>`
+
+Cast one independent vote toward a k-of-n threshold milestone claim. Returns
+`AttestationStatus::Pending(vote_count)` if the claim is still short of
+threshold, or `AttestationStatus::Committed(milestone_index)` if this vote
+reached threshold and the milestone was committed (with
+`progress.advance_level` cross-called, same as `approve_milestone`).
+
+| | |
+|---|---|
+| **Auth** | `validator_wallet` must sign |
+| **Errors** | `ContractPaused` · `ValidatorNotFound` · `ValidatorInactive` · `InvalidInput` · `DuplicateEvidence` (claim already committed) · `DuplicateAttestation` (same validator, same round) · `TooManyPendingVotes` (validator already has 25 concurrent open votes) · `Overflow` · `ProgressCallFailed` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- attest_milestone \
+  --validator_wallet $VALIDATOR_ADDRESS \
+  --player_id 1 \
+  --description '"Scored 5 goals in Local Cup"' \
+  --evidence_hash '"QmEvidence123"'
+```
+
+---
+
+#### `set_milestone_threshold(threshold: u32) -> Result<(), VerificationError>` / `get_milestone_threshold() -> u32`
+
+Configure (admin only) or read the k-of-n distinct-active-validator threshold
+required before an `attest_milestone` claim commits. Must be in
+`[1, MAX_VALIDATORS]`. Defaults to `1` — see `approve_milestone` above for why.
+An already-open claim keeps the threshold in effect when its current round
+started; changing this value only affects claims that start a fresh round
+afterward, so the admin cannot retroactively fast-track or invalidate an
+in-flight claim by moving the threshold mid-vote.
+
+| | |
+|---|---|
+| **Auth** | admin must sign (`set_milestone_threshold` only) |
+| **Errors** | `InvalidInput` (threshold is 0 or exceeds `MAX_VALIDATORS`) |
+
+---
+
+#### `set_voting_window_secs(window_secs: u64) -> Result<(), VerificationError>` / `get_voting_window_secs() -> u64`
+
+Configure (admin only) or read the attestation voting window in seconds.
+Must be in `[3_600, 7_776_000]` (1 hour – 90 days). Defaults to `1_209_600`
+(14 days) — long enough for independently-transacting, geographically
+distributed validators to notice and corroborate evidence; short enough that
+a sub-threshold claim's fixed-size storage entry does not sit unresolved
+indefinitely.
+
+| | |
+|---|---|
+| **Auth** | admin must sign (`set_voting_window_secs` only) |
+| **Errors** | `InvalidInput` (window outside the allowed range) |
+
+---
+
+#### `get_pending_claim(player_id: u64, evidence_hash: String) -> Option<PendingMilestoneClaim>`
+
+Return the current accumulator state for a claim, if one is open. Returns
+`None` once the claim commits (its storage is removed at that point) or
+before any validator has attested to it. Includes `vote_count`, `round`,
+`created_at`, and the `threshold` snapshotted when the current round started.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
+#### `has_attested(player_id: u64, evidence_hash: String, validator_wallet: Address) -> bool`
+
+Whether `validator_wallet` has an active (not-yet-expired, not-yet-committed)
+vote recorded for this claim's current round.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
+#### `is_attestation_window_expired(player_id: u64, evidence_hash: String) -> bool`
+
+Whether the claim's current voting round has exceeded the configured window
+without reaching threshold. `true` means the next `attest_milestone` call for
+this claim will start a fresh round rather than counting toward the existing
+tally. Returns `false` when no claim is open.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
 
 ---
 
@@ -3266,6 +3443,35 @@ pub struct Milestone {
 }
 ```
 
+### `PendingMilestoneClaim`
+
+Bounded, fixed-size accumulator for a k-of-n `attest_milestone` claim, keyed
+by `(player_id, evidence_hash)`. See `attest_milestone` above for the full
+design rationale (claim identity, expiry, revoke-invalidation).
+
+```rust
+pub struct PendingMilestoneClaim {
+    pub player_id: u64,
+    pub evidence_hash: String,
+    pub description: String,    // locked in by the first vote in this round
+    pub vote_count: u32,        // distinct, currently-valid votes so far
+    pub round: u32,             // bumped on voting-window expiry
+    pub created_at: u64,        // Unix seconds this round started
+    pub threshold: u32,         // snapshotted when this round started
+}
+```
+
+### `AttestationStatus`
+
+Return type of `attest_milestone`.
+
+```rust
+pub enum AttestationStatus {
+    Pending(u32),    // vote recorded; new vote_count, still short of threshold
+    Committed(u32),  // this vote reached threshold; payload is the milestone index
+}
+```
+
 ### `MilestoneDispute`
 
 ```rust
@@ -3427,6 +3633,9 @@ pub struct TrialOffer {
 | 26 | `IssuerNotFound` | The issuer was not found in the registry |
 | 20 | `ApproveMilestonePaused` | `approve_milestone` is paused independently of the whole-contract pause |
 | 21 | `SpecializationMismatch` | `milestone_category` supplied to `approve_milestone` but validator is not tagged for that category |
+| 26 | `DuplicateAttestation` | Same active validator attested to the same claim within its current voting round |
+| 27 | `TooManyPendingVotes` | Validator already has `MAX_PENDING_VOTES_PER_VALIDATOR` (25) concurrent open votes |
+| 28 | `ThresholdModeRequiresAttestation` | `approve_milestone` called while `get_milestone_threshold() > 1` — use `attest_milestone` |
 
 ### `ProgressError` (progress contract)
 
@@ -3512,6 +3721,9 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract address re-wired |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `attestation_recorded` | event_name, validator (Address) | player_id (u64), evidence_hash (String), vote_count (u32), threshold (u32) | `attest_milestone` vote accepted (including the threshold-crossing one) |
+| `attestation_window_expired` | event_name, player_id (u64) | evidence_hash (String), new_round (u32) | A sub-threshold claim's voting window elapsed; the next vote starts a fresh round |
+| `validator_votes_invalidated` | event_name, admin (Address) | wallet (Address), invalidated_count (u32) | `revoke_validator` retroactively stripped this validator's pending votes |
 
 ### progress
 

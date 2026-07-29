@@ -78,6 +78,22 @@ pub enum VerificationError {
     InvalidNonce = 24,
     /// Validator registration attempted before the cooldown window elapsed.
     RegistrationCooldown = 25,
+
+    // ── k-of-n threshold milestone attestation ──
+    /// The same active validator has already attested to this exact
+    /// (player_id, evidence_hash) claim within its current voting round.
+    /// Distinct from a successful first-time `AttestationStatus::Pending`.
+    DuplicateAttestation = 26,
+    /// This validator already has `MAX_PENDING_VOTES_PER_VALIDATOR`
+    /// concurrent open (sub-threshold, unexpired) attestation votes
+    /// outstanding; wait for one to resolve (commit or expire) before
+    /// opening another.
+    TooManyPendingVotes = 27,
+    /// `approve_milestone` was called while `get_milestone_threshold() > 1`.
+    /// Once an operator opts into k-of-n mode, all milestone commitments
+    /// must go through `attest_milestone` — there is no single-signature
+    /// bypass once threshold >= 2 is configured.
+    ThresholdModeRequiresAttestation = 28,
 }
 
 impl AdminError for VerificationError {
