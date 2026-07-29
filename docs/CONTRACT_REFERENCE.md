@@ -34,13 +34,16 @@ Manages the trusted validator registry and milestone approvals.
 
 | Function | Auth | Description |
 |----------|------|-------------|
-| `initialize(admin)` | admin | One-time setup |
+| `initialize(admin)` | admin | One-time setup, including default diversity configuration |
 | `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
-| `register_validator(wallet, credentials)` | admin | Add trusted validator |
+| `set_diversity_config(min_distinct_affiliations, gated_milestone_index)` | admin | Configure organizational diversity required for level advancement |
+| `register_validator(wallet, credentials, affiliation)` | admin | Add a trusted validator with verified organization affiliation |
 | `revoke_validator(wallet)` | admin | Deactivate validator |
 | `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
 | `get_milestone(player_id, index)` | — | Read a specific milestone |
 | `get_milestone_count(player_id)` | — | Total milestones for a player |
+| `get_diversity_config()` | — | Read affiliation diversity rules |
+| `get_player_affiliation_count(player_id)` | — | Count distinct affiliated milestone approvers |
 | `get_validator(wallet)` | — | Read validator record |
 | `is_active_validator(wallet)` | — | Boolean check |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |

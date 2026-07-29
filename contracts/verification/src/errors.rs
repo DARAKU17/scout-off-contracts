@@ -14,4 +14,6 @@ pub enum VerificationError {
     PlayerNotFound = 8,
     InvalidInput = 9,
     Overflow = 13,
+    InvalidAffiliation = 14,
+    InvalidDiversityConfig = 15,
 }

@@ -1,8 +1,10 @@
+#![no_std]
+
 use soroban_sdk::contracttype;
 
 /// Four-tier progress level for a player profile
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProgressLevel {
     /// Level 0 — profile created, no verification yet
     Unverified,
