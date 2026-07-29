@@ -25,7 +25,7 @@ The following functions are available in this contract. For complete documentati
 - `set_registration_contract(addr: Address) -> Result<(), ProgressError>` — Store the registration contract address so `advance_level` can sync player levels via cross-contract call. Admin only.
 - `set_scout_access_contract(addr: Address) -> Result<(), ProgressError>` — Whitelist the scout_access contract as a secondary authorized caller of `advance_level` (for trial-offer Level-3 advances). Admin only.
 - `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ProgressError>` — Replace the contract WASM in-place. Persistent storage (admin, history) survives the upgrade. Admin only.
-- `get_progress_history_page(player_id: u64, offset: u32, limit: u32) -> Vec<ProgressEntry>` — Paginated history retrieval. Returns entries from `offset+1` to `offset+limit`. `limit` is capped at 50. Returns an empty `Vec` when `offset` >= total count.
+- `get_progress_history_page(player_id: u64, offset: u32, limit: u32) -> Vec<ProgressEntry>` — Paginated history retrieval. Returns entries starting at `offset+1`. `limit` is clamped to the range 1 through 50. Returns an empty `Vec` when `offset` >= total count.
 - `get_history_since(player_id: u64, since_timestamp: u64) -> Vec<ProgressEntry>` — Return all of a player's history entries with `updated_at >= since_timestamp` (Unix seconds). Useful for indexers polling for changes since their last sync point instead of re-reading the full history.
 - `version() -> String` — Return the deployed contract version string (from `Cargo.toml` at build time).
 

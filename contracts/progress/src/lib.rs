@@ -423,7 +423,7 @@ impl ProgressContract {
     }
 
     /// Paginated history retrieval. Returns entries from `offset+1` to `offset+limit`.
-    /// `limit` is capped at 50. Returns an empty Vec when `offset` >= total count.
+    /// `limit` is clamped to 1..=50. Returns an empty Vec when `offset` >= total count.
     pub fn get_progress_history_page(
         env: Env,
         player_id: u64,
@@ -442,7 +442,7 @@ impl ProgressContract {
             return Vec::new(&env);
         }
 
-        let effective_limit = limit.min(MAX_PAGE);
+        let effective_limit = limit.min(MAX_PAGE).max(1);
         let start = offset + 1; // entries are 1-indexed
         let end = (start + effective_limit - 1).min(count);
 
@@ -1078,6 +1078,14 @@ mod tests {
         let last = client.get_progress_history_page(&player_id, &2u32, &50u32);
         assert_eq!(last.len(), 1);
         assert_eq!(last.get(0).unwrap().new_level, ProgressLevel::EliteTier);
+
+        // A zero limit is floored at one and still returns the first entry.
+        let zero_limit = client.get_progress_history_page(&player_id, &0u32, &0u32);
+        assert_eq!(zero_limit.len(), 1);
+        assert_eq!(
+            zero_limit.get(0).unwrap().old_level,
+            ProgressLevel::Unverified
+        );
 
         // Offset beyond count → empty
         let empty = client.get_progress_history_page(&player_id, &10u32, &5u32);
@@ -1744,4 +1752,3 @@ mod tests {
         assert_eq!(client.get_level(&1u64), ProgressLevel::Elite);
     }
 }
-
