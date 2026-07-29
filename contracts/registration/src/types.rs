@@ -90,13 +90,22 @@ pub enum PlayerStatus {
     Deactivated,
 }
 
-/// Direct status for a registered scout.
+/// Structured verification record for a scout profile. Replaces/augments the
+/// simple `verified: bool` flag with audit evidence so dashboards and future
+/// Sybil-mitigation features can consume the verification detail.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum ScoutStatus {
-    Active,
-    Deactivated,
-    NotRegistered,
+#[derive(Clone, Debug)]
+pub struct ScoutVerificationRecord {
+    /// Whether the scout is currently verified.
+    pub verified: bool,
+    /// Optional admin wallet that performed the verification.
+    pub verified_by: Option<Address>,
+    /// Ledger timestamp when verification was performed.
+    pub verified_at: Option<u64>,
+    /// Free-form evidence reference (e.g. KYC provider ID, organization name).
+    pub evidence_ref: Option<String>,
+    /// Verification method label (e.g. "admin_manual", "kyc_attestation").
+    pub method: Option<String>,
 }
 
 /// Scout profile stored on-chain
@@ -109,8 +118,12 @@ pub struct ScoutProfile {
     pub wallet: Address,
     /// Scout operating region used for profile display and discovery context.
     pub region: String,
-    /// Whether the scout has been verified by the platform.
+    /// Legacy boolean flag retained for backward compatibility with existing
+    /// consumers. New code should prefer `verification.verified`.
     pub verified: bool,
+    /// Structured verification record capturing what was checked, by whom,
+    /// when, and evidence reference.
+    pub verification: ScoutVerificationRecord,
     /// Ledger timestamp when the scout was registered, in Unix seconds.
     pub registered_at: u64,
 }

@@ -131,7 +131,27 @@ chmod +x testnet/seed.sh
 ./testnet/seed.sh
 ```
 
-### 6. Run the database migration
+### 6. Verify deployment health and wiring (recommended)
+
+After deploying and initializing, run the combined readiness check to confirm
+all four contracts are healthy (initialized and not paused) and all five
+cross-contract wiring links are correctly set before routing any traffic:
+
+```bash
+chmod +x scripts/full-readiness-check.sh
+./scripts/full-readiness-check.sh testnet
+```
+
+This prints a combined summary table with ✅/❌/⚠️ status for every health and
+wiring check in a single command.  If any check fails, the script exits
+non-zero and names the failing check explicitly.
+
+The two underlying scripts remain available for targeted debugging:
+
+- `scripts/health-check.sh testnet` — init/pause status only
+- `scripts/verify-cross-contract-wiring.sh testnet` — wiring links only
+
+### 7. Run the database migration
 
 Copy the migration files to your backend repo and run them against PostgreSQL in order:
 
@@ -193,6 +213,45 @@ WHERE id = 1;
 -- 4. Restart the indexer — it will stream events from ledger 0.
 ```
 
+### 7. Seed migrated state (optional)
+
+For fresh deployments of an existing production dataset, use the admin-only
+seeding entrypoints to replay exported player/scout profiles without requiring
+their wallet signatures:
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- admin_seed_player \
+  --player_id <id> \
+  --wallet <G-address> \
+  --vitals '{"age":25,"position":"Forward","region":"Europe","nationality":"FR"}' \
+  --ipfs_hashes '["QmHash"]' \
+  --registered_at <unix_ts> \
+  --level <0-3>
+
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- admin_seed_scout \
+  --scout_id <id> \
+  --wallet <G-address> \
+  --region "Europe" \
+  --verified false \
+  --registered_at <unix_ts>
+```
+
+> **Warning:** These functions bypass wallet authentication.  They should only
+> be used during a controlled migration replay before the contract serves any
+> real wallet-signed registrations.
+
+### 8. Verify indexer consistency
+
+```bash
+node scripts/reconcile-indexer.js
+```
+
+The script compares on-chain state against the local database and reports
+discrepancies for `players.deactivated` and `scouts.verified`.
 If you only want to re-process events from a specific ledger (partial replay),
 replace `0` with the desired starting ledger sequence number.
 
@@ -204,7 +263,9 @@ replace `0` with the desired starting ledger sequence number.
 - [ ] Run `./scripts/deploy.sh mainnet`
 - [ ] Run `./scripts/initialize.sh mainnet`
 - [ ] Verify all contract IDs in `.env.contracts`
+- [ ] **Run `./scripts/full-readiness-check.sh mainnet`** — confirms all four contracts are healthy and all five wiring links are set (recommended one-command post-deploy check)
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
+- [ ] Review [docs/STORAGE_COST_MODEL.md](STORAGE_COST_MODEL.md) and confirm the projected monthly storage rent is within budget at expected launch-day scale. Re-measure rent figures if the Stellar fee schedule has changed since the document's last-reviewed date.
 
 ## Upgrading a Deployed Contract
 
@@ -318,6 +379,10 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 ### Address migration (new contract ID)
 
+> **See [`docs/MIGRATION_GAPS.md`](MIGRATION_GAPS.md) for the canonical per-category
+> list of what can and cannot be automatically migrated, including in-flight milestone
+> disputes and other gaps not covered in this section.**
+
 If a bug cannot be fixed via `upgrade()` (e.g. the storage layout must change in a way that requires a fresh deploy), you must migrate to a new contract address. This is a breaking change — all clients and the off-chain indexer must be updated.
 
 This is the highest-risk operation in the deployment lifecycle, so most of it is
@@ -360,6 +425,8 @@ of an authorization asymmetry between the two data categories:
 - **Players and scouts — replayed via admin-only seeding entrypoints.** The replay script now exports the player and scout payloads (via `get_player_count()`/`get_player(id)` and `get_scout_count()`/`get_scout(id)`) to timestamped JSON files under `migration-export/` and then calls `registration.admin_seed_player(...)` / `registration.admin_seed_scout(...)` on the new contract, signed by `DEPLOYER_SECRET`. This avoids the wallet-auth requirement of `register_player` / `register_scout` while preserving the full profile state.
 
   > Note on levels: the registration contract does **not** store a player's level — the progress contract is the source of truth (`resolve_level` / `set_player_level`). The exported `PlayerProfile` already carries the `level` field resolved from the old progress contract, so it is captured in the export and re-seeded through `admin_seed_player`.
+
+- **In-flight milestone disputes — not replayed today.** `scripts/replay-state.sh` currently exports and replays validators, players, scouts, and player level data only. Milestone disputes filed on the old verification contract but not yet resolved are not part of the replay export, so operators must treat open disputes as a known migration gap and handle them manually during cutover.
 
 #### Testing a migration against the local sandbox
 

@@ -1,6 +1,36 @@
 pub use scoutchain_shared_types::ContractHealth;
 use soroban_sdk::{contracttype, Address, String, Vec};
 
+/// Convenience aggregate returned by `get_validator_activity_report`.
+///
+/// Bundles the data from four individual queries into one call:
+/// - `get_validator`               → credentials, registered_at, active
+/// - `get_validator_status`        → status
+/// - `get_validator_milestone_count` → milestone_count
+/// - `get_validator_players`       → distinct_players (and distinct_player_count)
+///
+/// This is a pure read-only aggregate — no new storage or business logic.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ValidatorActivityReport {
+    /// Validator wallet address.
+    pub wallet: Address,
+    /// Human-readable credential label set at registration time.
+    pub credentials: String,
+    /// Unix timestamp (seconds) when the validator was registered.
+    pub registered_at: u64,
+    /// Whether the validator is currently active.
+    pub active: bool,
+    /// Richer status distinguishing Active / Revoked / RevokedForCause / NotRegistered.
+    pub status: ValidatorStatus,
+    /// Total number of milestones approved by this validator across all players.
+    pub milestone_count: u32,
+    /// Number of distinct players for whom this validator has approved at least one milestone.
+    pub distinct_player_count: u32,
+    /// List of distinct player IDs (same data as `get_validator_players`).
+    pub distinct_players: Vec<u64>,
+}
+
 /// Richer validator status — distinguishes unregistered from revoked.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +80,11 @@ pub struct Validator {
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
+    /// Optional specialization tags (e.g. "physical-stats", "identity-kyc", "match-performance").
+    /// When a milestone category is provided to `approve_milestone`, only validators with a
+    /// matching specialization tag can approve it. An empty Vec means the validator can approve
+    /// any untagged (general-category) milestone but cannot approve tagged milestones.
+    pub specializations: Vec<String>,
 }
 
 /// Entry in the global milestone index for on-chain auditability.
@@ -108,6 +143,8 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for approve_milestone (independent of whole-contract Paused)
+    PausedApproveMilestone,
     ProgressContract,
     ProgressContractSet,
     Validator(Address),
@@ -125,9 +162,17 @@ pub enum DataKey {
     MilestoneDispute(u64, u32),
     ActiveValidatorCount,
     TotalValidatorCount,
-    /// Evidence hash → bool for global uniqueness check.
+    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
     EvidenceUsed(String),
     ValidatorMilestones(Address),
     ActiveDisputesCount,
     ValidatorRevokedForCause(Address),
+    /// Per-player list of milestone indices that have been disputed.
+    /// player_id → Vec<u32> of milestone_index values.
+    /// Updated on `dispute_milestone`.
+    PlayerDisputes(u64),
+    /// Persistent global index of currently-unresolved (player_id, milestone_index) pairs.
+    /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
+    /// Exposed via `list_disputes_page(offset, limit)`.
+    OpenDisputeIndex,
 }

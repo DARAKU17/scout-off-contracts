@@ -88,7 +88,313 @@ where
     Ok(admin)
 }
 
-/// Validate that a string is a plausible IPFS/Arweave CID.
+/// Safe (checked) arithmetic helpers shared across all four contracts.
+///
+/// # Design rationale
+///
+/// Every contract previously repeated the same `.checked_add(x).ok_or(ContractError::Overflow)?`
+/// pattern independently. This module centralises the pattern so:
+///
+/// - There is a single place to audit all overflow-sensitive arithmetic.
+/// - Property-based boundary tests live here, proving no call site can panic or
+///   silently wrap for any input.
+/// - Each contract maps the shared `ArithmeticError` to its own typed error
+///   with a one-liner (see `impl From<ArithmeticError> for MyError` in each
+///   contract, or use `safe_add_u32(a, b).map_err(|_| MyError::Overflow)?`).
+///
+/// # Covered types
+///
+/// | Type | Operations |
+/// |------|-----------|
+/// | `u32` | `safe_add_u32`, `safe_sub_u32` |
+/// | `u64` | `safe_add_u64`, `safe_sub_u64` |
+/// | `i128` | `safe_add_i128`, `safe_sub_i128`, `safe_mul_i128` |
+///
+/// # Usage
+///
+/// ```ignore
+/// use scoutchain_shared_types::safe_math::{safe_add_u32, safe_add_i128};
+///
+/// // In a contract function:
+/// let next_count = safe_add_u32(current_count, 1)
+///     .map_err(|_| MyError::Overflow)?;
+///
+/// let new_fees = safe_add_i128(accumulated, payment_amount)
+///     .map_err(|_| MyError::Overflow)?;
+/// ```
+pub mod safe_math {
+    /// Returned when a checked-arithmetic operation overflows or underflows.
+    /// Map this to your contract's own Overflow error variant at the call site.
+    #[derive(Debug, PartialEq)]
+    pub struct ArithmeticError;
+
+    // ── u32 ──────────────────────────────────────────────────────────────────
+
+    /// Checked addition for `u32`. Returns `ArithmeticError` on overflow.
+    #[inline]
+    pub fn safe_add_u32(a: u32, b: u32) -> Result<u32, ArithmeticError> {
+        a.checked_add(b).ok_or(ArithmeticError)
+    }
+
+    /// Checked subtraction for `u32`. Returns `ArithmeticError` on underflow.
+    #[inline]
+    pub fn safe_sub_u32(a: u32, b: u32) -> Result<u32, ArithmeticError> {
+        a.checked_sub(b).ok_or(ArithmeticError)
+    }
+
+    // ── u64 ──────────────────────────────────────────────────────────────────
+
+    /// Checked addition for `u64`. Returns `ArithmeticError` on overflow.
+    #[inline]
+    pub fn safe_add_u64(a: u64, b: u64) -> Result<u64, ArithmeticError> {
+        a.checked_add(b).ok_or(ArithmeticError)
+    }
+
+    /// Checked subtraction for `u64`. Returns `ArithmeticError` on underflow.
+    #[inline]
+    pub fn safe_sub_u64(a: u64, b: u64) -> Result<u64, ArithmeticError> {
+        a.checked_sub(b).ok_or(ArithmeticError)
+    }
+
+    // ── i128 ─────────────────────────────────────────────────────────────────
+
+    /// Checked addition for `i128`. Returns `ArithmeticError` on overflow.
+    ///
+    /// This is the primary helper for stroop fee-accumulation paths in
+    /// `scout_access` — the highest-financial-risk arithmetic in the codebase.
+    #[inline]
+    pub fn safe_add_i128(a: i128, b: i128) -> Result<i128, ArithmeticError> {
+        a.checked_add(b).ok_or(ArithmeticError)
+    }
+
+    /// Checked subtraction for `i128`. Returns `ArithmeticError` on underflow.
+    #[inline]
+    pub fn safe_sub_i128(a: i128, b: i128) -> Result<i128, ArithmeticError> {
+        a.checked_sub(b).ok_or(ArithmeticError)
+    }
+
+    /// Checked multiplication for `i128`. Returns `ArithmeticError` on overflow.
+    ///
+    /// Used in `batch_contact_players` to compute `contact_fee * new_contacts`.
+    #[inline]
+    pub fn safe_mul_i128(a: i128, b: i128) -> Result<i128, ArithmeticError> {
+        a.checked_mul(b).ok_or(ArithmeticError)
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    pub mod tests {
+        use super::*;
+
+        // ── u32 boundary-value suite ─────────────────────────────────────────
+
+        #[test]
+        fn u32_add_zero_identity() {
+            assert_eq!(safe_add_u32(0, 0), Ok(0));
+            assert_eq!(safe_add_u32(u32::MAX, 0), Ok(u32::MAX));
+            assert_eq!(safe_add_u32(0, u32::MAX), Ok(u32::MAX));
+        }
+
+        #[test]
+        fn u32_add_overflow_returns_err() {
+            assert_eq!(safe_add_u32(u32::MAX, 1), Err(ArithmeticError));
+            assert_eq!(safe_add_u32(u32::MAX, u32::MAX), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn u32_add_just_below_max() {
+            assert_eq!(safe_add_u32(u32::MAX - 1, 1), Ok(u32::MAX));
+        }
+
+        #[test]
+        fn u32_sub_zero_identity() {
+            assert_eq!(safe_sub_u32(0, 0), Ok(0));
+            assert_eq!(safe_sub_u32(u32::MAX, 0), Ok(u32::MAX));
+        }
+
+        #[test]
+        fn u32_sub_underflow_returns_err() {
+            assert_eq!(safe_sub_u32(0, 1), Err(ArithmeticError));
+            assert_eq!(safe_sub_u32(0, u32::MAX), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn u32_sub_just_above_zero() {
+            assert_eq!(safe_sub_u32(1, 1), Ok(0));
+        }
+
+        // ── u64 boundary-value suite ─────────────────────────────────────────
+
+        #[test]
+        fn u64_add_zero_identity() {
+            assert_eq!(safe_add_u64(0, 0), Ok(0));
+            assert_eq!(safe_add_u64(u64::MAX, 0), Ok(u64::MAX));
+        }
+
+        #[test]
+        fn u64_add_overflow_returns_err() {
+            assert_eq!(safe_add_u64(u64::MAX, 1), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn u64_add_just_below_max() {
+            assert_eq!(safe_add_u64(u64::MAX - 1, 1), Ok(u64::MAX));
+        }
+
+        #[test]
+        fn u64_sub_underflow_returns_err() {
+            assert_eq!(safe_sub_u64(0, 1), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn u64_sub_just_above_zero() {
+            assert_eq!(safe_sub_u64(1, 1), Ok(0));
+        }
+
+        // ── i128 boundary-value suite ─────────────────────────────────────────
+
+        #[test]
+        fn i128_add_zero_identity() {
+            assert_eq!(safe_add_i128(0, 0), Ok(0));
+            assert_eq!(safe_add_i128(i128::MAX, 0), Ok(i128::MAX));
+            assert_eq!(safe_add_i128(i128::MIN, 0), Ok(i128::MIN));
+        }
+
+        #[test]
+        fn i128_add_overflow_returns_err() {
+            assert_eq!(safe_add_i128(i128::MAX, 1), Err(ArithmeticError));
+            assert_eq!(safe_add_i128(i128::MAX, i128::MAX), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn i128_add_underflow_returns_err() {
+            assert_eq!(safe_add_i128(i128::MIN, -1), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn i128_add_just_below_max() {
+            assert_eq!(safe_add_i128(i128::MAX - 1, 1), Ok(i128::MAX));
+        }
+
+        #[test]
+        fn i128_sub_zero_identity() {
+            assert_eq!(safe_sub_i128(0, 0), Ok(0));
+            assert_eq!(safe_sub_i128(i128::MIN, 0), Ok(i128::MIN));
+        }
+
+        #[test]
+        fn i128_sub_underflow_returns_err() {
+            assert_eq!(safe_sub_i128(i128::MIN, 1), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn i128_sub_overflow_returns_err() {
+            // MIN - (-1) would overflow positively
+            assert_eq!(safe_sub_i128(i128::MIN, -1), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn i128_mul_zero_absorbs() {
+            assert_eq!(safe_mul_i128(i128::MAX, 0), Ok(0));
+            assert_eq!(safe_mul_i128(0, i128::MAX), Ok(0));
+        }
+
+        #[test]
+        fn i128_mul_overflow_returns_err() {
+            assert_eq!(safe_mul_i128(i128::MAX, 2), Err(ArithmeticError));
+            assert_eq!(safe_mul_i128(i128::MAX, i128::MAX), Err(ArithmeticError));
+        }
+
+        #[test]
+        fn i128_mul_just_fits() {
+            // 2^63 * 2^63 = 2^126 < i128::MAX (2^127 - 1), so this fits.
+            let a: i128 = 1_i128 << 63;
+            let b: i128 = 1_i128 << 63;
+            assert!(safe_mul_i128(a, b).is_ok());
+        }
+
+        #[test]
+        fn i128_mul_negative_positive() {
+            assert_eq!(safe_mul_i128(-1, i128::MIN), Err(ArithmeticError));
+            assert_eq!(safe_mul_i128(-1, i128::MAX), Ok(i128::MIN + 1));
+        }
+
+        // ── Property-style exhaustive small-value tests ───────────────────────
+        // These iterate over every combination in a small range to prove that
+        // no call can panic and that overflow is always detected.
+
+        #[test]
+        fn u32_add_exhaustive_small_range_no_panic() {
+            let values: &[u32] = &[0, 1, 2, u32::MAX - 1, u32::MAX];
+            for &a in values {
+                for &b in values {
+                    // Must not panic — only Ok or Err allowed.
+                    let _ = safe_add_u32(a, b);
+                }
+            }
+        }
+
+        #[test]
+        fn u64_add_exhaustive_small_range_no_panic() {
+            let values: &[u64] = &[0, 1, 2, u64::MAX - 1, u64::MAX];
+            for &a in values {
+                for &b in values {
+                    let _ = safe_add_u64(a, b);
+                }
+            }
+        }
+
+        #[test]
+        fn i128_all_ops_exhaustive_no_panic() {
+            let values: &[i128] = &[
+                i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX,
+            ];
+            for &a in values {
+                for &b in values {
+                    let _ = safe_add_i128(a, b);
+                    let _ = safe_sub_i128(a, b);
+                    let _ = safe_mul_i128(a, b);
+                }
+            }
+        }
+
+        // ── Fee-accumulation scenario tests (scout_access domain) ────────────
+
+        #[test]
+        fn fee_accumulation_typical_stroop_amounts() {
+            // 1 XLM = 10_000_000 stroops. Typical subscription fee ≤ 70 XLM.
+            let elite_fee_stroops: i128 = 70_000_000;
+            let contact_fee_stroops: i128 = 1_000_000; // 0.1 XLM
+            let max_contacts: i128 = 10_000;
+
+            // contact_fee * max_contacts should not overflow
+            let batch_total = safe_mul_i128(contact_fee_stroops, max_contacts);
+            assert!(batch_total.is_ok());
+
+            // Accumulating lots of fees should stay well within i128 range
+            let large_total = safe_mul_i128(elite_fee_stroops, 1_000_000_000);
+            assert!(large_total.is_ok());
+
+            // Accumulating subscription + contact fees
+            let accumulated = safe_add_i128(elite_fee_stroops, contact_fee_stroops);
+            assert_eq!(accumulated, Ok(71_000_000));
+        }
+
+        #[test]
+        fn counter_increment_typical() {
+            // Counters (player count, validator count, milestone count) are u32.
+            // Simulated: increment from near-max won't silently wrap.
+            let near_max = u32::MAX - 5;
+            for i in 0u32..5 {
+                assert!(safe_add_u32(near_max + i, 1).is_ok());
+            }
+            assert_eq!(safe_add_u32(u32::MAX, 1), Err(ArithmeticError));
+        }
+    }
+}
+
+
 ///
 /// Rules:
 /// - CIDv0: starts with "Qm", exactly 46 characters, base58btc charset
@@ -171,6 +477,14 @@ mod tests {
 
     fn s(env: &Env, v: &str) -> String {
         String::from_str(env, v)
+    }
+
+    #[test]
+    fn progress_level_ordinals_match_documented_table() {
+        assert_eq!(ProgressLevel::Unverified as u32, 0);
+        assert_eq!(ProgressLevel::VerifiedIdentity as u32, 1);
+        assert_eq!(ProgressLevel::PerformanceMilestones as u32, 2);
+        assert_eq!(ProgressLevel::EliteTier as u32, 3);
     }
 
     #[test]

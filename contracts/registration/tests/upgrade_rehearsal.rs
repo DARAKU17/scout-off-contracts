@@ -194,7 +194,7 @@ fn test_registration_upgrade_preserves_state() {
     assert_eq!(p1_before.wallet, s.p1_wallet);
     assert_eq!(p1_before.level, ProgressLevel::VerifiedIdentity); // instance link resolves live
     assert_eq!(p2_before.level, ProgressLevel::Unverified);
-    assert!(scout_before.verified);
+    assert!(scout_before.verification.verified);
     assert_eq!(player_count, 2);
     assert_eq!(scout_count, 1);
     assert!(health.initialized && !health.paused);
@@ -226,7 +226,7 @@ fn test_registration_upgrade_preserves_state() {
     assert_eq!(scout_after.scout_id, scout_before.scout_id);
     assert_eq!(scout_after.wallet, scout_before.wallet);
     assert_eq!(scout_after.region, s.scout_region);
-    assert!(scout_after.verified);
+    assert!(scout_after.verification.verified);
 
     // --- Assert: instance flags / counters survived (Initialized/Paused rows) ---
     assert_eq!(h.registration.health(), health);
