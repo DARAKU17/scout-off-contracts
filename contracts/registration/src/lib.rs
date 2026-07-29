@@ -42,6 +42,7 @@ const MAX_BATCH_SIZE: u32 = 20;
 /// Maximum plausible age for a registered player. Ages above this value are
 /// rejected as implausible to prevent corrupt entries in discovery filters.
 const MAX_PLAYER_AGE: u32 = 100;
+const MAX_PLAYERS: u64 = 10_000;
 
 /// Minimum scoutable age for player registration.
 /// Players younger than this age cannot be registered on the platform.
@@ -379,6 +380,17 @@ impl RegistrationContract {
             .has(&DataKey::PlayerByWallet(wallet.clone()))
         {
             return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        // Enforce player cap to bound filter_players slow-path scan cost.
+        let player_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .map(|v: Vec<u64>| v.len() as u64)
+            .unwrap_or(0);
+        if player_count >= MAX_PLAYERS {
+            return Err(ScoutChainError::PlayerCapReached);
         }
 
         // Validate player age: must be at least MIN_PLAYER_AGE

@@ -1,0 +1,18 @@
+[package]
+name = "scoutchain-chaos-tests"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+scoutchain-registration = { path = "../registration" }
+scoutchain-verification = { path = "../verification" }
+scoutchain-progress = { path = "../progress" }
+scoutchain-scout-access = { path = "../scout_access" }
+scoutchain-shared-types = { path = "../shared-types" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

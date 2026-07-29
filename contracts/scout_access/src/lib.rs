@@ -1203,11 +1203,17 @@ impl ScoutAccessContract {
         Ok(next_index)
     }
     /// Confirm a previously logged trial offer. Called by the player (or validator) to release escrow and advance level.
+    ///
+    /// `idempotency_nonce` is an optional caller-supplied token. If provided and
+    /// the nonce has already been processed, the function returns `Ok(())`
+    /// without replaying escrow cleanup or level advancement. This makes
+    /// retries after `ProgressCallFailed` safe.
     pub fn confirm_trial_offer(
         env: Env,
         player_wallet: Address,
         player_id: u64,
         index: u32,
+        idempotency_nonce: Option<String>,
     ) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
@@ -1250,6 +1256,17 @@ impl ScoutAccessContract {
             return Err(ScoutAccessError::TrialOfferExpired);
         }
 
+        // Idempotency check: if the caller supplied a nonce and it has already
+        // been processed, return success without replaying escrow cleanup or
+        // level advancement.
+        if let Some(ref nonce) = idempotency_nonce {
+            let nonce_key = DataKey::ConfirmationNonce(nonce.clone());
+            if env.storage().persistent().has(&nonce_key) {
+                return Ok(());
+            }
+        }
+
+        // Cross-contract call: advance the player's progress level.
         // Maintain bounded enumeration index for sweep operations.
         Self::trial_escrow_index_insert(&env, player_id, next_index);
 
@@ -1282,6 +1299,17 @@ impl ScoutAccessContract {
                 events::progress_call_failed(&env, player_id, code);
                 return Err(ScoutAccessError::ProgressCallFailed);
             }
+        }
+
+        // Persist idempotency nonce after successful level advancement so that
+        // a retry after ProgressCallFailed can safely detect the offer was
+        // already confirmed.
+        if let Some(ref nonce) = idempotency_nonce {
+            let nonce_key = DataKey::ConfirmationNonce(nonce.clone());
+            env.storage().persistent().set(&nonce_key, &());
+            env.storage()
+                .persistent()
+                .extend_ttl(&nonce_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         }
 
         // Cleanup escrow after successful confirmation
