@@ -109,7 +109,7 @@ pub struct PlayerSummary {
 pub struct FilterResult {
     /// Page of player profiles matching the supplied filter criteria.
     pub profiles: Vec<PlayerProfile>,
-    /// Pass this value as `cursor` in the next call to continue pagination.
+    /// Pass this value as `offset` in the next call to continue pagination.
     /// A value of `0` means there are no further results.
     pub next_cursor: u64,
 }
