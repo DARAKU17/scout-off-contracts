@@ -1,0 +1,3 @@
+# Validator authorization is a platform trust anchor. Keep this owner in sync
+# with the repository's authorized validator-logic reviewers.
+/contracts/verification/ @Petah1
