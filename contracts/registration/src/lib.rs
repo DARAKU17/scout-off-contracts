@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, StoredPlayerProfile,
+    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated
@@ -16,6 +16,7 @@ pub use types::PlayerVitals;
 
 use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::crypto::sha256;
 
 // Generated client stub for the progress contract — used to resolve a player's
 // current level at read time.  `level` is never stored in this contract.
@@ -63,8 +64,10 @@ const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 518_400;
 const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
-// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+/// Default registration cooldown: 24 hours in seconds.
+/// Applies to register_player, register_scout, and register_validator.
+/// Configurable by admin via `set_reg_cooldown`.  0 disables the cooldown.
+const DEFAULT_REG_COOLDOWN_SECS: u64 = 86_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -362,6 +365,14 @@ impl RegistrationContract {
         Self::require_initialized(&env)?;
         wallet.require_auth();
 
+        // Per-caller cooldown: reject rapid re-registration attempts from the
+        // same wallet.  The cooldown protects against sybil registrations where
+        // a set of freshly-generated wallets spam the entrypoint.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+        )?;
+
         // Prevent duplicate registrations
         if env
             .storage()
@@ -451,6 +462,17 @@ impl RegistrationContract {
             player_id,
         );
         Self::level_index_add(&env, &ProgressLevel::Unverified, player_id);
+
+        // Record cooldown timestamp so a repeated attempt from the same wallet
+        // within the cooldown window is rejected.
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         events::player_registered(&env, player_id, &wallet);
         Ok(player_id)
@@ -561,6 +583,12 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
+        // Per-caller cooldown: same pattern as register_player.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+        )?;
+
         if env
             .storage()
             .persistent()
@@ -570,6 +598,7 @@ impl RegistrationContract {
         }
 
         let scout_id = Self::next_scout_id(&env)?;
+        let now = env.ledger().timestamp();
         let profile = ScoutProfile {
             scout_id,
             wallet: wallet.clone(),
@@ -595,6 +624,16 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
+
+        // Record cooldown timestamp.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         events::scout_registered(&env, scout_id, &wallet);
         Ok(scout_id)
@@ -712,6 +751,240 @@ impl RegistrationContract {
     }
 
     // -------------------------------------------------------------------------
+    // Migration ticket protocol
+    // -------------------------------------------------------------------------
+
+    /// Redeem a player migration authorization signed by the player off-chain.
+    ///
+    /// A relayer with no player private key can call this function to recreate
+    /// a player's profile on a freshly deployed contract. The function verifies
+    /// the player's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Player=0) || profile_data_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_player(
+        env: Env,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        level: ProgressLevel,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Player {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile_data_hash = Self::profile_data_hash(&env, &wallet, &vitals, &ipfs_hashes, player_id, registered_at, updated_at);
+        if authorization.profile_data_hash != profile_data_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
+            &true,
+        );
+
+        let result = Self::admin_seed_player(&env, wallet, vitals, ipfs_hashes, level, player_id, registered_at, updated_at);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Player, player_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Redeem a scout migration authorization signed by the scout off-chain.
+    ///
+    /// A relayer with no scout private key can call this function to recreate
+    /// a scout's profile on a freshly deployed contract. The function verifies
+    /// the scout's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Scout=1) || region_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_scout(
+        env: Env,
+        wallet: Address,
+        region: String,
+        scout_id: u64,
+        registered_at: u64,
+        verified: bool,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Scout {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let region_hash = Self::region_hash(&env, &region);
+        if authorization.profile_data_hash != region_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
+            &true,
+        );
+
+        let result = Self::admin_seed_scout(&env, wallet, region, scout_id, registered_at, verified);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Scout, scout_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Compute a hash of the player profile data for migration authorization.
+    fn profile_data_hash(
+        env: &Env,
+        wallet: &Address,
+        vitals: &PlayerVitals,
+        ipfs_hashes: &Vec<String>,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+    ) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in wallet.to_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.age.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.position.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.nationality.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for hash in ipfs_hashes.iter() {
+            for b in hash.as_bytes() {
+                hasher.update(&[b]);
+            }
+        }
+        for b in player_id.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in registered_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in updated_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Compute a hash of the scout profile data for migration authorization.
+    fn region_hash(env: &Env, region: &String) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Construct the canonical message that a player/scout signs for migration.
+    fn migration_message(env: &Env, auth: &MigrationAuthorization) -> Vec<u8> {
+        let mut msg = Vec::new(env);
+        for b in auth.wallet.to_bytes() {
+            msg.push_back(b);
+        }
+        let role_byte = match auth.role {
+            MigrationRole::Player => 0u8,
+            MigrationRole::Scout => 1u8,
+        };
+        msg.push_back(role_byte);
+        for b in &auth.profile_data_hash {
+            msg.push_back(*b);
+        }
+        for b in auth.new_contract_hint.to_bytes() {
+            msg.push_back(b);
+        }
+        for b in auth.nonce.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        for b in auth.expires_at.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        msg
+    }
+
+    /// Derive an ed25519 public key from a wallet address.
+    ///
+    /// Soroban Ed25519 addresses encode the public key starting at byte 1
+    /// (byte 0 is the type discriminator).
+    fn address_to_ed25519(env: &Env, address: &Address) -> [u8; 32] {
+        let bytes = address.to_bytes();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes.0[1..33]);
+        key
+    }
+
+    /// Convert a Vec<u8> signature into a fixed-size [u8; 64] array.
+    fn vec_to_signature(sig: Vec<u8>) -> [u8; 64] {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&sig);
+        arr
+    }
+
+    // -------------------------------------------------------------------------
     // Queries
     // -------------------------------------------------------------------------
 
@@ -766,6 +1039,31 @@ impl RegistrationContract {
             Ok(PlayerStatus::Deactivated)
         } else {
             Ok(PlayerStatus::Active)
+        }
+    }
+
+    /// Return the current status of a scout account.
+    ///
+    /// - `Active`      — scout exists and has not been deactivated.
+    /// - `Deactivated` — scout exists but has been soft-deactivated by admin.
+    /// - `NotRegistered` — no scout profile found for the given `scout_id`.
+    pub fn get_scout_status(env: Env, scout_id: u64) -> ScoutStatus {
+        let exists = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id));
+        if !exists {
+            return ScoutStatus::NotRegistered;
+        }
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ScoutDeactivated(scout_id))
+            .unwrap_or(false)
+        {
+            ScoutStatus::Deactivated
+        } else {
+            ScoutStatus::Active
         }
     }
 
@@ -1066,6 +1364,38 @@ impl RegistrationContract {
             .unwrap_or(false)
         {
             return Err(ScoutChainError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Enforce the per-caller registration cooldown.
+    ///
+    /// Reads the last-sent timestamp stored under `last_sent_key`.  If a
+    /// timestamp is present and the current ledger time is before
+    /// `last_sent + cooldown_secs`, returns `RegistrationCooldown`.
+    /// A cooldown of 0 disables the check entirely.
+    fn enforce_reg_cooldown(env: &Env, last_sent_key: &DataKey) -> Result<(), ScoutChainError> {
+        let cooldown_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegCooldownSecs(0))
+            .unwrap_or(DEFAULT_REG_COOLDOWN_SECS);
+
+        if cooldown_secs == 0 {
+            return Ok(());
+        }
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(last_sent_key)
+        {
+            let next_allowed =
+                safe_add_u64(last_sent, cooldown_secs).map_err(|_| ScoutChainError::Overflow)?;
+            if now < next_allowed {
+                return Err(ScoutChainError::RegistrationCooldown);
+            }
         }
         Ok(())
     }

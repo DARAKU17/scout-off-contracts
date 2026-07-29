@@ -95,6 +95,16 @@ const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 // carry the same lifetime significance as identity records, so they follow their own (longer than default but reasonable) schedule.
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
+const PERSISTENT_TTL_MIN: u32 = 1_000;
+const PERSISTENT_TTL_MAX: u32 = 2_000;
+
+mod progress_contract {
+    use scoutchain_shared_types::ProgressLevel;
+
+    soroban_sdk::contractimport!(
+        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
+    );
+}
 
 // #795: upper bound on how many OutstandingTrialEscrows entries
 // expire_trial_offers will examine in a single call, so a large backlog
@@ -769,7 +779,7 @@ impl ScoutAccessContract {
         let limit = config.pro_contact_limit;
 
         if current.saturating_add(requested) > limit {
-            return Err(ScoutAccessError::ContactQuotaExceeded);
+            return Err(ScoutAccessError::ProContactLimitReached);
         }
 
         Ok(())

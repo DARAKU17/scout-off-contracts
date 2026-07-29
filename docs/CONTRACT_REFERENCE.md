@@ -536,6 +536,62 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- version
 
 ---
 
+#### `redeem_migration_player(wallet: Address, vitals: PlayerVitals, ipfs_hashes: Vec<String>, level: ProgressLevel, player_id: u64, registered_at: u64, updated_at: u64, authorization: MigrationAuthorization) -> Result<u64, ScoutChainError>`
+
+Redeem an off-chain signed migration authorization to recreate a player profile
+on a freshly deployed contract. A relayer with no player private key can call
+this function; the player's ed25519 signature over the canonical authorization
+message serves as proof of consent.
+
+The signed message covers: `wallet || role(Player=0) || profile_data_hash || new_contract_hint || nonce || expires_at`. The same nonce cannot be reused (replay protection).
+
+| | |
+|---|---|
+| **Auth** | None (signature-based authorization) |
+| **Errors** | `NotInitialized` · `ContractPaused` · `InvalidInput` (bad signature, expired, wrong role, mismatched hash, or replayed nonce) · `PlayerNotFound` (if player already exists) · `AlreadyRegistered` |
+
+```bash
+stellar contract invoke --id $NEW_REGISTRATION_CONTRACT_ID \
+  -- redeem_migration_player \
+  --wallet $PLAYER_ADDRESS \
+  --vitals '{"age":20,"position":"Forward","region":"West Africa","nationality":"Ghana"}' \
+  --ipfs_hashes '["QmHighlightCID"]' \
+  --level Unverified \
+  --player_id 1 \
+  --registered_at 1700000000 \
+  --updated_at 1700000000 \
+  --authorization '{"wallet":"$PLAYER_ADDRESS","role":"Player","profile_data_hash":"<sha256>","new_contract_hint":"$NEW_CONTRACT_ID","nonce":1,"expires_at":0,"signature":"<base64>"}'
+```
+
+---
+
+#### `redeem_migration_scout(wallet: Address, region: String, scout_id: u64, registered_at: u64, verified: bool, authorization: MigrationAuthorization) -> Result<u64, ScoutChainError>`
+
+Redeem an off-chain signed migration authorization to recreate a scout profile
+on a freshly deployed contract. A relayer with no scout private key can call
+this function; the scout's ed25519 signature over the canonical authorization
+message serves as proof of consent.
+
+The signed message covers: `wallet || role(Scout=1) || region_hash || new_contract_hint || nonce || expires_at`.
+
+| | |
+|---|---|
+| **Auth** | None (signature-based authorization) |
+| **Errors** | `NotInitialized` · `ContractPaused` · `InvalidInput` (bad signature, expired, wrong role, mismatched hash, or replayed nonce) · `ScoutNotFound` (if scout already exists) · `AlreadyRegistered` |
+
+```bash
+stellar contract invoke --id $NEW_REGISTRATION_CONTRACT_ID \
+  -- redeem_migration_scout \
+  --wallet $SCOUT_ADDRESS \
+  --region '"West Africa"' \
+  --scout_id 1 \
+  --registered_at 1700000000 \
+  --verified false \
+  --authorization '{"wallet":"$SCOUT_ADDRESS","role":"Scout","profile_data_hash":"<sha256>","new_contract_hint":"$NEW_CONTRACT_ID","nonce":1,"expires_at":0,"signature":"<base64>"}'
+```
+
+---
+
 ### Dual-Role Wallet Policy
 
 A single wallet may register as both a player and a scout. Cross-role
@@ -780,6 +836,102 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `register_validator_with_attestation(wallet: Address, attestation: CredentialAttestation) -> Result<(), VerificationError>`
+
+Register a validator with a cryptographically verified credential attestation. The
+`attestation` must contain a valid ed25519 signature produced by a trusted issuer
+over the structured claim `(validator_wallet || credential_type || expires_at)`.
+The issuer's public key is derived from their registered wallet address.
+
+This path requires the issuer to be pre-registered in the issuer registry (via
+`register_issuer`). If the issuer is not yet onboarded, use the legacy
+`register_validator` admin-vouched path instead.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NotInitialized` · `ContractPaused` · `InvalidInput` · `CredentialExpired` · `UntrustedIssuer` · `InvalidAttestation` · `ValidatorAlreadyRegistered` · `ValidatorCapReached` · `Overflow` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- register_validator_with_attestation \
+  --wallet $VALIDATOR_ADDRESS \
+  --attestation '{"validator_wallet":"$ISSUER_ADDRESS","credential_type":"UEFA B License","expires_at":0,"signature":"<base64>"}'
+```
+
+---
+
+#### `register_issuer(wallet: Address, name: String) -> Result<(), VerificationError>`
+
+Register a trusted credential issuer (e.g. a football federation) authorized to
+sign validator attestation claims. The issuer's wallet address serves as their
+ed25519 public key identifier.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `NotInitialized` · `ContractPaused` · `InvalidInput` · `IssuerCapReached` (20-issuer limit) · `IssuerAlreadyRegistered` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- register_issuer \
+  --wallet $ISSUER_ADDRESS \
+  --name '"Football Federation"'
+```
+
+---
+
+#### `revoke_issuer(wallet: Address) -> Result<(), VerificationError>`
+
+Deactivate an issuer. Revoked issuers cannot sign new attestations; existing
+attestations remain valid.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `Unauthorized` · `IssuerNotFound` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- revoke_issuer --wallet $ISSUER_ADDRESS
+```
+
+---
+
+#### `get_issuer(wallet: Address) -> Option<Issuer>`
+
+Retrieve an issuer record by wallet address.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
+#### `list_issuers() -> Vec<Address>`
+
+List all registered issuer wallets.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
+#### `get_issuer_count() -> u32`
+
+Return the total number of registered issuers.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
+#### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<u32, VerificationError>`
 #### `approve_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String, milestone_category: Option<String>) -> Result<u32, VerificationError>`
 
 Record a verified milestone for a player. Caller must be a registered, active
@@ -2922,118 +3074,36 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
-#### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
+Manages the trusted validator registry and milestone approvals.
 
-Return the full `ContactRecord` for a `(scout, player_id)` pair, or `None`
-if the scout has never contacted this player.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_contact_record --scout $SCOUT_ADDRESS --player_id 1
-```
-
----
-
-#### `get_player_contacts(player_id: u64) -> Vec<Address>`
-
-Return all scout addresses that have contacted a player, as an O(1) index
-lookup (backed by the `PlayerContacts` persistent storage key).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_player_contacts --player_id 1
-```
-
----
-
-#### `get_player_trial_offers(player_id: u64) -> Vec<TrialOffer>`
-
-Return every trial offer logged for a player, reading the full range from
-the player's `TrialCounter`. Unlike `get_all_trial_offers`, this is not
-capped at 20 entries.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_player_trial_offers --player_id 1
-```
-
----
-
-#### `get_scout_trial_offers(scout: Address) -> Vec<(u64, u32)>`
-
-Return every `(player_id, trial_offer_index)` pair a scout has logged, as
-an O(1) index lookup (backed by the `ScoutTrialOffers` persistent storage
-key).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
-  -- get_scout_trial_offers --scout $SCOUT_ADDRESS
-```
-
----
-
-#### `version() -> String`
-
-Return the deployed contract version string (from `Cargo.toml` at build time).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Errors** | None |
-
-```bash
-stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- version
-```
+| Function | Auth | Description |
+|----------|------|-------------|
+| `initialize(admin)` | admin | One-time setup, including default diversity configuration |
+| `set_progress_contract(progress_contract)` | admin | Wire cross-contract link |
+| `set_diversity_config(min_distinct_affiliations, gated_milestone_index)` | admin | Configure organizational diversity required for level advancement |
+| `register_validator(wallet, credentials, affiliation)` | admin | Add a trusted validator with verified organization affiliation |
+| `revoke_validator(wallet)` | admin | Deactivate validator |
+| `approve_milestone(validator_wallet, player_id, description, evidence_hash)` | validator | Record milestone (with ledger_sequence for audit) + cross-call progress.advance_level |
+| `get_milestone(player_id, index)` | — | Read a specific milestone |
+| `get_milestone_count(player_id)` | — | Total milestones for a player |
+| `get_diversity_config()` | — | Read affiliation diversity rules |
+| `get_player_affiliation_count(player_id)` | — | Count distinct affiliated milestone approvers |
+| `get_validator(wallet)` | — | Read validator record |
+| `is_active_validator(wallet)` | — | Boolean check |
+| `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
+| `health()` | — | Returns true if initialized |
 
 ### Events
 
 | Event | Topics | Data | Description |
 |-------|--------|------|-------------|
-| `contract_initialized` | event_name, admin (Address) | admin (Address) | Emitted on successful initialization |
-| `scout_subscribed` | event_name, scout (Address) | (tier: SubscriptionTier, fee_paid: i128) | Scout purchases a subscription (legacy; emitted alongside `subscription_created` or `subscription_renewed`) |
-| `subscription_created` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout's very first subscription (emitted alongside `scout_subscribed`) |
-| `subscription_renewed` | event_name, scout (Address) | (tier: SubscriptionTier, subscribed_at: u64, expires_at: u64) | Scout renews or upgrades an existing subscription (emitted alongside `scout_subscribed`) |
-| `player_contacted` | event_name, scout (Address) | (player_id: u64, fee_paid: i128) | Scout unlocks player contact details |
-| `trial_offer_logged` | event_name, scout (Address) | player_id (u64) | Elite scout records a trial offer |
-| `trial_offer_confirmed` | event_name, scout (Address) | (player_id: u64, index: u32) | Player confirms a pending trial offer before its expiry window closes; escrow released |
-| `trial_offer_expired` | event_name, scout (Address) | (player_id: u64, index: u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
-| `fees_withdrawn` | event_name, admin (Address) | (to: Address, amount: i128, timestamp: u64) | Admin withdraws accumulated fees |
-| `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
-| `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Admin replacement proposed |
-| `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Admin rights rotated |
-| `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
-| `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
-| `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
-| `fee_config_updated` | event_name, admin (Address) | (old_config: FeeConfig, new_config: FeeConfig) | Fee configuration changed |
-
-#### Diagnostic Events (scout_access)
-
-The following events are emitted from `confirm_trial_offer` when level advancement via the progress contract is skipped or fails.
-
-| Event | Topics | Data | Description |
-|-------|--------|------|-------------|
-| `progress_contract_not_set` | event_name, player_id (u64) | `()` | `confirm_trial_offer` could not advance the player's level because the progress contract address has not been wired. Emitted before returning `InvalidInput`. Indicates missing wiring — alert in production. Committed to the ledger. |
-| `progress_call_failed` | event_name, player_id (u64) | error_code (u32) | Emitted just before `ProgressCallFailed` is returned from `confirm_trial_offer`. Because that error aborts the entire transaction, this event only appears in the **diagnostic stream** (transaction receipt), not in committed ledger events. `error_code` is the raw error discriminant from `try_advance_level`. |
+| `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
+| `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
+| `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+| `milestone_disputed` | event_name, player_id, milestone_index | filer_address, jury_required | Emitted when a dispute is filed |
+| `dispute_vote_cast` | event_name, player_id, milestone_index | validator_address, upheld | Emitted for each jury vote |
+| `dispute_resolved` | event_name, player_id, milestone_index | upheld | Emitted after an admin resolution |
+| `dispute_tallied` | event_name, player_id, milestone_index | upheld, votes_for, votes_against | Emitted after jury finalization |
 
 ---
 
@@ -3322,6 +3392,8 @@ pub struct TrialOffer {
 | 12 | `ScoutNotFound` | Invalid `scout_id` |
 | 13 | `InvalidInput` | Field too long, bad hash count, or empty value |
 | 14 | `PendingAdminNotSet` | `accept_admin` called without a pending proposal |
+| 15 | `InvalidMigrationAuthorization` | Migration authorization signature is invalid or expired |
+| 16 | `MigrationNonceAlreadyUsed` | Migration nonce has already been used (replay detected) |
 
 ### `VerificationError` (verification contract)
 
@@ -3346,6 +3418,13 @@ pub struct TrialOffer {
 | 17 | `MilestoneLimitExceeded` | Validator has already approved 5 milestones for this player |
 | 18 | `DisputeAlreadyResolved` | Dispute was already resolved and cannot be resolved again |
 | 19 | `PendingAdminNotSet` | `accept_admin` called without a pending proposal |
+| 20 | `ApproveMilestonePaused` | `approve_milestone` function is independently paused |
+| 21 | `InvalidAttestation` | The provided attestation signature is invalid or does not match the expected issuer |
+| 22 | `UntrustedIssuer` | The attestation issuer is not registered in the trusted issuer registry |
+| 23 | `CredentialExpired` | The credential claim has expired |
+| 24 | `IssuerCapReached` | The issuer registry limit (20) has been reached; contract upgrade required to raise the cap |
+| 25 | `IssuerAlreadyRegistered` | The issuer is already registered |
+| 26 | `IssuerNotFound` | The issuer was not found in the registry |
 | 20 | `ApproveMilestonePaused` | `approve_milestone` is paused independently of the whole-contract pause |
 | 21 | `SpecializationMismatch` | `milestone_category` supplied to `approve_milestone` but validator is not tagged for that category |
 
@@ -3384,7 +3463,7 @@ pub struct TrialOffer {
 | 15 | `InvalidInput` | Zero or negative fee field in `FeeConfig` |
 | 16 | `NoFeesToWithdraw` | No accumulated fees available to withdraw |
 | 17 | `UpgradeTooSoon` | Subscribe called before minimum interval elapsed |
-| 18 | `ContactQuotaExceeded` | Scout has hit the platform-wide contact quota for the current period (applies to all tiers; enforced by an admin-configurable platform cap, distinct from the per-Pro-scout `pro_contact_limit`) |
+| 18 | `ContactQuotaExceeded` | **DEPRECATED** — slot reserved; callers should use `ProContactLimitReached` (20) for the Pro-tier monthly contact limit condition |
 | 19 | `TrialOfferRateLimited` | Elite scout sent a trial offer to the same player within the cooldown window — the offer was already logged; retry after the cooldown expires |
 | 20 | `ProContactLimitReached` | Pro-tier scout has reached the `pro_contact_limit` contacts for the current subscription period (Elite scouts are exempt from this limit) |
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed via `propose_admin` |
@@ -3426,6 +3505,8 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `validator_revoked` | event_name, admin (Address) | wallet (Address), reason (String) | Validator deactivated |
 | `validator_restored` | event_name, admin (Address) | wallet (Address) | Revoked validator re-activated |
 | `validator_transferred` | event_name, admin (Address) | old_wallet (Address), new_wallet (Address) | Validator identity migrated to new wallet |
+| `issuer_registered` | event_name, issuer_wallet (Address) | issuer_name (String) | New trusted credential issuer onboarded |
+| `issuer_revoked` | event_name, issuer_wallet (Address) | issuer_wallet (Address) | Trusted credential issuer deactivated |
 | `milestone_disputed` | event_name, player_wallet (Address) | player_id (u64), milestone_index (u32), reason (String) | Player disputes a milestone attribution |
 | `dispute_resolved` | event_name, admin (Address) | player_id (u64), milestone_index (u32), upheld (bool) | Admin resolves a milestone dispute |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract address re-wired |
@@ -3514,30 +3595,21 @@ the quota check only runs for *new* contacts.
 
 ---
 
-### 3. `batch_contact_players` vs `pay_to_contact`: different error codes for the same quota limit
+### 3. `batch_contact_players` vs `pay_to_contact`: different error codes for the same quota limit — ✅ RESOLVED
 
-**Current behavior**: `batch_contact_players` returns `ContactQuotaExceeded`
-(18) when the Pro monthly limit would be exceeded, while `pay_to_contact`
-returns `ProContactLimitReached` (20) for the same underlying limit. Both
-enforce `pro_contact_limit` from `FeeConfig` but via different helper
-functions.
+**Resolved in**: v0.2.0 (scout_access). `batch_contact_players` now returns
+`ProContactLimitReached` (20) instead of `ContactQuotaExceeded` (18). Code 18
+is marked reserved/deprecated in `errors.rs`.
 
-**Why this matters for callers**: A frontend must handle two different error
-codes to display the same user-facing message ("You have reached your monthly
-contact limit, please upgrade to Elite or wait for your subscription to
-renew"). This is an accidental inconsistency introduced when `batch_contact_players`
-was added.
+**What changed**: `check_pro_contact_quota_with_count` in
+`contracts/scout_access/src/lib.rs` was updated to return
+`ProContactLimitReached` (20), unifying both call paths on the same error
+code. `ContactQuotaExceeded` (18) is retained in the enum with a deprecation
+doc comment and its slot is reserved to prevent accidental reassignment.
 
-**Recommended fix**: Unify on one error code. The preferred candidate is
-`ProContactLimitReached` (20) because it is the more descriptive name and was
-introduced specifically for this error class. `ContactQuotaExceeded` (18) can
-be deprecated and its slot reserved (see the code-13 reservation pattern
-already in use in `errors.rs`). This requires a contract upgrade and a
-coordinated frontend change.
-
-**Impact**: Any caller or frontend that currently checks for
-`ContactQuotaExceeded` (18) on `batch_contact_players` responses would need to
-be updated after the upgrade.
+**Impact**: Callers that previously matched `ContactQuotaExceeded` (18) from
+`batch_contact_players` must update to `ProContactLimitReached` (20). This is
+a MAJOR breaking change per `docs/VERSIONING.md` (error code removed/renamed).
 
 ---
 

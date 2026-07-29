@@ -47,6 +47,10 @@ pub enum ScoutChainError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 14,
+
+    // ── Rate limiting ──
+    /// Caller attempted to register again before the cooldown period elapsed.
+    RegistrationCooldown = 15,
 }
 
 impl AdminError for ScoutChainError {

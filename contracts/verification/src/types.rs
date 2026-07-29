@@ -1,6 +1,36 @@
 pub use scoutchain_shared_types::ContractHealth;
 use soroban_sdk::{contracttype, Address, String, Vec};
 
+const MAX_ISSUERS: u32 = 20;
+
+/// A trusted credential issuer authorized to sign validator attestation claims.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Issuer {
+    /// Issuer wallet address (also the ed25519 public key holder).
+    pub wallet: Address,
+    /// Human-readable issuer name (e.g. "Football Federation", "UEFA").
+    pub name: String,
+    /// Ledger timestamp when the issuer was registered.
+    pub registered_at: u64,
+    /// Whether this issuer is currently authorized to sign attestations.
+    pub active: bool,
+}
+
+/// A signed credential claim produced by an issuer off-chain.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CredentialAttestation {
+    /// Wallet address of the issuer who signed this attestation.
+    pub issuer_wallet: Address,
+    /// Validator wallet being attested.
+    pub validator_wallet: Address,
+    /// Credential type label (e.g. "UEFA B License").
+    pub credential_type: String,
+    /// Unix timestamp when the credential expires (0 = no expiry).
+    pub expires_at: u64,
+    /// ed25519 signature over (issuer_wallet || validator_wallet || credential_type || expires_at).
+    pub signature: Vec<u8>,
 /// Convenience aggregate returned by `get_validator_activity_report`.
 ///
 /// Bundles the data from four individual queries into one call:
@@ -76,7 +106,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
-    /// Ledger timestamp when the validator was registered, in Unix seconds.
+    /// Admin-verified organization the validator represents.
+    pub affiliation: String,
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
@@ -136,6 +167,16 @@ pub struct MilestoneRef {
     pub milestone_index: u32,
 }
 
+/// Rules that gate level-advancing milestones on independent organizations.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DiversityConfig {
+    /// Minimum number of affiliations required to advance at or above the gate.
+    pub min_distinct_affiliations: u32,
+    /// First milestone index that requires organizational diversity.
+    pub gated_milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -150,38 +191,16 @@ pub enum DataKey {
     Validator(Address),
     MilestoneCounter(u64),
     Milestone(u64, u32),
+    /// registration contract address (cross-contract calls)
+    RegistrationContract,
+    /// progress contract address (cross-contract calls)
+    ProgressContract,
+    /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
-    ValidatorPlayerMilestoneCount(Address, u64),
-    ValidatorVector,
-    /// Active-only validator vector for O(active) get_validators lookups.
-    /// Updated on registration, revocation, and restoration to avoid scanning
-    /// revoked entries. See docs/gas-griefing-audit.md V1.
-    ActiveValidatorVector,
-    TotalMilestoneCount,
-    GlobalMilestoneIndex,
-    /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
-    /// for which that validator has approved at least one milestone.
-    /// Updated on every `approve_milestone` call (duplicates are skipped).
-    ValidatorPlayers(Address),
-    MilestoneDispute(u64, u32),
-    ActiveValidatorCount,
-    TotalValidatorCount,
-    /// Evidence hash → (player_id, milestone_index) for global uniqueness and usage lookup.
-    EvidenceUsed(String),
-    ValidatorMilestones(Address),
-    ActiveDisputesCount,
-    ValidatorRevokedForCause(Address),
-    /// Per-player list of milestone indices that have been disputed.
-    /// player_id → Vec<u32> of milestone_index values.
-    /// Updated on `dispute_milestone`.
-    PlayerDisputes(u64),
-    /// Persistent global index of currently-unresolved (player_id, milestone_index) pairs.
-    /// Populated on `dispute_milestone`, pruned on `resolve_dispute`.
-    /// Exposed via `list_disputes_page(offset, limit)`.
-    OpenDisputeIndex,
-    /// Idempotency nonce for `approve_milestone` retries.
-    /// Maps caller-supplied nonce → milestone_index so a retried call after a
-    /// genuine ProgressCallFailed can safely return the same result without
-    /// creating a duplicate milestone.
-    ApprovalNonce(String),
+    /// Diversity rules for level-advancing milestones.
+    DiversityConfig,
+    /// (player_id, affiliation) → whether that affiliation has approved a milestone.
+    PlayerAffiliationUsed(u64, String),
+    /// player_id → number of distinct affiliations that approved milestones.
+    PlayerAffiliationCount(u64),
 }
