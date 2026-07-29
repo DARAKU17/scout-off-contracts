@@ -53,14 +53,6 @@ pub enum VerificationError {
     ProgressCallFailed = 12,
     /// Milestone counter overflowed.
     Overflow = 13,
-    DisputeAlreadyExists = 14,
-    DisputeNotFound = 15,
-    DisputeAlreadyResolved = 16,
-    DisputeRequiresJury = 17,
-    DisputeDoesNotRequireJury = 18,
-    ConflictedValidator = 19,
-    VoteAlreadyCast = 20,
-    VotingWindowClosed = 21,
-    TallyNotReady = 22,
-    InvalidJuryConfig = 23,
+    InvalidAffiliation = 14,
+    InvalidDiversityConfig = 15,
 }

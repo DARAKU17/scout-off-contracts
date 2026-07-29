@@ -106,7 +106,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
-    /// Ledger timestamp when the validator was registered, in Unix seconds.
+    /// Admin-verified organization the validator represents.
+    pub affiliation: String,
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
     pub active: bool,
@@ -166,45 +167,14 @@ pub struct MilestoneRef {
     pub milestone_index: u32,
 }
 
-/// Admin-configured rules for escalating high-impact disputes to a validator jury.
+/// Rules that gate level-advancing milestones on independent organizations.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct JuryConfig {
-    /// Disputes with an impact score at or above this value require a jury vote.
-    pub impact_threshold: u64,
-    /// Minimum number of votes required for an upheld jury outcome.
-    pub quorum: u32,
-    /// Number of seconds validators have to vote after a dispute is filed.
-    pub voting_window_secs: u64,
-}
-
-/// An on-chain record of a disputed milestone and, when required, its jury tally.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct MilestoneDispute {
-    pub player_id: u64,
-    pub milestone_index: u32,
-    pub filed_by: Address,
-    pub reason: String,
-    pub impact_score: u64,
-    pub filed_at: u64,
-    pub voting_deadline: u64,
-    pub jury_required: bool,
-    /// Quorum fixed when the dispute is filed so later config changes cannot alter it.
-    pub quorum: u32,
-    pub resolved: bool,
-    pub upheld: bool,
-    pub votes_for: u32,
-    pub votes_against: u32,
-}
-
-/// An individual validator's immutable vote on a disputed milestone.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct DisputeVote {
-    pub validator: Address,
-    pub upheld: bool,
-    pub cast_at: u64,
+pub struct DiversityConfig {
+    /// Minimum number of affiliations required to advance at or above the gate.
+    pub min_distinct_affiliations: u32,
+    /// First milestone index that requires organizational diversity.
+    pub gated_milestone_index: u32,
 }
 
 #[contracttype]
@@ -227,10 +197,10 @@ pub enum DataKey {
     ProgressContract,
     /// milestone count per validator wallet
     ValidatorMilestoneCount(Address),
-    /// Jury escalation threshold, quorum, and voting-window configuration.
-    JuryConfig,
-    /// (player_id, milestone_index) → MilestoneDispute
-    MilestoneDispute(u64, u32),
-    /// (player_id, milestone_index, validator) → DisputeVote
-    DisputeVote(u64, u32, Address),
+    /// Diversity rules for level-advancing milestones.
+    DiversityConfig,
+    /// (player_id, affiliation) → whether that affiliation has approved a milestone.
+    PlayerAffiliationUsed(u64, String),
+    /// player_id → number of distinct affiliations that approved milestones.
+    PlayerAffiliationCount(u64),
 }
