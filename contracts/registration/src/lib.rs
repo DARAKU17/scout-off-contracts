@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, StoredPlayerProfile,
+    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated
@@ -792,6 +792,31 @@ impl RegistrationContract {
             Ok(PlayerStatus::Deactivated)
         } else {
             Ok(PlayerStatus::Active)
+        }
+    }
+
+    /// Return the current status of a scout account.
+    ///
+    /// - `Active`      — scout exists and has not been deactivated.
+    /// - `Deactivated` — scout exists but has been soft-deactivated by admin.
+    /// - `NotRegistered` — no scout profile found for the given `scout_id`.
+    pub fn get_scout_status(env: Env, scout_id: u64) -> ScoutStatus {
+        let exists = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id));
+        if !exists {
+            return ScoutStatus::NotRegistered;
+        }
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ScoutDeactivated(scout_id))
+            .unwrap_or(false)
+        {
+            ScoutStatus::Deactivated
+        } else {
+            ScoutStatus::Active
         }
     }
 
