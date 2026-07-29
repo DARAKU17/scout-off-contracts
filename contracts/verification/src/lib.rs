@@ -17,9 +17,9 @@ mod types;
 
 pub use errors::VerificationError;
 pub use types::{
-    ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone,
-    MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus, Validator,
-    ValidatorActivityReport, ValidatorStatus,
+    AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
+    Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
+    PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
@@ -69,6 +69,52 @@ const DEFAULT_REG_COOLDOWN_SECS: u64 = 0;
 
 /// Domain separator for off-chain milestone attestation messages.
 const ATTESTATION_DOMAIN: &str = "ScoutChain-MilestoneAttestation-v1";
+
+// ── k-of-n threshold milestone attestation ──
+//
+// Soroban validators cannot practically co-sign a single transaction (they
+// are geographically distributed coaches/academy directors — see README
+// "Validator Network" — who transact independently, potentially hours or
+// days apart). `attest_milestone` accumulates independent votes in storage
+// until `threshold` distinct, currently-active validators have attested to
+// the same (player_id, evidence_hash) claim, only then committing the
+// milestone and cross-calling `progress.advance_level`.
+
+/// Default k-of-n distinct-validator threshold for `attest_milestone`.
+///
+/// `1` reproduces today's single-signature trust model, so every existing
+/// integrator (registration/scout_access/chaos-tests, and this contract's
+/// own pre-existing test suite) that calls `approve_milestone` keeps working
+/// unchanged with no coordinated migration. This is a deliberate, well-gated
+/// degenerate case — NOT a silent escape hatch: the instant an operator
+/// raises the threshold via `set_milestone_threshold`, `approve_milestone`
+/// itself starts rejecting calls with `ThresholdModeRequiresAttestation`
+/// (see `approve_milestone`), so there is no path to bypass a configured
+/// k-of-n policy once one is configured. Operators handling real milestone
+/// commitments MUST call `set_milestone_threshold(n)` with `n >= 2` to
+/// actually close the single-compromised-validator gap this mechanism
+/// exists to close.
+const DEFAULT_MILESTONE_THRESHOLD: u32 = 1;
+
+/// Default attestation voting window: 14 days. Long enough for a second,
+/// independently-transacting validator to notice and corroborate evidence;
+/// short enough that sub-threshold claims do not accumulate as effectively
+/// permanent dead storage.
+const DEFAULT_VOTING_WINDOW_SECS: u64 = 1_209_600;
+/// Floor for admin-configured voting windows (1 hour) — prevents an
+/// operator from misconfiguring a window so short that no two independently
+/// transacting validators could ever both land inside it.
+const MIN_VOTING_WINDOW_SECS: u64 = 3_600;
+/// Ceiling for admin-configured voting windows (90 days) — bounds how long a
+/// sub-threshold claim's fixed-size storage entry can sit unresolved.
+const MAX_VOTING_WINDOW_SECS: u64 = 7_776_000;
+
+/// Hard cap on how many distinct sub-threshold claims a single validator may
+/// have an open vote on at once. Bounds `DataKey::ValidatorPendingVotes` to a
+/// fixed maximum size so `revoke_validator` can always retroactively
+/// invalidate a revoked validator's pending votes in O(cap) instead of an
+/// unbounded scan over every claim that has ever existed.
+const MAX_PENDING_VOTES_PER_VALIDATOR: u32 = 25;
 
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
@@ -221,6 +267,64 @@ impl VerificationContract {
             .instance()
             .get::<DataKey, u32>(&DataKey::MinRegionQuorum)
             .unwrap_or(0u32)
+    }
+
+    /// Set the k-of-n distinct-active-validator threshold required before a
+    /// claim accumulated via `attest_milestone` is committed (admin only).
+    ///
+    /// Must be in `[1, MAX_VALIDATORS]`. `1` reduces to today's
+    /// single-signature model — see `DEFAULT_MILESTONE_THRESHOLD` for why
+    /// that default exists and why it is not a silent bypass. Raising this
+    /// to `>= 2` is what actually closes the single-compromised-validator
+    /// gap this mechanism exists for.
+    ///
+    /// Already-open claims keep the threshold that was in effect when their
+    /// current voting round started (`PendingMilestoneClaim::threshold`) —
+    /// changing this value only affects claims that start a fresh round
+    /// afterward, so an admin cannot retroactively fast-track or invalidate
+    /// an in-flight claim by moving the threshold mid-vote.
+    pub fn set_milestone_threshold(env: Env, threshold: u32) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        if threshold == 0 || threshold > MAX_VALIDATORS {
+            return Err(VerificationError::InvalidInput);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MilestoneApprovalThreshold, &threshold);
+        Ok(())
+    }
+
+    /// Return the current k-of-n milestone approval threshold (default 1 —
+    /// see `DEFAULT_MILESTONE_THRESHOLD`).
+    pub fn get_milestone_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MilestoneApprovalThreshold)
+            .unwrap_or(DEFAULT_MILESTONE_THRESHOLD)
+    }
+
+    /// Set the attestation voting window in seconds (admin only). Must be in
+    /// `[MIN_VOTING_WINDOW_SECS, MAX_VOTING_WINDOW_SECS]`. A sub-threshold
+    /// claim that does not reach threshold within this window expires — see
+    /// `attest_milestone`.
+    pub fn set_voting_window_secs(env: Env, window_secs: u64) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        if window_secs < MIN_VOTING_WINDOW_SECS || window_secs > MAX_VOTING_WINDOW_SECS {
+            return Err(VerificationError::InvalidInput);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationVotingWindowSecs, &window_secs);
+        Ok(())
+    }
+
+    /// Return the current attestation voting window in seconds (default 14
+    /// days — see `DEFAULT_VOTING_WINDOW_SECS`).
+    pub fn get_voting_window_secs(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::AttestationVotingWindowSecs)
+            .unwrap_or(DEFAULT_VOTING_WINDOW_SECS)
     }
 
     /// Register a trusted validator (admin only).
@@ -430,6 +534,14 @@ impl VerificationContract {
             .persistent()
             .set(&DataKey::ValidatorVector, &new_vector);
 
+        // Retroactively invalidate this validator's contribution to every
+        // still-open (sub-threshold) pending attestation claim — a revoked
+        // validator's vote must never count toward a future threshold-cross.
+        let invalidated = Self::invalidate_pending_votes_for_validator(&env, &wallet);
+        if invalidated > 0 {
+            events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
+        }
+
         let reason_str = reason.unwrap_or(String::from_str(&env, ""));
         events::validator_revoked(&env, &admin, &wallet, &reason_str);
 
@@ -489,8 +601,13 @@ impl VerificationContract {
                 .persistent()
                 .set(&DataKey::ValidatorVector, &new_vector);
 
+            let invalidated = Self::invalidate_pending_votes_for_validator(&env, &wallet);
+            if invalidated > 0 {
+                events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
+            }
+
             events::validator_revoked(&env, &admin, &wallet, &reason_str);
-            
+
             let routine_str = String::from_str(&env, "Routine");
             if reason_str != routine_str {
                 env.storage().persistent().set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
@@ -903,6 +1020,13 @@ impl VerificationContract {
         Self::require_approve_milestone_not_paused(&env)?;
         validator_wallet.require_auth();
 
+        // Once an operator has opted into k-of-n threshold mode there is no
+        // single-signature bypass — see `DEFAULT_MILESTONE_THRESHOLD` and
+        // `attest_milestone`.
+        if Self::get_milestone_threshold(env.clone()) > 1 {
+            return Err(VerificationError::ThresholdModeRequiresAttestation);
+        }
+
         if description.len() > MAX_DESCRIPTION_LEN {
             return Err(VerificationError::InvalidInput);
         }
@@ -950,6 +1074,257 @@ impl VerificationContract {
             description,
             evidence_hash,
         )
+    }
+
+    /// Cast one independent, asynchronous vote toward a k-of-n threshold
+    /// milestone claim.
+    ///
+    /// Canonical claim identity is `(player_id, evidence_hash)` — NOT
+    /// `description`. Two validators submitting independently-worded
+    /// descriptions for the same evidence still corroborate the same claim.
+    /// Requiring an exact description match instead would let wording
+    /// variance alone fracture legitimate consensus (a validator who
+    /// paraphrases "hat-trick in cup final" as "3 goals, regional final"
+    /// would silently open a second, disjoint claim rather than
+    /// corroborating the first) — a subtler and easier-to-trigger griefing
+    /// vector than trusting the immutable evidence artifact, which is what
+    /// `evidence_hash` already is. The description recorded on the
+    /// committed `Milestone` is therefore locked in by the first vote in
+    /// each round and is not overwritten by later voters, so the
+    /// threshold-reaching validator cannot rewrite the claim's narrative at
+    /// the last moment either.
+    ///
+    /// Storage is bounded and O(1) per vote regardless of how many distinct
+    /// validators eventually attest: each vote touches exactly one
+    /// fixed-size `PendingMilestoneClaim` record (a counter, not a growing
+    /// list of voters) plus one fixed-size per-(claim, validator) existence
+    /// marker used for duplicate-vote rejection. See `cost_budget.rs` /
+    /// `docs/CONTRACT_REFERENCE.md` for the measured CPU-instruction
+    /// evidence that cost does not grow with vote count.
+    ///
+    /// Once `threshold` distinct, currently-active validators have voted
+    /// for the same claim within the voting window, this call commits the
+    /// `Milestone` and cross-calls `progress.advance_level`, exactly like
+    /// `approve_milestone` did for a single validator — attribution on the
+    /// committed record goes to whichever validator's vote happened to
+    /// cross the threshold.
+    ///
+    /// A vote past the configured voting window starts a fresh round,
+    /// discarding all prior votes for this claim (see `PendingMilestoneClaim::round`).
+    /// If `revoke_validator` is called against a validator with a still-open
+    /// vote on a sub-threshold claim, that vote is retroactively invalidated
+    /// (the claim's tally is decremented) — see `revoke_validator`.
+    pub fn attest_milestone(
+        env: Env,
+        validator_wallet: Address,
+        player_id: u64,
+        description: String,
+        evidence_hash: String,
+    ) -> Result<AttestationStatus, VerificationError> {
+        Self::require_not_paused(&env)?;
+        Self::require_approve_milestone_not_paused(&env)?;
+        validator_wallet.require_auth();
+
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+        validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
+
+        let validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(validator_wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+        if !validator.active {
+            return Err(VerificationError::ValidatorInactive);
+        }
+
+        // Already-committed claims (or evidence reused from any other
+        // milestone) are rejected up front — an attestation can never be
+        // cast against a claim that already has a Milestone on record.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::EvidenceUsed(evidence_hash.clone()))
+        {
+            return Err(VerificationError::DuplicateEvidence);
+        }
+
+        let configured_threshold = Self::get_milestone_threshold(env.clone());
+        let window_secs = Self::get_voting_window_secs(env.clone());
+        let now = env.ledger().timestamp();
+
+        let claim_key = DataKey::PendingMilestoneClaim(player_id, evidence_hash.clone());
+        let mut claim: PendingMilestoneClaim = env
+            .storage()
+            .persistent()
+            .get(&claim_key)
+            .unwrap_or(PendingMilestoneClaim {
+                player_id,
+                evidence_hash: evidence_hash.clone(),
+                description: description.clone(),
+                vote_count: 0,
+                round: 0,
+                created_at: now,
+                threshold: configured_threshold,
+            });
+
+        // Expire a stale sub-threshold round: bump `round` and reset the
+        // tally in place. Prior votes become unreachable (their storage key
+        // is scoped to the old round) without needing to enumerate or
+        // delete them — see `DataKey::PendingMilestoneVote`.
+        if claim.vote_count > 0 && now.saturating_sub(claim.created_at) > window_secs {
+            claim.round = claim.round.saturating_add(1);
+            claim.vote_count = 0;
+            claim.created_at = now;
+            claim.description = description.clone();
+            claim.threshold = configured_threshold;
+            events::attestation_window_expired(&env, player_id, &evidence_hash, claim.round);
+        }
+
+        let vote_key = DataKey::PendingMilestoneVote(
+            player_id,
+            evidence_hash.clone(),
+            claim.round,
+            validator_wallet.clone(),
+        );
+        if env.storage().persistent().has(&vote_key) {
+            return Err(VerificationError::DuplicateAttestation);
+        }
+
+        // Bounded per-validator pending-vote cap. Lazily prune entries that
+        // reference a claim which has since committed (removed) or moved to
+        // a later round (expired), so a validator's legitimate concurrent
+        // capacity is not permanently eaten by claims that already resolved.
+        let pending_votes_key = DataKey::ValidatorPendingVotes(validator_wallet.clone());
+        let existing_refs: Vec<PendingVoteRef> = env
+            .storage()
+            .persistent()
+            .get(&pending_votes_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut live_refs: Vec<PendingVoteRef> = Vec::new(&env);
+        for i in 0..existing_refs.len() {
+            let vref = existing_refs.get(i).unwrap();
+            let other_key = DataKey::PendingMilestoneClaim(vref.player_id, vref.evidence_hash.clone());
+            if let Some(other_claim) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PendingMilestoneClaim>(&other_key)
+            {
+                if other_claim.round == vref.round {
+                    live_refs.push_back(vref);
+                }
+            }
+        }
+        if live_refs.len() >= MAX_PENDING_VOTES_PER_VALIDATOR {
+            return Err(VerificationError::TooManyPendingVotes);
+        }
+
+        claim.vote_count = safe_add_u32(claim.vote_count, 1).map_err(|_| VerificationError::Overflow)?;
+
+        env.storage().persistent().set(&vote_key, &now);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vote_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        live_refs.push_back(PendingVoteRef {
+            player_id,
+            evidence_hash: evidence_hash.clone(),
+            round: claim.round,
+        });
+        env.storage().persistent().set(&pending_votes_key, &live_refs);
+        env.storage().persistent().extend_ttl(
+            &pending_votes_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::attestation_recorded(
+            &env,
+            &validator_wallet,
+            player_id,
+            &evidence_hash,
+            claim.vote_count,
+            claim.threshold,
+        );
+
+        if claim.vote_count >= claim.threshold {
+            env.storage().persistent().remove(&claim_key);
+            let index = Self::commit_approved_milestone(
+                &env,
+                &validator_wallet,
+                player_id,
+                claim.description.clone(),
+                evidence_hash.clone(),
+            )?;
+            Ok(AttestationStatus::Committed(index))
+        } else {
+            let vote_count = claim.vote_count;
+            env.storage().persistent().set(&claim_key, &claim);
+            env.storage()
+                .persistent()
+                .extend_ttl(&claim_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+            Ok(AttestationStatus::Pending(vote_count))
+        }
+    }
+
+    /// Return the current accumulator state for a (player_id, evidence_hash)
+    /// claim, if one is open. Returns `None` once the claim commits (its
+    /// storage is removed at that point) or before any validator has
+    /// attested to it.
+    pub fn get_pending_claim(
+        env: Env,
+        player_id: u64,
+        evidence_hash: String,
+    ) -> Option<PendingMilestoneClaim> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingMilestoneClaim(player_id, evidence_hash))
+    }
+
+    /// Whether `validator_wallet` has an active (not-yet-expired,
+    /// not-yet-committed) vote recorded for this claim's current round.
+    pub fn has_attested(
+        env: Env,
+        player_id: u64,
+        evidence_hash: String,
+        validator_wallet: Address,
+    ) -> bool {
+        let claim: Option<PendingMilestoneClaim> = env.storage().persistent().get(
+            &DataKey::PendingMilestoneClaim(player_id, evidence_hash.clone()),
+        );
+        match claim {
+            Some(c) => env.storage().persistent().has(&DataKey::PendingMilestoneVote(
+                player_id,
+                evidence_hash,
+                c.round,
+                validator_wallet,
+            )),
+            None => false,
+        }
+    }
+
+    /// Whether the claim's current voting round has exceeded the configured
+    /// window without reaching threshold. `true` means the next
+    /// `attest_milestone` call for this (player_id, evidence_hash) will
+    /// start a fresh round rather than counting toward the existing tally.
+    /// Returns `false` when no claim is open (nothing to expire).
+    pub fn is_attestation_window_expired(
+        env: Env,
+        player_id: u64,
+        evidence_hash: String,
+    ) -> bool {
+        let claim: Option<PendingMilestoneClaim> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingMilestoneClaim(player_id, evidence_hash));
+        match claim {
+            Some(c) if c.vote_count > 0 => {
+                let window = Self::get_voting_window_secs(env.clone());
+                env.ledger().timestamp().saturating_sub(c.created_at) > window
+            }
+            _ => false,
+        }
     }
 
     /// Register an ed25519 public key used to verify off-chain milestone
@@ -1933,9 +2308,60 @@ impl VerificationContract {
         Ok(())
     }
 
-    /// Shared milestone commit used by `approve_milestone` and
-    /// `submit_attested_milestone`. Caller must already have authenticated the
-    /// validator and validated description/evidence/category constraints.
+    /// Retroactively invalidate `wallet`'s contribution to every still-open
+    /// (sub-threshold) pending attestation claim it has voted on, called
+    /// from `revoke_validator` / `batch_revoke_validators`.
+    ///
+    /// Bounded to `MAX_PENDING_VOTES_PER_VALIDATOR` — see
+    /// `DataKey::ValidatorPendingVotes` — so this never scans more than a
+    /// small constant number of entries regardless of how many claims exist
+    /// contract-wide or how long the validator has been registered. Returns
+    /// the number of claims actually decremented, for the emitted event.
+    fn invalidate_pending_votes_for_validator(env: &Env, wallet: &Address) -> u32 {
+        let pending_votes_key = DataKey::ValidatorPendingVotes(wallet.clone());
+        let refs: Vec<PendingVoteRef> = env
+            .storage()
+            .persistent()
+            .get(&pending_votes_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut invalidated = 0u32;
+        for i in 0..refs.len() {
+            let vref = refs.get(i).unwrap();
+            let claim_key = DataKey::PendingMilestoneClaim(vref.player_id, vref.evidence_hash.clone());
+            if let Some(mut claim) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PendingMilestoneClaim>(&claim_key)
+            {
+                // Only claims still in the same round the vote was cast for
+                // are live; a claim that already moved to a later round (via
+                // expiry) already discarded this vote implicitly.
+                if claim.round == vref.round && claim.vote_count > 0 {
+                    claim.vote_count -= 1;
+                    env.storage().persistent().set(&claim_key, &claim);
+                    let vote_key = DataKey::PendingMilestoneVote(
+                        vref.player_id,
+                        vref.evidence_hash.clone(),
+                        vref.round,
+                        wallet.clone(),
+                    );
+                    env.storage().persistent().remove(&vote_key);
+                    invalidated += 1;
+                }
+            }
+        }
+
+        if !refs.is_empty() {
+            env.storage().persistent().remove(&pending_votes_key);
+        }
+        invalidated
+    }
+
+    /// Shared milestone commit used by `approve_milestone`,
+    /// `submit_attested_milestone`, and `attest_milestone` (on threshold
+    /// cross). Caller must already have authenticated the validator and
+    /// validated description/evidence/category constraints.
     fn commit_approved_milestone(
         env: &Env,
         validator_wallet: &Address,
