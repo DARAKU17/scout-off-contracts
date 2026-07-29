@@ -33,6 +33,15 @@ pub struct TrialOffer {
     pub logged_at: u64,
 }
 
+/// On-chain signal that a viewer may request an off-chain decryption key.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EvidenceAccessGrant {
+    pub player_id: u64,
+    pub viewer: Address,
+    pub granted_at: u64,
+}
+
 /// Platform fee configuration
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -62,6 +71,8 @@ pub enum DataKey {
     Subscription(Address),
     /// (player_id, scout) → bool (has contacted)
     ContactRecord(u64, Address),
+    /// (player_id, viewer) → EvidenceAccessGrant
+    EvidenceAccessGrant(u64, Address),
     /// trial offer counter per player
     TrialCounter(u64),
     /// (player_id, trial_index) → TrialOffer

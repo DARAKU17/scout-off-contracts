@@ -83,6 +83,8 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `withdraw_fees(to)` | admin | Collect platform revenue |
 | `subscribe(scout, tier)` | scout | Purchase Basic/Pro/Elite subscription |
 | `pay_to_contact(scout, player_id)` | scout | Pay micro-fee to unlock player contact |
+| `get_evidence_access_grant(player_id, viewer)` | — | Read the off-chain key-distribution authorization signal |
+| `has_evidence_access(player_id, viewer)` | — | Check whether a viewer has an evidence access grant |
 | `log_trial_offer(scout, player_id, details_hash)` | scout (Elite only) | Record trial offer on-chain |
 | `get_subscription(scout)` | — | Read subscription record |
 | `get_fee_config()` | — | Current fee configuration |
@@ -117,5 +119,6 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `progress_updated` | progress | Player advances to a new level |
 | `scout_subscribed` | scout_access | Scout purchases a subscription |
 | `player_contacted` | scout_access | Scout pays to unlock player contact |
+| `evidence_access_granted` | scout_access | Contact payment authorizes off-chain decryption-key delivery |
 | `trial_offer_logged` | scout_access | Scout records a trial offer |
 | `fees_withdrawn` | scout_access | Admin withdraws accumulated fees |

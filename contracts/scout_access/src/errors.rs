@@ -16,4 +16,5 @@ pub enum ScoutAccessError {
     Overflow = 10,
     TrialOfferNotFound = 11,
     ProgressCallFailed = 14,
+    EvidenceAccessNotGranted = 15,
 }

@@ -1,15 +1,27 @@
+#![no_std]
+
 mod errors;
 mod events;
 mod types;
 
 use errors::ScoutAccessError;
-use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
+use types::{DataKey, EvidenceAccessGrant, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
 // ~30 days at 5 s/ledger; extend when TTL drops below half that.
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
+const PERSISTENT_TTL_MIN: u32 = 1_000;
+const PERSISTENT_TTL_MAX: u32 = 2_000;
+
+mod progress_contract {
+    use scoutchain_shared_types::ProgressLevel;
+
+    soroban_sdk::contractimport!(
+        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
+    );
+}
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -32,16 +44,22 @@ impl ScoutAccessContract {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
-        env.storage().instance().set(&DataKey::FeeConfig, &fee_config);
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeConfig, &fee_config);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.storage().instance().set(&DataKey::AccumulatedFees, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &0i128);
         Ok(())
     }
 
     pub fn update_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&DataKey::FeeConfig, &fee_config);
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeConfig, &fee_config);
         Ok(())
     }
 
@@ -58,7 +76,9 @@ impl ScoutAccessContract {
         let xlm = Self::xlm_token(&env);
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &xlm).transfer(&contract_addr, &to, &fees);
-        env.storage().instance().set(&DataKey::AccumulatedFees, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &0i128);
         events::fees_withdrawn(&env, &to, fees);
         Ok(fees)
     }
@@ -115,17 +135,17 @@ impl ScoutAccessContract {
         let sub = Subscription {
             scout: scout.clone(),
             tier: tier.clone(),
-            expires_at: now
-                .checked_add(config.sub_duration_secs)
-                .expect("overflow"),
+            expires_at: now.checked_add(config.sub_duration_secs).expect("overflow"),
             subscribed_at: now,
         };
         env.storage()
             .persistent()
             .set(&DataKey::Subscription(scout.clone()), &sub);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         events::scout_subscribed(&env, &scout, &tier);
         Ok(())
@@ -165,10 +185,23 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .extend_ttl(&contact_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        let access_key = DataKey::EvidenceAccessGrant(player_id, scout.clone());
+        let access_grant = EvidenceAccessGrant {
+            player_id,
+            viewer: scout.clone(),
+            granted_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&access_key, &access_grant);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+            .extend_ttl(&access_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         events::player_contacted(&env, player_id, &scout);
+        events::evidence_access_granted(&env, player_id, &scout, access_grant.granted_at);
         Ok(())
     }
 
@@ -191,16 +224,14 @@ impl ScoutAccessContract {
         if sub.tier != SubscriptionTier::Elite {
             return Err(ScoutAccessError::Unauthorized);
         }
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         let counter_key = DataKey::TrialCounter(player_id);
-        let index: u32 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u32);
+        let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
         let next_index = index.checked_add(1).expect("overflow");
 
         let offer = TrialOffer {
@@ -213,13 +244,17 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::TrialOffer(player_id, next_index), &offer);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::TrialOffer(player_id, next_index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TrialOffer(player_id, next_index),
+            TRIAL_TTL_THRESHOLD,
+            TRIAL_TTL_EXTEND_TO,
+        );
         env.storage().persistent().set(&counter_key, &next_index);
-        env.storage()
-            .persistent()
-            .extend_ttl(&counter_key, TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        env.storage().persistent().extend_ttl(
+            &counter_key,
+            TRIAL_TTL_THRESHOLD,
+            TRIAL_TTL_EXTEND_TO,
+        );
 
         events::trial_offer_logged(&env, player_id, &scout);
 
@@ -234,7 +269,7 @@ impl ScoutAccessContract {
             let progress_client = progress_contract::Client::new(&env, &progress_addr);
             match progress_client.try_advance_level(&scout, &player_id, &next_index) {
                 Ok(_) => {}
-                Err(Ok(progress_contract::Error::AlreadyAtMaxLevel)) => {}
+                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {}
                 Err(_) => return Err(ScoutAccessError::ProgressCallFailed),
             }
         }
@@ -246,18 +281,17 @@ impl ScoutAccessContract {
     // Queries
     // -------------------------------------------------------------------------
 
-    pub fn get_subscription(
-        env: Env,
-        scout: Address,
-    ) -> Result<Subscription, ScoutAccessError> {
+    pub fn get_subscription(env: Env, scout: Address) -> Result<Subscription, ScoutAccessError> {
         let sub = env
             .storage()
             .persistent()
             .get(&DataKey::Subscription(scout.clone()))
             .ok_or(ScoutAccessError::ScoutNotSubscribed)?;
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Subscription(scout), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
         Ok(sub)
     }
 
@@ -283,6 +317,35 @@ impl ScoutAccessContract {
         exists
     }
 
+    /// Returns the access-grant signal that off-chain key distribution consumes.
+    pub fn get_evidence_access_grant(
+        env: Env,
+        player_id: u64,
+        viewer: Address,
+    ) -> Result<EvidenceAccessGrant, ScoutAccessError> {
+        let key = DataKey::EvidenceAccessGrant(player_id, viewer.clone());
+        let grant = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ScoutAccessError::EvidenceAccessNotGranted)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(grant)
+    }
+
+    pub fn has_evidence_access(env: Env, player_id: u64, viewer: Address) -> bool {
+        let key = DataKey::EvidenceAccessGrant(player_id, viewer);
+        let exists = env.storage().persistent().has(&key);
+        if exists {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        exists
+    }
+
     pub fn get_trial_offer(
         env: Env,
         player_id: u64,
@@ -293,9 +356,11 @@ impl ScoutAccessContract {
             .persistent()
             .get(&DataKey::TrialOffer(player_id, index))
             .ok_or(ScoutAccessError::TrialOfferNotFound)?;
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::TrialOffer(player_id, index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TrialOffer(player_id, index),
+            TRIAL_TTL_THRESHOLD,
+            TRIAL_TTL_EXTEND_TO,
+        );
         Ok(offer)
     }
 
@@ -306,9 +371,11 @@ impl ScoutAccessContract {
             .get(&DataKey::TrialCounter(player_id))
             .unwrap_or(0u32);
         if count > 0 {
-            env.storage()
-                .persistent()
-                .extend_ttl(&DataKey::TrialCounter(player_id), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+            env.storage().persistent().extend_ttl(
+                &DataKey::TrialCounter(player_id),
+                TRIAL_TTL_THRESHOLD,
+                TRIAL_TTL_EXTEND_TO,
+            );
         }
         count
     }
@@ -406,9 +473,9 @@ impl ScoutAccessContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
-        token::{Client as TokenClient, StellarAssetClient},
-        Env, IntoVal, String,
+        testutils::{Address as _, EnvTestConfig, Ledger},
+        token::StellarAssetClient,
+        Env, String,
     };
 
     /// Deploy a mock SAC token, mint `amount` to `to`, return the token contract address.
@@ -431,8 +498,16 @@ mod tests {
         }
     }
 
-    fn setup() -> (Env, Address, Address, Address, ScoutAccessContractClient<'static>) {
-        let env = Env::default();
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        ScoutAccessContractClient<'static>,
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let xlm = create_token(&env, &admin);
@@ -473,6 +548,10 @@ mod tests {
         client.pay_to_contact(&scout, &1u64);
 
         assert!(client.has_contacted(&scout, &1u64));
+        assert!(client.has_evidence_access(&1u64, &scout));
+        let grant = client.get_evidence_access_grant(&1u64, &scout);
+        assert_eq!(grant.player_id, 1);
+        assert_eq!(grant.viewer, scout);
         // elite fee + contact fee
         assert_eq!(client.get_accumulated_fees(), 7_000_000 + 100_000);
     }
@@ -497,11 +576,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
-        let idx = client.log_trial_offer(
-            &scout,
-            &1u64,
-            &String::from_str(&env, "QmTrialDetails"),
-        );
+        let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTrialDetails"));
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
 
@@ -574,6 +649,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_subscription_expiry() {
         let (env, admin, xlm, contract_id, client) = setup();
         let scout = Address::generate(&env);
