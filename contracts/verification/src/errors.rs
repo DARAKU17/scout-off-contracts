@@ -79,6 +79,10 @@ pub enum VerificationError {
     /// Validator registration attempted before the cooldown window elapsed.
     RegistrationCooldown = 25,
 
+    // ── Registration cross-contract ──
+    /// Cross-contract call to the registration contract failed.
+    RegistrationCallFailed = 29,
+
     // ── k-of-n threshold milestone attestation ──
     /// The same active validator has already attested to this exact
     /// (player_id, evidence_hash) claim within its current voting round.
@@ -128,7 +132,7 @@ mod tests {
         let description_256 = String::from_str(&env, &"a".repeat(256));
         let evidence = String::from_str(&env, VALID_CID_V0);
 
-        let result = client.try_approve_milestone(&validator, &1u64, &description_256, &evidence);
+        let result = client.try_approve_milestone(&validator, &1u64, &description_256, &evidence, &None);
         assert!(result.is_ok(), "256-byte description should succeed");
     }
 
@@ -143,7 +147,7 @@ mod tests {
         let description_257 = String::from_str(&env, &"a".repeat(257));
         let evidence = String::from_str(&env, VALID_CID_V0);
 
-        let result = client.try_approve_milestone(&validator, &1u64, &description_257, &evidence);
+        let result = client.try_approve_milestone(&validator, &1u64, &description_257, &evidence, &None);
         assert_eq!(
             result,
             Err(Ok(VerificationError::InvalidInput)),

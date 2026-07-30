@@ -179,7 +179,7 @@ impl RegistrationContract {
         registered_at: u64,
         level: ProgressLevel,
     ) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         if env
             .storage()
@@ -245,7 +245,7 @@ impl RegistrationContract {
         verified: bool,
         registered_at: u64,
     ) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
 
         if env
             .storage()
@@ -275,6 +275,9 @@ impl RegistrationContract {
             .set(&DataKey::ScoutByWallet(wallet), &scout_id);
 
         events::scout_registered(&env, scout_id, &wallet);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM. Admin auth required.
     /// Persistent storage (including Admin) survives this call.
     pub fn upgrade(
@@ -3305,6 +3308,8 @@ mod tests {
             &1_600_000_000u64,
         );
         assert!(result.is_err());
+    }
+
     // TTL bump bugfix: get_player must extend persistent TTL on read
     // -------------------------------------------------------------------------
 
