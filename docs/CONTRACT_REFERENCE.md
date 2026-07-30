@@ -2163,7 +2163,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `get_progress_history_page(player_id: u64, offset: u32, limit: u32) -> Vec<ProgressEntry>`
 
-Paginated history retrieval. Returns entries from `offset+1` to `offset+limit`. `limit` is capped at 50. Returns an empty `Vec` when `offset` >= total count.
+Paginated history retrieval. Returns entries starting at `offset+1`. `limit` is clamped to the range 1 through 50. Returns an empty `Vec` when `offset` >= total count.
 
 | | |
 |---|---|
