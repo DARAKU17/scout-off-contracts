@@ -304,4 +304,10 @@ pub enum DataKey {
     /// Voting window (seconds) within which `threshold` distinct votes must
     /// accumulate before a claim expires. See `get_voting_window_secs`.
     AttestationVotingWindowSecs,
+
+    // ── Registration cross-contract (issue #1014) ──
+    /// Address of the registration contract used to verify wallet↔player_id binding.
+    RegistrationContract,
+    /// Whether `RegistrationContract` has been set at least once.
+    RegistrationContractSet,
 }

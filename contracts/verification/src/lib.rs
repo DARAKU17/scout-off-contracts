@@ -22,10 +22,11 @@ pub use types::{
     PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
 };
 
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Val, Vec};
 use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::IntoVal;
 
-use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32}};
+use scoutchain_shared_types::{require_admin, validate_cid, ProgressLevel, safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32}};
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
 /// Minimum credentials length for validator registration.
@@ -121,6 +122,30 @@ const MAX_PENDING_VOTES_PER_VALIDATOR: u32 = 25;
 // `set_progress_contract` before `approve_milestone` can advance levels.
 mod progress_contract {
     soroban_sdk::contractimport!(file = "fixtures/scoutchain_progress.wasm");
+}
+
+// Types mirroring the registration contract's `get_player` return value,
+// used by `dispute_milestone` for the wallet↔player_id authorization check
+// (issue #1014).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RegPlayerVitals {
+    pub age: u32,
+    pub position: String,
+    pub region: String,
+    pub nationality: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RegPlayerProfile {
+    pub player_id: u64,
+    pub wallet: Address,
+    pub vitals: RegPlayerVitals,
+    pub ipfs_hashes: Vec<String>,
+    pub level: ProgressLevel,
+    pub registered_at: u64,
+    pub updated_at: u64,
 }
 
 #[contract]
@@ -239,6 +264,40 @@ impl VerificationContract {
             .instance()
             .set(&DataKey::ProgressContract, &progress_contract);
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        Ok(())
+    }
+
+    /// Store the registration contract address so `dispute_milestone` can
+    /// verify wallet↔player_id binding via a cross-contract call (admin only).
+    /// Returns AlreadyConfigured if called more than once — use
+    /// `update_registration_contract` instead.
+    pub fn set_registration_contract(
+        env: Env,
+        reg_contract: Address,
+    ) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        if env.storage().instance().has(&DataKey::RegistrationContractSet) {
+            return Err(VerificationError::AlreadyConfigured);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &reg_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContractSet, &true);
+        Ok(())
+    }
+
+    /// Re-wire the registration contract address (admin only).
+    /// Use this for intentional re-wiring after the initial `set_registration_contract` call.
+    pub fn update_registration_contract(
+        env: Env,
+        reg_contract: Address,
+    ) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &reg_contract);
         Ok(())
     }
 
@@ -1950,8 +2009,25 @@ impl VerificationContract {
             .get(&DataKey::Milestone(player_id, milestone_index))
             .ok_or(VerificationError::MilestoneNotFound)?;
 
-        // Verify the caller is the player associated with this milestone
-        if milestone.player_id != player_id {
+        // Verify the caller's wallet actually corresponds to player_id
+        // by making a cross-contract call to the registration contract.
+        // This replaces the previous tautological check (milestone.player_id
+        // could never differ from player_id) with a real authorization gate.
+        let reg_addr = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistrationContract)
+            .ok_or(VerificationError::RegistrationCallFailed)?;
+        let args: Vec<Val> = (player_id,).into_val(&env);
+        let profile: RegPlayerProfile = env
+            .try_invoke_contract::<RegPlayerProfile, VerificationError>(
+                &reg_addr,
+                &Symbol::new(&env, "get_player"),
+                args,
+            )
+            .map_err(|_| VerificationError::RegistrationCallFailed)?
+            .map_err(|_| VerificationError::RegistrationCallFailed)?;
+        if profile.wallet != player_wallet {
             return Err(VerificationError::Unauthorized);
         }
 
@@ -2557,6 +2633,63 @@ mod tests {
         let id = env.register_contract(None, VerificationContract);
         let client = VerificationContractClient::new(&env, &id);
         (env, client)
+    }
+
+    /// Minimal stub that mimics the registration contract's `get_player`.
+    /// Returns a profile whose `wallet` is the one stored at init time,
+    /// keyed by `player_id`.
+    #[contract]
+    struct RegStub;
+
+    #[contracttype]
+    enum StubKey {
+        Owner,
+    }
+
+    #[contractimpl]
+    impl RegStub {
+        pub fn initialize(env: Env, owner: Address) {
+            env.storage()
+                .persistent()
+                .set(&StubKey::Owner, &owner);
+        }
+
+        pub fn get_player(env: Env, player_id: u64) -> RegPlayerProfile {
+            let wallet: Address = env
+                .storage()
+                .persistent()
+                .get(&StubKey::Owner)
+                .unwrap();
+            RegPlayerProfile {
+                player_id,
+                wallet,
+                vitals: RegPlayerVitals {
+                    age: 20,
+                    position: String::from_str(&env, "Forward"),
+                    region: String::from_str(&env, "Europe"),
+                    nationality: String::from_str(&env, "ES"),
+                },
+                ipfs_hashes: Vec::new(&env),
+                level: ProgressLevel::Unverified,
+                registered_at: 0,
+                updated_at: 0,
+            }
+        }
+    }
+
+    /// Deploy a `RegStub` and wire it as the registration contract on the
+    /// verification client.  `owner` is the wallet address that `RegStub`
+    /// will return as the profile owner for every `get_player` lookup.
+    fn setup_with_registration(
+        env: &Env,
+        client: &VerificationContractClient<'static>,
+        owner: &Address,
+    ) {
+        let reg_id = env.register_contract(None, RegStub);
+        let reg_client = RegStubClient::new(env, &reg_id);
+        reg_client.initialize(owner);
+        let reg_addr = Address::from(reg_id);
+        client.set_registration_contract(&reg_addr);
     }
 
     // A valid 46-character CIDv0 for use in tests.
@@ -3857,12 +3990,12 @@ mod tests {
     fn test_active_disputes_count_increments_on_dispute() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
-
-        let player_wallet = Address::generate(&env);
 
         client.approve_milestone(
             &validator,
@@ -3902,12 +4035,12 @@ mod tests {
     fn test_active_disputes_count_not_incremented_on_duplicate_dispute() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
-
-        let player_wallet = Address::generate(&env);
 
         client.approve_milestone(
             &validator,
@@ -3940,12 +4073,13 @@ mod tests {
     fn test_resolve_dispute_marks_resolved_and_decrements_active_count() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
         client.approve_milestone(
             &validator,
             &1u64,
@@ -3972,12 +4106,14 @@ mod tests {
     fn test_resolve_dispute_emits_event() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
         client.approve_milestone(
             &validator,
             &2u64,
@@ -4015,12 +4151,14 @@ mod tests {
     fn test_dispute_milestone_emits_event_with_reason() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
         client.approve_milestone(
             &validator,
             &2u64,
@@ -4063,12 +4201,14 @@ mod tests {
     fn test_resolve_dispute_already_resolved_returns_error() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
         client.approve_milestone(
             &validator,
             &3u64,
@@ -4102,12 +4242,14 @@ mod tests {
     fn test_has_dispute_false_before_and_true_after_dispute() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
         let player_id: u64 = 1u64;
         let milestone_index: u32 = 1u32;
 
@@ -4140,12 +4282,14 @@ mod tests {
     fn test_has_dispute_false_for_undisputed_milestone() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
 
         // Approve two milestones for player 1
         client.approve_milestone(
@@ -4184,12 +4328,14 @@ mod tests {
     fn test_has_dispute_matches_get_dispute_ok_and_milestone_not_found() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
         client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
 
-        let player_wallet = Address::generate(&env);
+        
         let disputed_player_id = 1u64;
         let disputed_milestone_index = 1u32;
         let undisputed_milestone_index = 2u32;
@@ -4235,6 +4381,82 @@ mod tests {
     ///
     /// Steps:
     ///   1. Initialize contract and register a validator
+    // -------------------------------------------------------------------------
+    // dispute_milestone wallet-authorization tests (issue #1014)
+    // -------------------------------------------------------------------------
+
+    /// An unrelated wallet cannot dispute another player's milestone.
+    /// The registration contract stub returns `player_wallet` as the owner
+    /// for every player_id, so `attacker_wallet` should be rejected.
+    #[test]
+    fn test_dispute_milestone_rejects_wrong_wallet() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
+        let attacker_wallet = Address::generate(&env);
+        client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
+
+        let player_id: u64 = 1;
+        let milestone_index: u32 = 1;
+
+        // Approve a milestone so there is something to dispute
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Goal scored"),
+            &String::from_str(&env, VALID_CID_V0),
+        &None);
+
+        // Attacker (wrong wallet) tries to dispute — must fail
+        let result = client.try_dispute_milestone(
+            &attacker_wallet,
+            &player_id,
+            &milestone_index,
+            &String::from_str(&env, "Fabricated reason"),
+        );
+        assert_eq!(result, Err(Ok(VerificationError::Unauthorized)));
+    }
+
+    /// The actual player (correct wallet) can still dispute their own
+    /// milestone — the authorization check must not break the legitimate
+    /// happy path.
+    #[test]
+    fn test_dispute_milestone_accepts_correct_wallet() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let player_wallet = Address::generate(&env);
+        client.initialize(&admin);
+        setup_with_registration(&env, &client, &player_wallet);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"), &Vec::new(&env));
+
+        let player_id: u64 = 1;
+        let milestone_index: u32 = 1;
+
+        // Approve a milestone so there is something to dispute
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Goal scored"),
+            &String::from_str(&env, VALID_CID_V0),
+        &None);
+
+        // Correct wallet disputes — must succeed
+        let result = client.try_dispute_milestone(
+            &player_wallet,
+            &player_id,
+            &milestone_index,
+            &String::from_str(&env, "Legitimate concern"),
+        );
+        assert!(result.is_ok());
+        assert!(client.has_dispute(&player_id, &milestone_index));
+    }
+
     ///   2. Attempt to register the same wallet again
     ///   3. Assert the second registration returns ValidatorAlreadyRegistered error
     ///   4. Verify the validator record in storage is unchanged
@@ -4956,12 +5178,12 @@ mod tests {
             &v1, &1u64,
             &String::from_str(&env, "Identity"),
             &String::from_str(&env, VALID_CID_V0),
-        );
+        &None);
         let idx = client.approve_milestone(
             &v2, &1u64,
             &String::from_str(&env, "Performance"),
             &String::from_str(&env, VALID_CID_V1),
-        );
+        &None);
         assert_eq!(idx, 2);
     }
 }

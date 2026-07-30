@@ -715,6 +715,43 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
+#### `set_registration_contract(addr: Address) -> Result<(), VerificationError>`
+
+Store the registration contract address so `dispute_milestone` can verify
+wallet-to-player-id ownership via cross-contract call. Must be called once
+after deployment. Returns `AlreadyConfigured` on subsequent calls — use
+`update_registration_contract` for intentional re-wiring.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `AlreadyConfigured` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_registration_contract --addr $REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `update_registration_contract(addr: Address) -> Result<(), VerificationError>`
+
+Re-wire the registration contract address after the initial
+`set_registration_contract` call. Use when redeploying or rotating the
+registration contract.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- update_registration_contract --addr $NEW_REGISTRATION_CONTRACT_ID
+```
+
+---
+
 #### `register_validator(wallet: Address, credentials: String, specializations: Vec<String>) -> Result<(), VerificationError>`
 
 Onboard a new trusted validator (coach, academy director, certified trainer).
@@ -1694,10 +1731,19 @@ Only the player associated with `player_id` may submit a dispute. A new dispute
 is stored as `resolved: false` and `upheld: false`. Only one dispute record may
 exist per `(player_id, milestone_index)` pair. Emits a `milestone_disputed` event.
 
+Authorization works in two steps:
+1. `player_wallet.require_auth()` proves the caller controls the claimed wallet.
+2. A cross-contract call to the **registration contract** (`get_player(player_id)`)
+   verifies that `profile.wallet == player_wallet`, binding the wallet to the
+   player ID. This prevents wallet A from disputing milestones for player B.
+
+The registration contract address must be set via `set_registration_contract`
+before any disputes can be filed.
+
 | | |
 |---|---|
-| **Auth** | `player_wallet` must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) |
+| **Auth** | `player_wallet` must sign, and must match the wallet on record for `player_id` in the registration contract |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) · `RegistrationCallFailed` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -3646,6 +3692,7 @@ pub struct TrialOffer {
 | 26 | `DuplicateAttestation` | Same active validator attested to the same claim within its current voting round |
 | 27 | `TooManyPendingVotes` | Validator already has `MAX_PENDING_VOTES_PER_VALIDATOR` (25) concurrent open votes |
 | 28 | `ThresholdModeRequiresAttestation` | `approve_milestone` called while `get_milestone_threshold() > 1` — use `attest_milestone` |
+| 29 | `RegistrationCallFailed` | Cross-contract call to registration contract failed when verifying dispute-milestone wallet-to-player-id binding |
 
 ### `ProgressError` (progress contract)
 
