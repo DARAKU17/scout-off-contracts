@@ -31,6 +31,8 @@ fn default_fees() -> FeeConfig {
         elite_sub_stroops: 7_000_000,
         sub_duration_secs: 30 * 24 * 60 * 60,
         pro_contact_limit: 10,
+        trial_offer_escrow_stroops: 500_000,
+        trial_offer_expiry_secs: 3_600,
     }
 }
 
@@ -102,7 +104,7 @@ fn advance_player(h: &Harness, player_id: u64, levels: u32) {
 fn approve_milestone(h: &Harness, player_id: u64, evidence_hash: &str) {
     let validator = Address::generate(&h.env);
     h.verification
-        .register_validator(&validator, &String::from_str(&h.env, "UEFA-B-License"));
+        .register_validator(&validator, &String::from_str(&h.env, "UEFA-B-License"), &Vec::new(&h.env));
     h.verification.approve_milestone(
         &validator,
         &player_id,

@@ -72,8 +72,7 @@ stellar contract invoke \
 # 6. Register a validator
 echo ""
 echo "==> Registering validator..."
-VALIDATOR_KEY=$(stellar keys generate --source "$DEPLOYER" --network "$NETWORK" sc-smoke-test-validator 2>/dev/null || echo "$DEPLOYER")
-# Use DEPLOYER as the validator wallet for simplicity
+# Use ADMIN as the validator wallet for simplicity
 stellar contract invoke \
   --id "$VER_ID" --source "$DEPLOYER" --network "$NETWORK" \
   -- register_validator \

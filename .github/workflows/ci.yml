@@ -1,3 +1,5 @@
+# Fast, dependency-free static checks; see contract-ci.yml for the full
+# build, test, lint, bindings, and sandbox pipeline kept separate from this gate.
 name: CI
 
 on:

@@ -12,6 +12,8 @@ ScoutChain contracts follow [Semantic Versioning 2.0.0](https://semver.org/) —
 
 The current version of all four contracts is **v0.1.0**.
 
+> **Note:** `Cargo.toml` `[workspace.package].version` is the build-time source of truth; keep the Version History table below in sync with every Cargo version bump.
+
 Each contract exposes a `version()` function that returns its current version string:
 
 ```bash
@@ -58,9 +60,15 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 
 - [ ] Read all BREAKING CHANGES listed in the release notes for the target version
 - [ ] Snapshot current on-chain state that lives in **instance** storage (fee config, initialized flag, contract links) — these survive the WASM swap but must be re-verified
-- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade
+- [ ] Check `version()` on all four contracts to confirm the baseline version before upgrade. For a v0.1.0 deployment, each contract should return exactly `0.1.0` (from the workspace `CARGO_PKG_VERSION`, with no `v` prefix).
 - [ ] Run `cargo test --workspace` against the new code locally
-- [ ] Test the full upgrade flow on testnet before touching mainnet
+- [ ] Rehearse the upgrade locally with the storage-survival harness — **no testnet fees required.** For each contract it deploys v1, seeds representative state, calls `upgrade()`, and asserts every row of the "What survives an upgrade" table in `docs/DEPLOYMENT.md` (persistent state unchanged; instance `Initialized`/`Paused` flags intact; cross-contract links re-wirable), including the `verification` `AlreadyConfigured` re-wire quirk. Run:
+  - `cargo test -p scoutchain-registration  --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-verification  --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-progress      --test upgrade_rehearsal`
+  - `cargo test -p scoutchain-scout-access  --test upgrade_rehearsal`
+  - (or all at once: `cargo test --workspace --test upgrade_rehearsal`)
+- [ ] Test the full upgrade flow on testnet before touching mainnet (only after the local rehearsal above passes, so testnet transaction fees are spent on a flow you already know survives an upgrade)
 
 ### During upgrade (per contract)
 
@@ -72,6 +80,7 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 
 - [ ] Call `version()` on each upgraded contract to confirm the expected new version
 - [ ] Re-verify instance storage (fee config, contract links) — re-apply if values were wiped
+- [ ] Verify cross-contract wiring: `./scripts/verify-cross-contract-wiring.sh <network>`
 - [ ] Re-run cross-contract wiring if any contract was re-deployed from scratch: `./scripts/initialize.sh <network>`
 - [ ] Regenerate TypeScript bindings: `./scripts/generate-bindings.sh <network>`
 - [ ] Update backend and frontend repos with the new bindings
@@ -96,10 +105,28 @@ All persistent-storage keys in v0.1.0 use the `DataKey` enum defined in each con
 
 Error code assignments for v0.1.0 are fixed as documented in [docs/CONTRACT_REFERENCE.md](docs/CONTRACT_REFERENCE.md). Future minor releases may only **append** new error codes at the end of each enum. SDK consumers should handle unknown error codes gracefully (treat them as unexpected errors and surface to the user).
 
+> **Known gap:** `ScoutAccessError` code 13 is intentionally reserved and will never be assigned. See `contracts/scout_access/src/errors.rs` for the inline explanation.
+
 ---
 
 ## Version History
 
-| Version | Date | Summary |
-|---------|------|---------|
-| v0.1.0 | 2025 | Initial release — all four contracts with full test coverage |
+### Format & Entry Guidelines
+
+When adding new entries to the Version History table:
+- **Contract Scope**: All four contracts (`registration`, `verification`, `progress`, `scout_access`) were initially released together at `v0.1.0`. Future releases may update all contracts in lockstep or target specific contracts individually. Specify the scope in the **Version** column (e.g., `v0.2.0 (all)` or `v0.2.0 (verification)`).
+- **SemVer Bump Type**: Explicitly classify each change as `MAJOR` (breaking storage/API change), `MINOR` (backward-compatible feature/event/error addition), or `PATCH` (backward-compatible bug fix/gas optimization) in the **Type** column.
+- **Summary**: Provide a concise summary of changes, explicitly calling out breaking changes if `MAJOR`.
+- **Cross-reference**: Every entry must mirror the corresponding entry in [CHANGELOG.md](CHANGELOG.md) — keep both files in sync.
+
+> **Current enforcement gap:** Keeping this Version History table current is
+> currently a convention-only process that relies on contributor discipline; no
+> CI check enforces that MAJOR or MINOR version changes add a corresponding row.
+
+| Version | Date | Type | Summary |
+|---------|------|------|---------|
+| v0.1.0 (all) | 2025 | MINOR | Initial release — all four contracts with full test coverage |
+| v0.2.0 (scout_access) | 2026-07-28 | MAJOR | BREAKING: `ContactQuotaExceeded` (18) deprecated; `batch_contact_players` now returns `ProContactLimitReached` (20) for Pro-tier quota exceeded; error code 18 slot reserved |
+<!-- Template / Example for future entries: -->
+<!-- | v0.2.0 (verification) | YYYY-MM-DD | MINOR | Added batch verification helper functions | -->
+<!-- | v1.0.0 (all) | YYYY-MM-DD | MAJOR | BREAKING: Updated storage key layout across all contracts | -->

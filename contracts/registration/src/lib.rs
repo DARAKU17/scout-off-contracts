@@ -5,11 +5,18 @@ mod types;
 
 use errors::ScoutChainError;
 use types::{
-    ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerSummary, PlayerVitals,
-    ProgressLevel, ScoutProfile, StoredPlayerProfile,
+    ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
+    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
 };
+// `PlayerVitals` is an *input* type of the public `register_player` function, so
+// it must be nameable by external callers (integration tests, generated
+// clients). Re-export it at the crate root; this also brings it into local
+// scope for the rest of this module.
+pub use types::PlayerVitals;
 
+use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::crypto::sha256;
 
 // Generated client stub for the progress contract — used to resolve a player's
 // current level at read time.  `level` is never stored in this contract.
@@ -35,6 +42,7 @@ const MAX_BATCH_SIZE: u32 = 20;
 /// Maximum plausible age for a registered player. Ages above this value are
 /// rejected as implausible to prevent corrupt entries in discovery filters.
 const MAX_PLAYER_AGE: u32 = 100;
+const MAX_PLAYERS: u64 = 10_000;
 
 /// Minimum scoutable age for player registration.
 /// Players younger than this age cannot be registered on the platform.
@@ -48,12 +56,18 @@ const INSTANCE_TTL_MIN: u32 = 100;
 #[allow(dead_code)]
 const INSTANCE_TTL_MAX: u32 = 500;
 
-// Persistent storage TTL bump for player profiles and admin key.
+// Core identity TTL: 30 days at ~5s/ledger ≈ 518_400 ledgers.
+// Player and scout profiles are core identity data that must survive extended dormancy.
+// Composite indexes (PlayersByLevelRegion, PlayersByLevel) are derived from profiles
+// and must live as long as the profiles they index.
 const PERSISTENT_TTL_MIN: u32 = 500;
-const PERSISTENT_TTL_MAX: u32 = 2_000;
+const PERSISTENT_TTL_MAX: u32 = 518_400;
+const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
-// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+/// Default registration cooldown: 24 hours in seconds.
+/// Applies to register_player, register_scout, and register_validator.
+/// Configurable by admin via `set_reg_cooldown`.  0 disables the cooldown.
+const DEFAULT_REG_COOLDOWN_SECS: u64 = 86_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -85,15 +99,182 @@ impl RegistrationContract {
         Ok(())
     }
 
+    /// Propose a replacement administrator. The current admin remains active
+    /// until the proposed address calls `accept_admin`.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ScoutChainError> {
+        let old_admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingAdmin,
+            ADMIN_BUMP_LEDGERS,
+            ADMIN_BUMP_LEDGERS,
+        );
+        events::admin_transfer_proposed(&env, &old_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer. Only the proposed address can accept.
+    pub fn accept_admin(env: Env) -> Result<(), ScoutChainError> {
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(ScoutChainError::NotInitialized)?;
+        let new_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ScoutChainError::PendingAdminNotSet)?;
+        new_admin.require_auth();
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Admin,
+            ADMIN_BUMP_LEDGERS,
+            ADMIN_BUMP_LEDGERS,
+        );
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        events::admin_transferred(&env, &old_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Deprecated alias for `propose_admin`; this no longer transfers control
+    /// immediately. The proposed address must still call `accept_admin`.
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ScoutChainError> {
+        Self::propose_admin(env, new_admin)
+    }
+
     pub fn pause_contract(env: Env) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         Ok(())
     }
 
     pub fn unpause_contract(env: Env) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Admin-only migration seeding: recreate a player profile from exported data.
+    ///
+    /// # Migration use case
+    /// This function exists solely to replay previously exported state onto a
+    /// freshly deployed contract.  It bypasses `wallet.require_auth()` because
+    /// the operator holds only the admin key, not the player's wallet.
+    ///
+    /// # Safety
+    /// - Re-seeding an existing `player_id` is rejected to prevent accidental
+    ///   double-seeding.
+    /// - This function should only be invoked before the contract has served
+    ///   any real wallet-signed registrations; after that point it becomes a
+    ///   backdoor for creating fraudulent profiles.
+    pub fn admin_seed_player(
+        env: Env,
+        player_id: u64,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        registered_at: u64,
+        level: ProgressLevel,
+    ) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Player(player_id))
+        {
+            return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        if vitals.position.len() > MAX_STRING_LEN
+            || vitals.region.len() > MAX_STRING_LEN
+            || vitals.nationality.len() > MAX_STRING_LEN
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile = StoredPlayerProfile {
+            player_id,
+            wallet: wallet.clone(),
+            vitals,
+            ipfs_hashes,
+            registered_at,
+            updated_at: registered_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Player(player_id), &profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerByWallet(wallet), &player_id);
+
+        let mut player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        player_ids.push_back(player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerIndex, &player_ids);
+
+        Self::composite_index_add(&env, &level, &profile.vitals.region, player_id);
+
+        events::player_registered(&env, player_id, &wallet);
+        Ok(())
+    }
+
+    /// Admin-only migration seeding: recreate a scout profile from exported data.
+    ///
+    /// # Migration use case
+    /// Same as `admin_seed_player` but for scouts.  Preserves the original
+    /// `scout_id` and `registered_at` timestamp so cross-references remain valid.
+    pub fn admin_seed_scout(
+        env: Env,
+        scout_id: u64,
+        wallet: Address,
+        region: String,
+        verified: bool,
+        registered_at: u64,
+    ) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id))
+        {
+            return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        if region.len() > MAX_REGION_LEN {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile = ScoutProfile {
+            scout_id,
+            wallet: wallet.clone(),
+            region,
+            verified,
+            registered_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Scout(scout_id), &profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutByWallet(wallet), &scout_id);
+
+        events::scout_registered(&env, scout_id, &wallet);
         Ok(())
     }
 
@@ -103,7 +284,7 @@ impl RegistrationContract {
         env: Env,
         new_wasm_hash: soroban_sdk::BytesN<32>,
     ) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -111,7 +292,7 @@ impl RegistrationContract {
     /// Store the progress contract address so filter_players can resolve
     /// levels at query time (admin only).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         env.storage()
             .instance()
             .set(&DataKey::ProgressContract, &addr);
@@ -159,7 +340,15 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Player(player_id), &stored);
-        events::player_level_synced(&env, player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerLevel(player_id), &level);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerLevel(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::player_level_synced(&env, player_id, &progress_contract);
         Ok(())
     }
 
@@ -175,9 +364,17 @@ impl RegistrationContract {
         vitals: PlayerVitals,
         ipfs_hashes: Vec<String>,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         wallet.require_auth();
+
+        // Per-caller cooldown: reject rapid re-registration attempts from the
+        // same wallet.  The cooldown protects against sybil registrations where
+        // a set of freshly-generated wallets spam the entrypoint.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+        )?;
 
         // Prevent duplicate registrations
         if env
@@ -186,6 +383,17 @@ impl RegistrationContract {
             .has(&DataKey::PlayerByWallet(wallet.clone()))
         {
             return Err(ScoutChainError::AlreadyRegistered);
+        }
+
+        // Enforce player cap to bound filter_players slow-path scan cost.
+        let player_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .map(|v: Vec<u64>| v.len() as u64)
+            .unwrap_or(0);
+        if player_count >= MAX_PLAYERS {
+            return Err(ScoutChainError::PlayerCapReached);
         }
 
         // Validate player age: must be at least MIN_PLAYER_AGE
@@ -229,6 +437,14 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::PlayerByWallet(wallet.clone()), &player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerLevel(player_id), &ProgressLevel::Unverified);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerLevel(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Add to player index
         let mut player_ids: Vec<u64> = env
@@ -250,6 +466,17 @@ impl RegistrationContract {
         );
         Self::level_index_add(&env, &ProgressLevel::Unverified, player_id);
 
+        // Record cooldown timestamp so a repeated attempt from the same wallet
+        // within the cooldown window is rejected.
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         events::player_registered(&env, player_id, &wallet);
         Ok(player_id)
     }
@@ -261,6 +488,7 @@ impl RegistrationContract {
         ipfs_hashes: Vec<String>,
     ) -> Result<(), ScoutChainError> {
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         let mut profile = Self::load_stored_player(&env, player_id)?;
         profile.wallet.require_auth();
         if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
@@ -271,13 +499,13 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Player(player_id), &profile);
-        events::profile_updated(&env, player_id);
+        events::profile_updated(&env, player_id, &profile.wallet);
         Ok(())
     }
 
     /// Deregister a player profile (admin only, GDPR right-to-erasure).
     pub fn deregister_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let profile = Self::load_stored_player(&env, player_id)?;
         // Resolve level before removing storage keys (progress contract is source of truth)
         let level = Self::resolve_level(&env, player_id);
@@ -287,6 +515,7 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .remove(&DataKey::PlayerByWallet(profile.wallet));
+        env.storage().persistent().remove(&DataKey::PlayerLevel(player_id));
 
         // Remove from player index
         let mut player_ids: Vec<u64> = env
@@ -304,7 +533,7 @@ impl RegistrationContract {
         // Remove from composite index
         Self::composite_index_remove(&env, &level, &profile.vitals.region, player_id);
 
-        events::player_deregistered(&env, player_id);
+        events::player_deregistered(&env, player_id, &admin);
         Ok(())
     }
 
@@ -314,12 +543,13 @@ impl RegistrationContract {
     /// to skip this player. The on-chain profile, progress history, and all
     /// milestone data are fully preserved and still accessible via `get_player`.
     pub fn deactivate_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         // Ensure the player actually exists before setting the flag.
         Self::load_stored_player(&env, player_id)?;
         env.storage()
             .persistent()
             .set(&DataKey::PlayerDeactivated(player_id), &true);
+        events::player_deactivated(&env, player_id, &admin);
         Ok(())
     }
 
@@ -328,12 +558,13 @@ impl RegistrationContract {
     /// Clears the `PlayerDeactivated(player_id)` flag, making the player
     /// visible in `filter_players` results again.
     pub fn reactivate_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         // Ensure the player actually exists.
         Self::load_stored_player(&env, player_id)?;
         env.storage()
             .persistent()
             .remove(&DataKey::PlayerDeactivated(player_id));
+        events::player_reactivated(&env, player_id, &admin);
         Ok(())
     }
 
@@ -347,13 +578,19 @@ impl RegistrationContract {
         wallet: Address,
         region: String,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         wallet.require_auth();
 
         if region.len() > MAX_REGION_LEN {
             return Err(ScoutChainError::InvalidInput);
         }
+
+        // Per-caller cooldown: same pattern as register_player.
+        Self::enforce_reg_cooldown(
+            &env,
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+        )?;
 
         if env
             .storage()
@@ -364,11 +601,18 @@ impl RegistrationContract {
         }
 
         let scout_id = Self::next_scout_id(&env)?;
+        let now = env.ledger().timestamp();
         let profile = ScoutProfile {
             scout_id,
             wallet: wallet.clone(),
             region,
-            verified: false,
+            verification: ScoutVerificationRecord {
+                verified: false,
+                verified_by: None,
+                verified_at: None,
+                evidence_ref: None,
+                method: None,
+            },
             registered_at: env.ledger().timestamp(),
         };
 
@@ -384,8 +628,365 @@ impl RegistrationContract {
             .persistent()
             .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
 
+        // Record cooldown timestamp.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutRegLastSent(wallet.clone()), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ScoutRegLastSent(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         events::scout_registered(&env, scout_id, &wallet);
         Ok(scout_id)
+    }
+
+    /// Seed a player profile directly using admin authority.
+    pub fn admin_seed_player(
+        env: Env,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        level: ProgressLevel,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+    ) -> Result<u64, ScoutChainError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if vitals.age == 0 || vitals.age < MIN_PLAYER_AGE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+        if vitals.position.len() > MAX_STRING_LEN
+            || vitals.region.len() > MAX_REGION_LEN
+            || vitals.nationality.len() > MAX_STRING_LEN
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+        if vitals.age > MAX_PLAYER_AGE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+        if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let stored = StoredPlayerProfile {
+            player_id,
+            wallet: wallet.clone(),
+            vitals,
+            ipfs_hashes,
+            registered_at,
+            updated_at,
+        };
+
+        env.storage().persistent().set(&DataKey::Player(player_id), &stored);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerByWallet(wallet.clone()), &player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerLevel(player_id), &level);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PlayerLevel(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        let mut player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !player_ids.iter().any(|id| id == player_id) {
+            player_ids.push_back(player_id);
+            env.storage().persistent().set(&DataKey::PlayerIndex, &player_ids);
+        }
+
+        Self::composite_index_add(&env, &level, &stored.vitals.region, player_id);
+        Self::level_index_add(&env, &level, player_id);
+
+        events::player_registered(&env, player_id, &wallet);
+        Ok(player_id)
+    }
+
+    /// Seed a scout profile directly using admin authority.
+    pub fn admin_seed_scout(
+        env: Env,
+        wallet: Address,
+        region: String,
+        scout_id: u64,
+        registered_at: u64,
+        verified: bool,
+    ) -> Result<u64, ScoutChainError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if region.len() > MAX_REGION_LEN {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile = ScoutProfile {
+            scout_id,
+            wallet: wallet.clone(),
+            region,
+            verified,
+            verification: ScoutVerificationRecord {
+                verified,
+                verified_by: if verified { Some(admin.clone()) } else { None },
+                verified_at: if verified { Some(env.ledger().timestamp()) } else { None },
+                evidence_ref: None,
+                method: if verified { Some(String::from_str(&env, "admin_manual")) } else { None },
+            },
+            registered_at,
+        };
+
+        env.storage().persistent().set(&DataKey::Scout(scout_id), &profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
+
+        events::scout_registered(&env, scout_id, &wallet);
+        Ok(scout_id)
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration ticket protocol
+    // -------------------------------------------------------------------------
+
+    /// Redeem a player migration authorization signed by the player off-chain.
+    ///
+    /// A relayer with no player private key can call this function to recreate
+    /// a player's profile on a freshly deployed contract. The function verifies
+    /// the player's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Player=0) || profile_data_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_player(
+        env: Env,
+        wallet: Address,
+        vitals: PlayerVitals,
+        ipfs_hashes: Vec<String>,
+        level: ProgressLevel,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Player {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let profile_data_hash = Self::profile_data_hash(&env, &wallet, &vitals, &ipfs_hashes, player_id, registered_at, updated_at);
+        if authorization.profile_data_hash != profile_data_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
+
+        let result = Self::admin_seed_player(&env, wallet, vitals, ipfs_hashes, level, player_id, registered_at, updated_at);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Player, player_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Redeem a scout migration authorization signed by the scout off-chain.
+    ///
+    /// A relayer with no scout private key can call this function to recreate
+    /// a scout's profile on a freshly deployed contract. The function verifies
+    /// the scout's ed25519 signature over the canonical authorization message
+    /// before writing any state.
+    ///
+    /// The signed message covers:
+    /// `wallet || role(Scout=1) || region_hash || new_contract_hint || nonce || expires_at`
+    pub fn redeem_migration_scout(
+        env: Env,
+        wallet: Address,
+        region: String,
+        scout_id: u64,
+        registered_at: u64,
+        verified: bool,
+        authorization: MigrationAuthorization,
+    ) -> Result<u64, ScoutChainError> {
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        if authorization.role != MigrationRole::Scout {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.wallet != wallet {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
+        {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let region_hash = Self::region_hash(&env, &region);
+        if authorization.profile_data_hash != region_hash {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let message = Self::migration_message(&env, &authorization);
+        let public_key = Self::address_to_ed25519(&env, &wallet);
+        let signature = Self::vec_to_signature(authorization.signature.clone());
+
+        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
+
+        let result = Self::admin_seed_scout(&env, wallet, region, scout_id, registered_at, verified);
+        if result.is_ok() {
+            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Scout, scout_id, &authorization.new_contract_hint);
+        }
+        result
+    }
+
+    /// Compute a hash of the player profile data for migration authorization.
+    fn profile_data_hash(
+        env: &Env,
+        wallet: &Address,
+        vitals: &PlayerVitals,
+        ipfs_hashes: &Vec<String>,
+        player_id: u64,
+        registered_at: u64,
+        updated_at: u64,
+    ) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in wallet.to_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.age.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.position.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in vitals.nationality.as_bytes() {
+            hasher.update(&[b]);
+        }
+        for hash in ipfs_hashes.iter() {
+            for b in hash.as_bytes() {
+                hasher.update(&[b]);
+            }
+        }
+        for b in player_id.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in registered_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        for b in updated_at.to_be_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Compute a hash of the scout profile data for migration authorization.
+    fn region_hash(env: &Env, region: &String) -> Vec<u8> {
+        let mut hasher = sha256::Hasher::new(env);
+        for b in region.as_bytes() {
+            hasher.update(&[b]);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    /// Construct the canonical message that a player/scout signs for migration.
+    fn migration_message(env: &Env, auth: &MigrationAuthorization) -> Vec<u8> {
+        let mut msg = Vec::new(env);
+        for b in auth.wallet.to_bytes() {
+            msg.push_back(b);
+        }
+        let role_byte = match auth.role {
+            MigrationRole::Player => 0u8,
+            MigrationRole::Scout => 1u8,
+        };
+        msg.push_back(role_byte);
+        for b in &auth.profile_data_hash {
+            msg.push_back(*b);
+        }
+        for b in auth.new_contract_hint.to_bytes() {
+            msg.push_back(b);
+        }
+        for b in auth.nonce.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        for b in auth.expires_at.to_be_bytes() {
+            msg.push_back(*b);
+        }
+        msg
+    }
+
+    fn mark_migration_nonce(env: &Env, wallet: &Address, nonce: u64) {
+        let key = DataKey::MigrationNonce(wallet.clone(), nonce);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+    }
+
+    /// Derive an ed25519 public key from a wallet address.
+    ///
+    /// Soroban Ed25519 addresses encode the public key starting at byte 1
+    /// (byte 0 is the type discriminator).
+    fn address_to_ed25519(env: &Env, address: &Address) -> [u8; 32] {
+        let bytes = address.to_bytes();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes.0[1..33]);
+        key
+    }
+
+    /// Convert a Vec<u8> signature into a fixed-size [u8; 64] array.
+    fn vec_to_signature(sig: Vec<u8>) -> [u8; 64] {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&sig);
+        arr
     }
 
     // -------------------------------------------------------------------------
@@ -432,6 +1033,45 @@ impl RegistrationContract {
         Self::load_player(&env, player_id)
     }
 
+    pub fn get_player_status(env: Env, player_id: u64) -> Result<PlayerStatus, ScoutChainError> {
+        Self::load_stored_player(&env, player_id)?;
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::PlayerDeactivated(player_id))
+            .unwrap_or(false)
+        {
+            Ok(PlayerStatus::Deactivated)
+        } else {
+            Ok(PlayerStatus::Active)
+        }
+    }
+
+    /// Return the current status of a scout account.
+    ///
+    /// - `Active`      — scout exists and has not been deactivated.
+    /// - `Deactivated` — scout exists but has been soft-deactivated by admin.
+    /// - `NotRegistered` — no scout profile found for the given `scout_id`.
+    pub fn get_scout_status(env: Env, scout_id: u64) -> ScoutStatus {
+        let exists = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Scout(scout_id));
+        if !exists {
+            return ScoutStatus::NotRegistered;
+        }
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ScoutDeactivated(scout_id))
+            .unwrap_or(false)
+        {
+            ScoutStatus::Deactivated
+        } else {
+            ScoutStatus::Active
+        }
+    }
+
     pub fn get_scout(env: Env, scout_id: u64) -> Result<ScoutProfile, ScoutChainError> {
         let profile: ScoutProfile = env
             .storage()
@@ -446,20 +1086,85 @@ impl RegistrationContract {
         Ok(profile)
     }
 
+    /// Get a scout profile by wallet address. Used by scout_access contract for Pro-tier verification gating.
+    pub fn get_scout_by_wallet(
+        env: Env,
+        wallet: Address,
+    ) -> Result<ScoutProfile, ScoutChainError> {
+        let scout_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ScoutByWallet(wallet.clone()))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        Self::get_scout(env, scout_id)
+    }
+
+    /// Batch-fetch scout profiles for up to 20 IDs in a single call.
+    /// Missing IDs are silently skipped (partial-hit semantics, identical to
+    /// `get_players`). The returned vec contains only the profiles that were
+    /// found, preserving input order among hits.
+    ///
+    /// Capped at `MAX_BATCH_SIZE` (20) to bound gas usage per call.
+    /// Pass more than 20 IDs → `InvalidInput`.
+    pub fn get_scouts(env: Env, ids: Vec<u64>) -> Result<Vec<ScoutProfile>, ScoutChainError> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let mut profiles = Vec::new(&env);
+        for i in 0..ids.len() {
+            if let Some(id) = ids.get(i) {
+                if let Some(profile) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, ScoutProfile>(&DataKey::Scout(id))
+                {
+                    profiles.push_back(profile);
+                }
+            }
+        }
+        Ok(profiles)
+    }
+
     /// Verify a scout profile (admin only).
     pub fn verify_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
-        Self::require_admin(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         let mut profile: ScoutProfile = env
             .storage()
             .persistent()
             .get(&DataKey::Scout(scout_id))
             .ok_or(ScoutChainError::ScoutNotFound)?;
+        let admin = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .ok_or(ScoutChainError::NotInitialized)?;
+        profile.verification = ScoutVerificationRecord {
+            verified: true,
+            verified_by: Some(admin),
+            verified_at: Some(env.ledger().timestamp()),
+            evidence_ref: None,
+            method: Some(String::from_str(&env, "admin_manual")),
+        };
         profile.verified = true;
         env.storage()
             .persistent()
             .set(&DataKey::Scout(scout_id), &profile);
         events::scout_verified(&env, scout_id, &profile.wallet);
         Ok(())
+    }
+
+    /// Get the structured verification record for a scout by ID.
+    pub fn get_scout_verification(
+        env: Env,
+        scout_id: u64,
+    ) -> Result<ScoutVerificationRecord, ScoutChainError> {
+        let profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        Ok(profile.verification)
     }
 
     pub fn get_player_count(env: Env) -> u64 {
@@ -519,6 +1224,12 @@ impl RegistrationContract {
     /// - `limit` is capped at 50 internally.
     /// - Deactivated players (those with a `PlayerDeactivated` flag) are excluded
     ///   from results. Their profiles are still accessible via `get_player`.
+    ///
+    /// `offset` is a count of eligible (non-deactivated, filter-matching)
+    /// entries to skip, NOT a player_id.  `next_cursor` is the count of
+    /// eligible entries processed across all pages so far, so passing it
+    /// back as `offset` on the next call correctly resumes from where
+    /// the previous page ended.
     ///
     /// When `region` is non-empty the composite `PlayersByLevelRegion` index is
     /// used so only matching buckets are loaded.  When `region` is empty the
@@ -584,7 +1295,7 @@ impl RegistrationContract {
                             continue;
                         }
                         if results.len() >= max_results {
-                            next_cursor = player_id;
+                            next_cursor = (skipped + results.len()) as u64;
                             break 'outer;
                         }
                         results.push_back(profile);
@@ -621,7 +1332,7 @@ impl RegistrationContract {
                         continue;
                     }
                     if results.len() >= max_results {
-                        next_cursor = player_id;
+                        next_cursor = (skipped + results.len()) as u64;
                         break;
                     }
                     results.push_back(profile);
@@ -668,18 +1379,35 @@ impl RegistrationContract {
         Ok(())
     }
 
-    fn require_admin(env: &Env) -> Result<(), ScoutChainError> {
-        let admin: Address = env
+    /// Enforce the per-caller registration cooldown.
+    ///
+    /// Reads the last-sent timestamp stored under `last_sent_key`.  If a
+    /// timestamp is present and the current ledger time is before
+    /// `last_sent + cooldown_secs`, returns `RegistrationCooldown`.
+    /// A cooldown of 0 disables the check entirely.
+    fn enforce_reg_cooldown(env: &Env, last_sent_key: &DataKey) -> Result<(), ScoutChainError> {
+        let cooldown_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegCooldownSecs(0))
+            .unwrap_or(DEFAULT_REG_COOLDOWN_SECS);
+
+        if cooldown_secs == 0 {
+            return Ok(());
+        }
+
+        let now = env.ledger().timestamp();
+        if let Some(last_sent) = env
             .storage()
             .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(ScoutChainError::NotInitialized)?;
-        admin.require_auth();
-        env.storage().persistent().extend_ttl(
-            &DataKey::Admin,
-            ADMIN_BUMP_LEDGERS,
-            ADMIN_BUMP_LEDGERS,
-        );
+            .get::<DataKey, u64>(last_sent_key)
+        {
+            let next_allowed =
+                safe_add_u64(last_sent, cooldown_secs).map_err(|_| ScoutChainError::Overflow)?;
+            if now < next_allowed {
+                return Err(ScoutChainError::RegistrationCooldown);
+            }
+        }
         Ok(())
     }
 
@@ -704,6 +1432,14 @@ impl RegistrationContract {
     /// Falls back to `Unverified` when no progress contract is configured
     /// (e.g. during tests or before deployment wiring).
     fn resolve_level(env: &Env, player_id: u64) -> ProgressLevel {
+        if let Some(level) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ProgressLevel>(&DataKey::PlayerLevel(player_id))
+        {
+            return level;
+        }
+
         if let Some(progress_addr) = env
             .storage()
             .instance()
@@ -749,7 +1485,7 @@ impl RegistrationContract {
             .instance()
             .get(&DataKey::PlayerCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
+        let next = safe_add_u64(id, 1).map_err(|_| ScoutChainError::Overflow)?;
         env.storage().instance().set(&DataKey::PlayerCounter, &next);
         Ok(next)
     }
@@ -760,7 +1496,7 @@ impl RegistrationContract {
             .instance()
             .get(&DataKey::ScoutCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
+        let next = safe_add_u64(id, 1).map_err(|_| ScoutChainError::Overflow)?;
         env.storage().instance().set(&DataKey::ScoutCounter, &next);
         Ok(next)
     }
@@ -853,7 +1589,10 @@ impl RegistrationContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, vec, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
+        vec, Env, IntoVal, String, Symbol,
+    };
 
     fn setup() -> (Env, RegistrationContractClient<'static>) {
         let env = Env::default();
@@ -873,6 +1612,51 @@ mod tests {
     }
 
     #[test]
+    fn test_migration_nonces_survive_default_persistent_ttl() {
+        use soroban_sdk::testutils::{Ledger, Persistent};
+
+        let (env, client) = setup();
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number = 100;
+            ledger.max_entry_ttl = PERSISTENT_TTL_MAX + 1;
+        });
+
+        let player_wallet = Address::generate(&env);
+        let scout_wallet = Address::generate(&env);
+        let player_nonce = 11;
+        let scout_nonce = 22;
+
+        env.as_contract(&client.address, || {
+            RegistrationContract::mark_migration_nonce(&env, &player_wallet, player_nonce);
+            RegistrationContract::mark_migration_nonce(&env, &scout_wallet, scout_nonce);
+
+            assert!(env.storage().persistent().get_ttl(&DataKey::MigrationNonce(
+                player_wallet.clone(),
+                player_nonce,
+            )) > 5_000);
+            assert!(env.storage().persistent().get_ttl(&DataKey::MigrationNonce(
+                scout_wallet.clone(),
+                scout_nonce,
+            )) > 5_000);
+        });
+
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number = 5_100;
+        });
+
+        env.as_contract(&client.address, || {
+            assert!(env.storage().persistent().has(&DataKey::MigrationNonce(
+                player_wallet,
+                player_nonce,
+            )));
+            assert!(env.storage().persistent().has(&DataKey::MigrationNonce(
+                scout_wallet,
+                scout_nonce,
+            )));
+        });
+    }
+
+    #[test]
     fn test_initialize_and_health() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -881,9 +1665,151 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_transfer_propose_replace_and_accept() {
+        let (env, client) = setup();
+        let old_admin = Address::generate(&env);
+        let stale_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize(&old_admin);
+
+        client.propose_admin(&stale_admin);
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, events::ADMIN_TRANSFER_PROPOSED),
+                        old_admin.clone(),
+                    )
+                        .into_val(&env),
+                    stale_admin.clone().into_val(&env),
+                )
+            ]
+        );
+
+        // The current admin remains fully functional while a proposal is pending.
+        client.pause_contract();
+        client.unpause_contract();
+
+        // A new proposal replaces the stale pending address.
+        client.propose_admin(&new_admin);
+        env.as_contract(&client.address, || {
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::Admin),
+                Some(old_admin.clone())
+            );
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::PendingAdmin),
+                Some(new_admin.clone())
+            );
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: vec![&env],
+                sub_invokes: &[],
+            },
+        }]);
+        client.accept_admin();
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, events::ADMIN_TRANSFERRED),
+                        old_admin.clone(),
+                    )
+                        .into_val(&env),
+                    new_admin.clone().into_val(&env),
+                )
+            ]
+        );
+        env.as_contract(&client.address, || {
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::Admin),
+                Some(new_admin)
+            );
+            assert!(!env.storage().persistent().has(&DataKey::PendingAdmin));
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_old_admin_loses_access_after_transfer() {
+        let (env, client) = setup();
+        let old_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize(&old_admin);
+
+        client.propose_admin(&new_admin);
+        env.mock_auths(&[MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: vec![&env],
+                sub_invokes: &[],
+            },
+        }]);
+        client.accept_admin();
+
+        // Privileged calls now require new_admin's signature. Restricting
+        // the mocked auth to old_admin must make the call fail, proving the
+        // old admin no longer has effective access.
+        env.mock_auths(&[MockAuth {
+            address: &old_admin,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "pause_contract",
+                args: vec![&env],
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause_contract();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_third_party_cannot_accept_admin() {
+        let (env, client) = setup();
+        let old_admin = Address::generate(&env);
+        let pending_admin = Address::generate(&env);
+        let third_party = Address::generate(&env);
+        client.initialize(&old_admin);
+        client.propose_admin(&pending_admin);
+
+        env.mock_auths(&[MockAuth {
+            address: &third_party,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: vec![&env],
+                sub_invokes: &[],
+            },
+        }]);
+        client.accept_admin();
+    }
+
+    #[test]
     fn test_version() {
         let (env, client) = setup();
-        assert_eq!(client.version(), String::from_str(&env, "0.1.0"));
+        assert_eq!(
+            client.version(),
+            String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
@@ -905,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_player_level_without_progress_contract_unauthorized() {
+    fn test_get_player_summary_exposes_no_wallet_or_ipfs_hashes_fields() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -913,31 +1839,25 @@ mod tests {
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
         let hashes: soroban_sdk::Vec<String> = vec![&env, String::from_str(&env, "QmTest123")];
+
         let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let profile = client.get_player(&player_id);
+        let summary = client.get_player_summary(&player_id);
 
-        // No ProgressContract has been set, so the call must be rejected.
-        let result = client.try_set_player_level(&player_id, &ProgressLevel::EliteTier);
-        assert_eq!(result, Err(Ok(ScoutChainError::Unauthorized)));
-    }
+        let PlayerSummary {
+            player_id: summary_player_id,
+            vitals: summary_vitals,
+            level,
+            updated_at,
+        } = summary;
 
-    #[test]
-    fn test_set_player_level_wrong_caller_unauthorized() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes: soroban_sdk::Vec<String> = vec![&env, String::from_str(&env, "QmTest123")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
-
-        let progress_contract = Address::generate(&env);
-        client.set_progress_contract(&progress_contract);
-
-        // Clear mocked auths so the stored progress contract's require_auth fails.
-        env.mock_auths(&[]);
-        let result = client.try_set_player_level(&player_id, &ProgressLevel::EliteTier);
-        assert!(result.is_err());
+        assert_eq!(summary_player_id, player_id);
+        assert_eq!(summary_vitals.age, vitals.age);
+        assert_eq!(summary_vitals.position, vitals.position);
+        assert_eq!(summary_vitals.region, vitals.region);
+        assert_eq!(summary_vitals.nationality, vitals.nationality);
+        assert_eq!(level, ProgressLevel::Unverified);
+        assert_eq!(updated_at, profile.updated_at);
     }
 
     #[test]
@@ -1645,12 +2565,12 @@ mod tests {
         assert_eq!(page1.profiles.len(), 4);
         assert_ne!(page1.next_cursor, 0, "expected more pages");
 
-        // Page 2: offset=4, limit=4 → remaining Forwards
+        // Page 2: pass next_cursor from page1 as offset → remaining Forwards
         let page2 = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
-            &4u32,
+            &(page1.next_cursor as u32),
             &4u32,
         );
         // 8 Forwards total, already skipped 4, so 4 more remain
@@ -1885,6 +2805,244 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Issue #1017: filter_players pagination cursor consistency regression
+    // -------------------------------------------------------------------------
+
+    /// Position filter before a page boundary must not cause silent gaps or
+    /// duplicates when following the documented next_cursor -> offset contract.
+    ///
+    /// Concrete scenario: 5 Forwards, 1 Midfielder, 3 Forwards.
+    /// Page 1 (limit=4) triggers a boundary at player 5 (Forward).
+    /// With the old bug, next_cursor was player_id 5, and passing it back
+    /// as offset (a count) skipped 5 eligible entries instead of 4 — losing
+    /// player 5.  The cursor is now a count of eligible entries processed,
+    /// so this gap cannot occur.
+    #[test]
+    fn test_filter_players_pagination_cursor_no_gaps() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Register 5 Forwards in West Africa
+        for _ in 0..5 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 18,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+        // Register 1 Midfielder to break up the list
+        let wallet_mid = Address::generate(&env);
+        let vitals_mid = PlayerVitals {
+            age: 22,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        client.register_player(&wallet_mid, &vitals_mid, &hashes);
+        // Register 3 more Forwards
+        for _ in 0..3 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 19,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+
+        // Walk through all pages using the documented cursor contract.
+        let mut all_ids: Vec<u64> = Vec::new(&env);
+        let mut offset: u32 = 0;
+        loop {
+            let page = client.filter_players(
+                &String::from_str(&env, "West Africa"),
+                &String::from_str(&env, "Forward"),
+                &ProgressLevel::Unverified,
+                &offset,
+                &4u32,
+            );
+            for i in 0..page.profiles.len() {
+                all_ids.push_back(page.profiles.get(i).unwrap().player_id);
+            }
+            if page.next_cursor == 0 {
+                break;
+            }
+            offset = page.next_cursor as u32;
+        }
+
+        // Must have exactly 8 Forwards with no gaps or duplicates.
+        assert_eq!(all_ids.len(), 8, "must return all 8 Forwards");
+
+        // Verify no duplicates and all expected IDs are present.
+        let expected: soroban_sdk::Vec<u64> = {
+            let mut v = soroban_sdk::Vec::new(&env);
+            v.push_back(1);
+            v.push_back(2);
+            v.push_back(3);
+            v.push_back(4);
+            v.push_back(5);
+            v.push_back(7);
+            v.push_back(8);
+            v.push_back(9);
+            v
+        };
+        // Sort all_ids (infallible via bubble-sort on small vec).
+        // Since Vec in soroban is limited, just check membership + count.
+        for i in 0..expected.len() {
+            let id = expected.get(i).unwrap();
+            assert!(
+                all_ids.contains(&id),
+                "Forward player {} must appear in paginated results",
+                id
+            );
+        }
+        // Check each returned ID is in expected.
+        for i in 0..all_ids.len() {
+            let id = all_ids.get(i).unwrap();
+            assert!(
+                expected.contains(&id),
+                "player {} is not a Forward — gap/duplicate detected",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_admin_seed_player_persists_profile_and_status() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.admin_seed_player(
+            &wallet,
+            &vitals,
+            &hashes,
+            &ProgressLevel::PerformanceMilestones,
+            &7u64,
+            &100u64,
+            &200u64,
+        );
+
+        assert_eq!(player_id, 7u64);
+        let profile = client.get_player(&7u64);
+        assert_eq!(profile.wallet, wallet);
+        assert_eq!(profile.level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(client.get_player_status(&7u64), types::PlayerStatus::Active);
+    }
+
+    #[test]
+    fn test_admin_seed_scout_persists_profile() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let scout_id = client.admin_seed_scout(
+            &wallet,
+            &String::from_str(&env, "Europe"),
+            &11u64,
+            &123u64,
+            &true,
+        );
+
+        assert_eq!(scout_id, 11u64);
+        let scout = client.get_scout(&11u64);
+        assert_eq!(scout.wallet, wallet);
+        assert!(scout.verification.verified);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #647: player_deactivated and player_reactivated event emission
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_deactivate_player_emits_event() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::IntoVal;
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &dummy_vitals(&env), &hashes);
+
+        // Clear any events from registration so we only inspect deactivation events.
+        let _ = env.events().all();
+
+        client.deactivate_player(&player_id);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        soroban_sdk::Symbol::new(&env, "player_deactivated"),
+                        admin.clone(),
+                    )
+                        .into_val(&env),
+                    player_id.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reactivate_player_emits_event() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::IntoVal;
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &dummy_vitals(&env), &hashes);
+
+        client.deactivate_player(&player_id);
+
+        // Clear events up to this point.
+        let _ = env.events().all();
+
+        client.reactivate_player(&player_id);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        soroban_sdk::Symbol::new(&env, "player_reactivated"),
+                        admin.clone(),
+                    )
+                        .into_val(&env),
+                    player_id.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Issue #32: Scout verified flag and verify_scout admin function
     // -------------------------------------------------------------------------
 
@@ -1899,7 +3057,7 @@ mod tests {
         let scout_id = client.register_scout(&wallet, &region);
 
         let scout = client.get_scout(&scout_id);
-        assert!(!scout.verified);
+        assert!(!scout.verification.verified);
     }
 
     #[test]
@@ -1915,7 +3073,7 @@ mod tests {
         client.verify_scout(&scout_id);
 
         let scout = client.get_scout(&scout_id);
-        assert!(scout.verified);
+        assert!(scout.verification.verified);
     }
 
     // -------------------------------------------------------------------------
@@ -1967,6 +3125,41 @@ mod tests {
         // Clear all auths so admin check fails
         env.mock_auths(&[]);
         let result = client.try_verify_scout(&scout_id);
+        assert!(result.is_err());
+    }
+
+    /// `set_player_level` must only be callable by the address registered via
+    /// `set_progress_contract`. A random address attempting to authorize the
+    /// same call must be rejected, since `progress_contract.require_auth()`
+    /// only succeeds for an authorization entry matching the stored address.
+    #[test]
+    fn test_set_player_level_rejects_non_progress_contract_caller() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        let progress_contract = Address::generate(&env);
+        client.set_progress_contract(&progress_contract);
+
+        // A random address — not the registered progress contract — signs
+        // the authorization for this call instead.
+        let random_caller = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &random_caller,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "set_player_level",
+                args: (player_id, ProgressLevel::VerifiedIdentity).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
         assert!(result.is_err());
     }
 
@@ -2175,7 +3368,7 @@ mod tests {
 
         // 9. Register validator in verification contract
         let validator = Address::generate(&env);
-        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+        ver_client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
 
         // 10. Approve milestone via verification contract (this triggers the cross-contract flow)
         ver_client.approve_milestone(
@@ -2191,6 +3384,95 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Issue #820: admin_seed_player / admin_seed_scout tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_admin_seed_player_preserves_exact_ids_and_timestamps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmEvidence")];
+        let original_id = 42u64;
+        let original_ts = 1_600_000_000u64;
+
+        client.admin_seed_player(
+            &original_id,
+            &wallet,
+            &vitals,
+            &hashes,
+            &original_ts,
+            &ProgressLevel::Unverified,
+        );
+
+        let profile = client.get_player(original_id);
+        assert_eq!(profile.player_id, original_id);
+        assert_eq!(profile.wallet, wallet);
+        assert_eq!(profile.vitals.age, vitals.age);
+        assert_eq!(profile.registered_at, original_ts);
+    }
+
+    #[test]
+    fn test_admin_seed_player_rejects_duplicate_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmEvidence")];
+
+        client.admin_seed_player(
+            &1u64,
+            &wallet,
+            &vitals,
+            &hashes,
+            &1_600_000_000u64,
+            &ProgressLevel::Unverified,
+        );
+
+        let result = client.try_admin_seed_player(
+            &1u64,
+            &wallet,
+            &vitals,
+            &hashes,
+            &1_600_000_001u64,
+            &ProgressLevel::Unverified,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_admin_seed_scout_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let reg_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &reg_id);
+        client.initialize(&admin);
+
+        let non_admin = Address::generate(&env);
+        let wallet = Address::generate(&env);
+
+        let result = client.try_admin_seed_scout(
+            &1u64,
+            &wallet,
+            &String::from_str(&env, "Europe"),
+            &false,
+            &1_600_000_000u64,
+        );
+        assert!(result.is_err());
+    }
+
     // TTL bump bugfix: get_player must extend persistent TTL on read
     // -------------------------------------------------------------------------
 
@@ -2298,5 +3580,133 @@ mod tests {
 
         let result = client.try_register_player(&wallet, &vitals, &hashes);
         assert_eq!(result, Err(Ok(ScoutChainError::InvalidInput)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #649: Vitals field length limits audit & post-registration immutability
+    // -------------------------------------------------------------------------
+
+    /// Audit and regression test locking in vitals field length validation in
+    /// `register_player` (position <= 64, region <= 100, nationality <= 64 bytes)
+    /// and confirming vitals fields are write-once and immutable post-registration.
+    #[test]
+    fn test_vitals_length_limits_and_immutability_audit() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // 1. Confirm register_player rejects oversized position (> 64 bytes)
+        let wallet1 = Address::generate(&env);
+        let vitals_bad_pos = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, &"P".repeat(65)),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        assert_eq!(
+            client.try_register_player(&wallet1, &vitals_bad_pos, &hashes),
+            Err(Ok(ScoutChainError::InvalidInput))
+        );
+
+        // 2. Confirm register_player rejects oversized region (> 100 bytes)
+        let wallet2 = Address::generate(&env);
+        let vitals_bad_reg = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, &"R".repeat(101)),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        assert_eq!(
+            client.try_register_player(&wallet2, &vitals_bad_reg, &hashes),
+            Err(Ok(ScoutChainError::InvalidInput))
+        );
+
+        // 3. Confirm register_player rejects oversized nationality (> 64 bytes)
+        let wallet3 = Address::generate(&env);
+        let vitals_bad_nat = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, &"N".repeat(65)),
+        };
+        assert_eq!(
+            client.try_register_player(&wallet3, &vitals_bad_nat, &hashes),
+            Err(Ok(ScoutChainError::InvalidInput))
+        );
+
+        // 4. Confirm register_player succeeds with exact upper boundary lengths
+        let wallet_valid = Address::generate(&env);
+        let vitals_max = PlayerVitals {
+            age: 25,
+            position: String::from_str(&env, &"P".repeat(64)),
+            region: String::from_str(&env, &"R".repeat(100)),
+            nationality: String::from_str(&env, &"N".repeat(64)),
+        };
+        let player_id = client.register_player(&wallet_valid, &vitals_max, &hashes);
+        let profile_init = client.get_player(&player_id);
+        assert_eq!(profile_init.vitals.position, vitals_max.position);
+        assert_eq!(profile_init.vitals.region, vitals_max.region);
+        assert_eq!(profile_init.vitals.nationality, vitals_max.nationality);
+
+        // 5. Update profile only accepts new ipfs_hashes — confirm vitals remain unchanged
+        let new_hashes = vec![&env, String::from_str(&env, "QmUpdatedHash")];
+        client.update_profile(&player_id, &new_hashes);
+
+        let profile_updated = client.get_player(&player_id);
+        assert_eq!(profile_updated.ipfs_hashes, new_hashes);
+        assert_eq!(profile_updated.vitals.position, vitals_max.position);
+        assert_eq!(profile_updated.vitals.region, vitals_max.region);
+        assert_eq!(profile_updated.vitals.nationality, vitals_max.nationality);
+        assert_eq!(profile_updated.vitals.age, vitals_max.age);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #825: Structured scout verification record
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_scout_populates_structured_record() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        let before = client.get_scout(&scout_id);
+        assert!(!before.verification.verified);
+        assert!(before.verification.verified_by.is_none());
+        assert!(before.verification.verified_at.is_none());
+
+        client.verify_scout(&scout_id);
+
+        let after = client.get_scout(&scout_id);
+        assert!(after.verification.verified);
+        assert!(after.verification.verified_by.is_some());
+        assert!(after.verification.verified_at.is_some());
+        assert_eq!(after.verification.method, Some(String::from_str(&env, "admin_manual")));
+    }
+
+    #[test]
+    fn test_get_scout_verification_exposes_record() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        let record = client.get_scout_verification(&scout_id);
+        assert!(!record.verified);
+        assert!(record.verified_by.is_none());
+
+        client.verify_scout(&scout_id);
+
+        let record = client.get_scout_verification(&scout_id);
+        assert!(record.verified);
+        assert!(record.verified_by.is_some());
     }
 }

@@ -46,8 +46,36 @@ fi
 
 echo "    OK — signer matches admin address ($ADMIN)"
 
+# ---------------------------------------------------------------------------
+# Run a `stellar contract invoke` command, treating a specific contract error
+# code as "this step was already done" (skip, don't fail) rather than a fatal
+# error. This lets the whole script be re-run safely after a partial failure
+# instead of aborting on AlreadyInitialized / AlreadyConfigured.
+# ---------------------------------------------------------------------------
+invoke_idempotent() {
+  local skip_error_code="$1"
+  local description="$2"
+  shift 2
+  local output
+  set +e
+  output=$("$@" 2>&1)
+  local status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    if echo "$output" | grep -q "Error(Contract, #${skip_error_code})"; then
+      echo "    $description already done — skipping"
+      return 0
+    fi
+    echo "$output" >&2
+    echo "ERROR: $description failed." >&2
+    exit 1
+  fi
+  echo "$output"
+}
+
 echo "==> Initializing registration contract..."
-stellar contract invoke \
+invoke_idempotent 1 "registration initialize" \
+  stellar contract invoke \
   --id "$REGISTRATION_CONTRACT_ID" \
   --source "$DEPLOYER" \
   --network "$NETWORK" \
@@ -55,7 +83,8 @@ stellar contract invoke \
   --admin "$ADMIN"
 
 echo "==> Initializing verification contract..."
-stellar contract invoke \
+invoke_idempotent 1 "verification initialize" \
+  stellar contract invoke \
   --id "$VERIFICATION_CONTRACT_ID" \
   --source "$DEPLOYER" \
   --network "$NETWORK" \
@@ -63,7 +92,8 @@ stellar contract invoke \
   --admin "$ADMIN"
 
 echo "==> Initializing progress contract..."
-stellar contract invoke \
+invoke_idempotent 1 "progress initialize" \
+  stellar contract invoke \
   --id "$PROGRESS_CONTRACT_ID" \
   --source "$DEPLOYER" \
   --network "$NETWORK" \
@@ -71,7 +101,8 @@ stellar contract invoke \
   --admin "$ADMIN"
 
 echo "==> Initializing scout_access contract..."
-stellar contract invoke \
+invoke_idempotent 1 "scout_access initialize" \
+  stellar contract invoke \
   --id "$SCOUT_ACCESS_CONTRACT_ID" \
   --source "$DEPLOYER" \
   --network "$NETWORK" \
@@ -88,12 +119,39 @@ stellar contract invoke \
   }'
 
 echo "==> Wiring verification → progress cross-contract link..."
-stellar contract invoke \
+# verification.set_progress_contract is first-time-only: it returns
+# AlreadyConfigured (error 11) on every subsequent call so a stale address
+# is never silently overwritten. That means a second run of this script
+# (e.g. after a partial failure, or to re-wire a redeployed progress
+# contract) would otherwise abort here. Detect that case and fall back to
+# update_progress_contract so the script is idempotent.
+set +e
+SET_PROGRESS_CONTRACT_OUTPUT=$(stellar contract invoke \
   --id "$VERIFICATION_CONTRACT_ID" \
   --source "$DEPLOYER" \
   --network "$NETWORK" \
   -- set_progress_contract \
-  --progress_contract "$PROGRESS_CONTRACT_ID"
+  --progress_contract "$PROGRESS_CONTRACT_ID" 2>&1)
+SET_PROGRESS_CONTRACT_STATUS=$?
+set -e
+
+if [[ $SET_PROGRESS_CONTRACT_STATUS -ne 0 ]]; then
+  if echo "$SET_PROGRESS_CONTRACT_OUTPUT" | grep -q "Error(Contract, #11)"; then
+    echo "    verification progress contract already configured — re-wiring via update_progress_contract"
+    stellar contract invoke \
+      --id "$VERIFICATION_CONTRACT_ID" \
+      --source "$DEPLOYER" \
+      --network "$NETWORK" \
+      -- update_progress_contract \
+      --progress_contract "$PROGRESS_CONTRACT_ID"
+  else
+    echo "$SET_PROGRESS_CONTRACT_OUTPUT" >&2
+    echo "ERROR: set_progress_contract failed on the verification contract." >&2
+    exit 1
+  fi
+else
+  echo "$SET_PROGRESS_CONTRACT_OUTPUT"
+fi
 
 echo "==> Wiring registration ← progress cross-contract link..."
 stellar contract invoke \

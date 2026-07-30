@@ -204,6 +204,9 @@ if [[ "$CONTRACT_NAME" == "scout_access" ]]; then
   echo "      --source \$ADMIN_ADDRESS --network $NETWORK \\"
   echo "      -- set_progress_contract --addr \$PROGRESS_CONTRACT_ID"
   echo ""
+  echo "  Verify all cross-contract wiring:"
+  echo "    ./scripts/verify-cross-contract-wiring.sh $NETWORK"
+  echo ""
 fi
 
 if [[ "$CONTRACT_NAME" == "verification" ]]; then
@@ -212,6 +215,9 @@ if [[ "$CONTRACT_NAME" == "verification" ]]; then
   echo "    stellar contract invoke --id $CONTRACT_ID \\"
   echo "      --source \$ADMIN_ADDRESS --network $NETWORK \\"
   echo "      -- set_progress_contract --progress_contract \$PROGRESS_CONTRACT_ID"
+  echo ""
+  echo "  Verify all cross-contract wiring:"
+  echo "    ./scripts/verify-cross-contract-wiring.sh $NETWORK"
   echo ""
 fi
 
@@ -226,8 +232,14 @@ if [[ "$CONTRACT_NAME" == "progress" ]]; then
   echo "      --source \$ADMIN_ADDRESS --network $NETWORK \\"
   echo "      -- set_registration_contract --addr \$REGISTRATION_CONTRACT_ID"
   echo ""
+  echo "  Verify all cross-contract wiring:"
+  echo "    ./scripts/verify-cross-contract-wiring.sh $NETWORK"
+  echo ""
 fi
 
+echo "  Verify all cross-contract wiring:"
+echo "    ./scripts/verify-cross-contract-wiring.sh $NETWORK"
+echo ""
 echo "  Regenerate TypeScript bindings if the ABI changed:"
 echo "    ./scripts/generate-bindings.sh $NETWORK"
 echo ""
