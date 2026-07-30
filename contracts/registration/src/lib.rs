@@ -2263,16 +2263,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_update_profile_too_many_hashes_fails() {
+    fn test_update_profile_rejects_11_hashes_and_accepts_10() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let initial_hashes = vec![&env, String::from_str(&env, "QmInitial")];
+        let player_id = client.register_player(&wallet, &vitals, &initial_hashes);
 
         let h = String::from_str(&env, "QmHash");
         let too_many = vec![
@@ -2287,9 +2286,38 @@ mod tests {
             h.clone(),
             h.clone(),
             h.clone(),
-            h.clone(),
         ];
-        client.update_profile(&player_id, &too_many);
+        let rejected = client.try_update_profile(&player_id, &too_many);
+        assert_eq!(rejected, Err(Ok(ScoutChainError::InvalidInput)));
+
+        let profile_after_rejection = client.get_player(&player_id);
+        assert_eq!(profile_after_rejection.ipfs_hashes.len(), 1);
+        assert_eq!(
+            profile_after_rejection.ipfs_hashes.get(0).unwrap(),
+            String::from_str(&env, "QmInitial")
+        );
+
+        let valid_ten = vec![
+            &env,
+            String::from_str(&env, "QmUpdated1"),
+            String::from_str(&env, "QmUpdated2"),
+            String::from_str(&env, "QmUpdated3"),
+            String::from_str(&env, "QmUpdated4"),
+            String::from_str(&env, "QmUpdated5"),
+            String::from_str(&env, "QmUpdated6"),
+            String::from_str(&env, "QmUpdated7"),
+            String::from_str(&env, "QmUpdated8"),
+            String::from_str(&env, "QmUpdated9"),
+            String::from_str(&env, "QmUpdated10"),
+        ];
+        client.update_profile(&player_id, &valid_ten);
+
+        let profile_after_update = client.get_player(&player_id);
+        assert_eq!(profile_after_update.ipfs_hashes.len(), 10);
+        assert_eq!(
+            profile_after_update.ipfs_hashes.get(0).unwrap(),
+            String::from_str(&env, "QmUpdated1")
+        );
     }
 
     #[test]
