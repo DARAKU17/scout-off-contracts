@@ -810,10 +810,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        env.storage().persistent().set(
-            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
-            &true,
-        );
+        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
 
         let result = Self::admin_seed_player(&env, wallet, vitals, ipfs_hashes, level, player_id, registered_at, updated_at);
         if result.is_ok() {
@@ -876,10 +873,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        env.storage().persistent().set(
-            &DataKey::MigrationNonce(wallet.clone(), authorization.nonce),
-            &true,
-        );
+        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
 
         let result = Self::admin_seed_scout(&env, wallet, region, scout_id, registered_at, verified);
         if result.is_ok() {
@@ -964,6 +958,14 @@ impl RegistrationContract {
             msg.push_back(*b);
         }
         msg
+    }
+
+    fn mark_migration_nonce(env: &Env, wallet: &Address, nonce: u64) {
+        let key = DataKey::MigrationNonce(wallet.clone(), nonce);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
     }
 
     /// Derive an ed25519 public key from a wallet address.
@@ -1598,6 +1600,51 @@ mod tests {
             region: String::from_str(env, "West Africa"),
             nationality: String::from_str(env, "Ghana"),
         }
+    }
+
+    #[test]
+    fn test_migration_nonces_survive_default_persistent_ttl() {
+        use soroban_sdk::testutils::{Ledger, Persistent};
+
+        let (env, client) = setup();
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number = 100;
+            ledger.max_entry_ttl = PERSISTENT_TTL_MAX + 1;
+        });
+
+        let player_wallet = Address::generate(&env);
+        let scout_wallet = Address::generate(&env);
+        let player_nonce = 11;
+        let scout_nonce = 22;
+
+        env.as_contract(&client.address, || {
+            RegistrationContract::mark_migration_nonce(&env, &player_wallet, player_nonce);
+            RegistrationContract::mark_migration_nonce(&env, &scout_wallet, scout_nonce);
+
+            assert!(env.storage().persistent().get_ttl(&DataKey::MigrationNonce(
+                player_wallet.clone(),
+                player_nonce,
+            )) > 5_000);
+            assert!(env.storage().persistent().get_ttl(&DataKey::MigrationNonce(
+                scout_wallet.clone(),
+                scout_nonce,
+            )) > 5_000);
+        });
+
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number = 5_100;
+        });
+
+        env.as_contract(&client.address, || {
+            assert!(env.storage().persistent().has(&DataKey::MigrationNonce(
+                player_wallet,
+                player_nonce,
+            )));
+            assert!(env.storage().persistent().has(&DataKey::MigrationNonce(
+                scout_wallet,
+                scout_nonce,
+            )));
+        });
     }
 
     #[test]

@@ -70,6 +70,7 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 | `Scout(scout_id)` | 518,400 | Core identity: scout profile. Extended on `register_scout` and `get_scout` reads. |
 | `PlayersByLevelRegion(level, region)` | 518,400 | Composite index. Must live as long as the profiles it indexes. Extended on add/remove operations and implicitly refreshed when profiles are read. |
 | `PlayersByLevel(level)` | 518,400 | Level-based index; same lifetime as level data. |
+| `MigrationNonce(wallet, nonce)` | 518,400 | Replay-protection marker for migration authorizations. Extended when either a player or scout migration ticket is redeemed so a used nonce cannot silently become reusable after the default persistent TTL. |
 | `Admin` | 518,400 | Cross-contract consistency. |
 
 **Keep-Alive Mechanism:**
