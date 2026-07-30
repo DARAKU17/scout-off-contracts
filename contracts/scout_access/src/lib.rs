@@ -957,8 +957,17 @@ impl ScoutAccessContract {
         let mut new_contacts: u32 = 0;
 
         // First pass: count new (uncharged) contacts to compute total fee.
+        // `seen` deduplicates player_ids *within this call* -- storage isn't
+        // mutated until the second pass, so without this a repeated
+        // player_id in the input would be counted (and charged) more than
+        // once even though only a single ContactRecord is ever written.
+        let mut seen: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
         for i in 0..player_ids.len() {
             let player_id = player_ids.get(i).unwrap();
+            if seen.contains(player_id) {
+                continue;
+            }
+            seen.push_back(player_id);
             if !env
                 .storage()
                 .persistent()
