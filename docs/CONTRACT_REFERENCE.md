@@ -390,7 +390,7 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID -- get_scout_count
 
 ---
 
-#### `filter_players(region: String, position: String, min_level: ProgressLevel) -> Result<Vec<PlayerProfile>, ScoutChainError>`
+#### `filter_players(region: String, position: String, min_level: ProgressLevel, offset: u32, limit: u32) -> Result<FilterResult, ScoutChainError>`
 
 Scout discovery query. Returns up to 50 player profiles matching the given
 region, position, and minimum progress level.
@@ -400,6 +400,14 @@ point so only players that already satisfy the level+region criteria are loaded.
 Gas cost is proportional to the number of matching players, not the total player
 count. The index is maintained automatically on `register_player`,
 `set_player_level`, and `deregister_player`.
+
+Pagination:
+- `offset` = 0 starts from the beginning.
+- Pass the previously returned `FilterResult.next_cursor` value as `offset` to
+  fetch the next page.
+- `next_cursor` = 0 in the response means no further results.
+- Both `offset` and `next_cursor` are *counts* of eligible (non-deactivated,
+  filter-matching) entries, not player IDs.
 
 | | |
 |---|---|
@@ -411,7 +419,9 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- filter_players \
   --region '"West Africa"' \
   --position '"Forward"' \
-  --min_level '"Unverified"'
+  --min_level '"Unverified"' \
+  --offset 0 \
+  --limit 50
 ```
 
 ---

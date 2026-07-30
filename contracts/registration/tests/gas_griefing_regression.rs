@@ -70,16 +70,16 @@ fn test_filter_players_page_limit_enforced() {
         &100u32,
     );
 
-    assert!(
-        result.players.len() <= 50,
-        "filter_players must return at most 50 results; got {}",
-        result.players.len()
-    );
-    assert_eq!(
-        result.players.len(),
-        50,
-        "with 60 matching players and limit=100, exactly 50 should be returned"
-    );
+        assert!(
+            result.profiles.len() <= 50,
+            "filter_players must return at most 50 results; got {}",
+            result.profiles.len()
+        );
+        assert_eq!(
+            result.profiles.len(),
+            50,
+            "with 60 matching players and limit=100, exactly 50 should be returned"
+        );
 }
 
 // ---------------------------------------------------------------------------
@@ -109,19 +109,21 @@ fn test_filter_players_pagination_retrieves_all() {
         &0u32,
         &50u32,
     );
-    assert_eq!(page1.players.len(), 50, "page 1 must return 50 results");
+    assert_eq!(page1.profiles.len(), 50, "page 1 must return 50 results");
+    assert!(page1.next_cursor > 0, "page 1 must indicate more results");
 
     let page2 = client.filter_players(
         &String::from_str(&env, "EastAfrica"),
         &String::from_str(&env, "Midfielder"),
         &ProgressLevel::Unverified,
-        &50u32,
+        &(page1.next_cursor as u32),
         &50u32,
     );
-    assert_eq!(page2.players.len(), 10, "page 2 must return the remaining 10 results");
+    assert_eq!(page2.profiles.len(), 10, "page 2 must return the remaining 10 results");
+    assert_eq!(page2.next_cursor, 0, "page 2 must indicate no more results");
 
     // Total across both pages = 60.
-    let total = page1.players.len() + page2.players.len();
+    let total = page1.profiles.len() + page2.profiles.len();
     assert_eq!(total, 60, "total players across both pages must be 60");
 }
 
@@ -160,7 +162,7 @@ fn test_filter_players_cpu_cost_at_50_results() {
          (budget {FILTER_PLAYERS_BUDGET})"
     );
 
-    assert_eq!(result.players.len(), 50);
+    assert_eq!(result.profiles.len(), 50);
     assert!(
         cpu <= FILTER_PLAYERS_BUDGET,
         "filter_players(50 results) exceeded budget: {cpu} > {FILTER_PLAYERS_BUDGET}"

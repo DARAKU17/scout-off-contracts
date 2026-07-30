@@ -1222,6 +1222,12 @@ impl RegistrationContract {
     /// - Deactivated players (those with a `PlayerDeactivated` flag) are excluded
     ///   from results. Their profiles are still accessible via `get_player`.
     ///
+    /// `offset` is a count of eligible (non-deactivated, filter-matching)
+    /// entries to skip, NOT a player_id.  `next_cursor` is the count of
+    /// eligible entries processed across all pages so far, so passing it
+    /// back as `offset` on the next call correctly resumes from where
+    /// the previous page ended.
+    ///
     /// When `region` is non-empty the composite `PlayersByLevelRegion` index is
     /// used so only matching buckets are loaded.  When `region` is empty the
     /// function falls back to a full `PlayerIndex` scan filtered by level and
@@ -1286,7 +1292,7 @@ impl RegistrationContract {
                             continue;
                         }
                         if results.len() >= max_results {
-                            next_cursor = player_id;
+                            next_cursor = (skipped + results.len()) as u64;
                             break 'outer;
                         }
                         results.push_back(profile);
@@ -1323,7 +1329,7 @@ impl RegistrationContract {
                         continue;
                     }
                     if results.len() >= max_results {
-                        next_cursor = player_id;
+                        next_cursor = (skipped + results.len()) as u64;
                         break;
                     }
                     results.push_back(profile);
@@ -2556,12 +2562,12 @@ mod tests {
         assert_eq!(page1.profiles.len(), 4);
         assert_ne!(page1.next_cursor, 0, "expected more pages");
 
-        // Page 2: offset=4, limit=4 → remaining Forwards
+        // Page 2: pass next_cursor from page1 as offset → remaining Forwards
         let page2 = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
-            &4u32,
+            &(page1.next_cursor as u32),
             &4u32,
         );
         // 8 Forwards total, already skipped 4, so 4 more remain
@@ -2793,6 +2799,116 @@ mod tests {
             result_reactivated.profiles.get(0).unwrap().player_id,
             player_id
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1017: filter_players pagination cursor consistency regression
+    // -------------------------------------------------------------------------
+
+    /// Position filter before a page boundary must not cause silent gaps or
+    /// duplicates when following the documented next_cursor -> offset contract.
+    ///
+    /// Concrete scenario: 5 Forwards, 1 Midfielder, 3 Forwards.
+    /// Page 1 (limit=4) triggers a boundary at player 5 (Forward).
+    /// With the old bug, next_cursor was player_id 5, and passing it back
+    /// as offset (a count) skipped 5 eligible entries instead of 4 — losing
+    /// player 5.  The cursor is now a count of eligible entries processed,
+    /// so this gap cannot occur.
+    #[test]
+    fn test_filter_players_pagination_cursor_no_gaps() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Register 5 Forwards in West Africa
+        for _ in 0..5 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 18,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+        // Register 1 Midfielder to break up the list
+        let wallet_mid = Address::generate(&env);
+        let vitals_mid = PlayerVitals {
+            age: 22,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        client.register_player(&wallet_mid, &vitals_mid, &hashes);
+        // Register 3 more Forwards
+        for _ in 0..3 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 19,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+
+        // Walk through all pages using the documented cursor contract.
+        let mut all_ids: Vec<u64> = Vec::new(&env);
+        let mut offset: u32 = 0;
+        loop {
+            let page = client.filter_players(
+                &String::from_str(&env, "West Africa"),
+                &String::from_str(&env, "Forward"),
+                &ProgressLevel::Unverified,
+                &offset,
+                &4u32,
+            );
+            for i in 0..page.profiles.len() {
+                all_ids.push_back(page.profiles.get(i).unwrap().player_id);
+            }
+            if page.next_cursor == 0 {
+                break;
+            }
+            offset = page.next_cursor as u32;
+        }
+
+        // Must have exactly 8 Forwards with no gaps or duplicates.
+        assert_eq!(all_ids.len(), 8, "must return all 8 Forwards");
+
+        // Verify no duplicates and all expected IDs are present.
+        let expected: soroban_sdk::Vec<u64> = {
+            let mut v = soroban_sdk::Vec::new(&env);
+            v.push_back(1);
+            v.push_back(2);
+            v.push_back(3);
+            v.push_back(4);
+            v.push_back(5);
+            v.push_back(7);
+            v.push_back(8);
+            v.push_back(9);
+            v
+        };
+        // Sort all_ids (infallible via bubble-sort on small vec).
+        // Since Vec in soroban is limited, just check membership + count.
+        for i in 0..expected.len() {
+            let id = expected.get(i).unwrap();
+            assert!(
+                all_ids.contains(&id),
+                "Forward player {} must appear in paginated results",
+                id
+            );
+        }
+        // Check each returned ID is in expected.
+        for i in 0..all_ids.len() {
+            let id = all_ids.get(i).unwrap();
+            assert!(
+                expected.contains(&id),
+                "player {} is not a Forward — gap/duplicate detected",
+                id
+            );
+        }
     }
 
     #[test]
