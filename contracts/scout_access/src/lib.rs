@@ -2824,6 +2824,12 @@ mod tests {
         assert_eq!(client.get_trial_count(&1u64), 1);
     }
 
+    /// Issue: TrialCounter's TTL must be extended alongside TrialOffer in the
+    /// same log_trial_offer call, so a counter expiry never causes the next
+    /// offer to be written back to index 1 (overwriting/orphaning the first
+    /// offer that is still live).
+    #[test]
+    fn test_trial_offer_not_orphaned_by_counter_expiry() {
     #[test]
     fn test_trial_counter_survives_ttl_expiry_and_continues_incrementing() {
         let (env, admin, xlm, _contract_id, client) = setup();
@@ -2846,12 +2852,20 @@ mod tests {
         );
         assert_eq!(idx1, 1);
 
+        // Advance past the default persistent entry TTL (500). Without the
+        // TrialCounter extend_ttl call, this would drop the counter back to
+        // 0 and the next offer would be written to index 1 again, silently
+        // overwriting the offer above.
         // Advance the ledger well past the default persistent entry TTL (500)
         // that a not-yet-extended TrialCounter would have expired at.
         env.ledger().with_mut(|l| {
             l.sequence_number = 100_000 + 1_000;
         });
 
+        // A second scout logs an offer for the same player. TrialCounter is
+        // keyed by player_id only, so this exercises the shared counter
+        // without depending on scout1's unrelated Subscription/ContactRecord
+        // TTL window.
         // TrialCounter must have survived the expiry window untouched.
         assert_eq!(client.get_trial_count(&1u64), 1);
 
@@ -2870,6 +2884,12 @@ mod tests {
             &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
         );
 
+        // The new offer must land at index 2, not collide with index 1.
+        assert_eq!(idx2, 2);
+        assert_eq!(client.get_trial_count(&1u64), 2);
+
+        // Neither offer is orphaned: both remain readable at their original
+        // indices with their original scout.
         // The counter must continue from 1, not reset (i.e. become 2), and
         // the original offer at index 1 must remain intact.
         assert_eq!(idx2, 2);
