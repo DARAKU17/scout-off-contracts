@@ -35,10 +35,21 @@ measured-cost trends can be tracked across commits.
 | progress       | `advance_level`                  | 15,000,000                |
 | progress       | `reset_player_level`             | 12,000,000                |
 | progress       | `get_progress_history_page`      | 10,000,000                |
+| progress       | `verify_history_proof`           | 8,000,000                 |
 | scout_access   | `subscribe`                      | 20,000,000                |
 | scout_access   | `pay_to_contact`                 | 20,000,000                |
 | scout_access   | `batch_contact_players` (5 ids)  | 25,000,000                |
 | scout_access   | `expire_trial_offers` (limit=20) | 25,000,000                |
+
+`progress::advance_level` and `progress::reset_player_level` (issue #700)
+both now also recompute the player's Merkle history commitment root on
+every call (`record_progress_entry`'s `O(n)` `sha256` calls over the
+already-materialized `HistoryVec`, `n` bounded to a handful of entries in
+practice) — their budgets above were left unchanged since both already
+carry generous headroom, but this has not been confirmed against a real CI
+run in the environment this change was authored in (no Rust toolchain
+available to run `cargo test` locally). Check the first post-merge
+`cpu-cost-budget-report.txt` and tighten/raise as needed.
 
 These budgets are calibrated automatically by `scripts/calibrate-budgets.py`
 from the `cpu-cost-budget-report.txt` CI artifact.  The script adds a

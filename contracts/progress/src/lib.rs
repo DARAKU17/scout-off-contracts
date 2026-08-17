@@ -6,9 +6,10 @@ mod types;
 
 use errors::ProgressError;
 use scoutchain_shared_types::{require_admin, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
-use types::{DataKey, ProgressEntry, ProgressWiringState};
+use types::{DataKey, HistoryProofStep, ProgressEntry, ProgressWiringState};
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::xdr::ToXdr;
 
 const INSTANCE_TTL_MIN: u32 = 100;
 const INSTANCE_TTL_MAX: u32 = 500;
@@ -574,6 +575,127 @@ impl ProgressContract {
         result
     }
 
+    /// Return the current Merkle commitment root over a player's full
+    /// progress history — see `record_progress_entry`'s doc comment for how
+    /// it is constructed and maintained.
+    ///
+    /// This is the value `verify_history_proof` checks proofs against. A
+    /// caller who does not trust the RPC node serving this query can compare
+    /// the root returned by multiple independent nodes, or re-derive it
+    /// themselves from `get_progress_history` using the same construction.
+    ///
+    /// Returns 32 zero bytes for a player with no recorded history (mirrors
+    /// the zero-value defaults used by `get_level` / `get_history_count` for
+    /// unknown player IDs) — this is not a valid commitment for any real
+    /// history and `verify_history_proof` never treats it as one, since it
+    /// returns `PlayerNotFound` before comparing against it.
+    pub fn get_progress_root(env: Env, player_id: u64) -> BytesN<32> {
+        let key = DataKey::HistoryRoot(player_id);
+        let root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        root
+    }
+
+    /// Generate a Merkle inclusion proof for the history entry at `index`
+    /// (1-indexed, matching `get_history_entry`) that verifies against the
+    /// player's *current* `get_progress_root`.
+    ///
+    /// This is a read-only convenience for callers who do not want to
+    /// re-implement the tree construction off-chain (an indexer, a test, a
+    /// dispute-resolution UI); it recomputes the proof on demand from
+    /// `HistoryVec` rather than storing it, since storing a proof per entry
+    /// would require rewriting every prior entry's proof on each append.
+    /// `verify_history_proof` does not depend on this function — it accepts
+    /// any structurally valid proof from any source.
+    pub fn get_history_proof(
+        env: Env,
+        player_id: u64,
+        index: u32,
+    ) -> Result<Vec<HistoryProofStep>, ProgressError> {
+        let history: Vec<ProgressEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::HistoryVec(player_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let n = history.len();
+        if n == 0 || index == 0 || index > n {
+            return Err(ProgressError::PlayerNotFound);
+        }
+
+        let leaves = Self::leaf_hashes(&env, &history);
+        let mut proof: Vec<HistoryProofStep> = Vec::new(&env);
+        Self::path_range(&env, &leaves, index - 1, 0, n, &mut proof);
+        Ok(proof)
+    }
+
+    /// Verify that `entry` is genuinely committed in `player_id`'s history at
+    /// the *current* `get_progress_root`, using a caller-supplied Merkle
+    /// proof.
+    ///
+    /// This is the independently-checkable half of the "tamper-proof
+    /// history" guarantee: a light client, off-chain indexer, or dispute
+    /// process can call this against any Soroban RPC node — including ones
+    /// it does not otherwise trust — because the verification is a pure
+    /// function of `(player_id, entry, proof, stored_root)` computed
+    /// entirely on-chain, not an assertion the node makes about its own
+    /// data.
+    ///
+    /// Returns `Ok(false)` — never panics — for a forged entry, a proof
+    /// against a stale root (e.g. one predating the player's most recent
+    /// append), or a structurally malformed proof (wrong length, empty when
+    /// non-empty is required, garbage sibling bytes). Proofs longer than
+    /// `MAX_PROOF_STEPS` are rejected as malformed without being hashed, so
+    /// an adversarial caller cannot force unbounded verification cost by
+    /// submitting an arbitrarily long proof Vec — the real proof depth for
+    /// any history this contract can produce is `ceil(log2(n))`, and
+    /// `MAX_PROOF_STEPS` leaves generous headroom above that.
+    ///
+    /// Returns `Err(ProgressError::PlayerNotFound)` only when the player has
+    /// no committed root at all (no history has ever been recorded) — there
+    /// is nothing to verify against, which is a different condition from an
+    /// existing player's proof failing to verify.
+    pub fn verify_history_proof(
+        env: Env,
+        player_id: u64,
+        entry: ProgressEntry,
+        proof: Vec<HistoryProofStep>,
+    ) -> Result<bool, ProgressError> {
+        // Real proof depth never exceeds ~32 even for a history no realistic
+        // caller could ever grow (2^32 entries); this exists purely to bound
+        // adversarial-input cost, not to constrain legitimate proofs.
+        const MAX_PROOF_STEPS: u32 = 32;
+
+        let root_key = DataKey::HistoryRoot(player_id);
+        let stored_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&root_key)
+            .ok_or(ProgressError::PlayerNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&root_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        if proof.len() > MAX_PROOF_STEPS {
+            return Ok(false);
+        }
+        // A proof cannot be replayed against a different player_id even if
+        // its hash bytes happened to verify — the leaf hash binds player_id.
+        if entry.player_id != player_id {
+            return Ok(false);
+        }
+
+        let computed = Self::compute_root_from_proof(&env, &entry, &proof);
+        Ok(computed == stored_root)
+    }
+
     pub fn health(env: Env) -> ContractHealth {
         Self::bump_instance_ttl(&env);
         let initialized = env
@@ -644,6 +766,160 @@ impl ProgressContract {
             .persistent()
             .get(&DataKey::PlayerLevel(player_id))
             .unwrap_or(ProgressLevel::Unverified)
+    }
+
+    /// Numeric tier code for a `ProgressLevel`, used only for canonical leaf
+    /// serialization in `leaf_hash`. Not derived from the enum's Rust
+    /// discriminant (which is not part of any stability contract) so the
+    /// commitment scheme's byte layout stays fixed even if variant order in
+    /// `ProgressLevel` is ever reshuffled.
+    fn level_code(level: &ProgressLevel) -> u32 {
+        match level {
+            ProgressLevel::Unverified => 0,
+            ProgressLevel::VerifiedIdentity => 1,
+            ProgressLevel::PerformanceMilestones => 2,
+            ProgressLevel::EliteTier => 3,
+        }
+    }
+
+    /// Canonical leaf hash for one `ProgressEntry`, per the RFC 6962 Merkle
+    /// Tree Hash convention: `H(0x00 || <canonical field bytes>)`. The
+    /// `0x00` domain-separates leaf hashes from internal-node hashes
+    /// (`node_hash`'s `0x01` prefix) so a leaf can never be replayed as an
+    /// internal node or vice versa (the classic second-preimage attack
+    /// against naive Merkle trees).
+    ///
+    /// Field order is fixed: player_id, old_level, new_level, updated_by,
+    /// updated_at, milestone_ref, ledger_sequence — matching `ProgressEntry`'s
+    /// declaration order. `updated_by` is serialized via `to_xdr`, Soroban's
+    /// canonical `Address` encoding, rather than any string form.
+    fn leaf_hash(env: &Env, entry: &ProgressEntry) -> BytesN<32> {
+        let mut b = Bytes::new(env);
+        b.push_back(0u8);
+        b.extend_from_slice(&entry.player_id.to_be_bytes());
+        b.extend_from_slice(&Self::level_code(&entry.old_level).to_be_bytes());
+        b.extend_from_slice(&Self::level_code(&entry.new_level).to_be_bytes());
+        b.append(&entry.updated_by.clone().to_xdr(env));
+        b.extend_from_slice(&entry.updated_at.to_be_bytes());
+        b.extend_from_slice(&entry.milestone_ref.to_be_bytes());
+        b.extend_from_slice(&entry.ledger_sequence.to_be_bytes());
+        env.crypto().sha256(&b).to_bytes()
+    }
+
+    /// Canonical internal-node hash: `H(0x01 || left || right)`. See
+    /// `leaf_hash` for why the `0x01` prefix (domain separation) matters.
+    fn node_hash(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
+        let mut b = Bytes::new(env);
+        b.push_back(1u8);
+        b.append(&Bytes::from_slice(env, &left.to_array()));
+        b.append(&Bytes::from_slice(env, &right.to_array()));
+        env.crypto().sha256(&b).to_bytes()
+    }
+
+    fn leaf_hashes(env: &Env, history: &Vec<ProgressEntry>) -> Vec<BytesN<32>> {
+        let mut leaves: Vec<BytesN<32>> = Vec::new(env);
+        for i in 0..history.len() {
+            let e = history.get(i).unwrap();
+            leaves.push_back(Self::leaf_hash(env, &e));
+        }
+        leaves
+    }
+
+    /// Largest power of two strictly less than `n` (`n` must be `>= 2`).
+    /// This is the split point RFC 6962's Merkle Tree Hash uses to divide an
+    /// arbitrary-size leaf range into a perfect left subtree and a
+    /// (possibly imperfect) right subtree — the standard, formally
+    /// specified way to build a deterministic binary Merkle tree over any
+    /// number of leaves, not just powers of two.
+    fn largest_pow2_lt(n: u32) -> u32 {
+        let mut k: u32 = 1;
+        while k.saturating_mul(2) < n {
+            k = k.saturating_mul(2);
+        }
+        k
+    }
+
+    /// RFC 6962 Merkle Tree Hash (MTH) of `leaves[start..end]`.
+    ///
+    /// Recomputed from scratch on every call rather than maintained
+    /// incrementally (e.g. via an MMR peaks accumulator): this contract's
+    /// `record_progress_entry` already reads and rewrites the player's full
+    /// `HistoryVec` on every append for an unrelated, pre-existing reason
+    /// (`get_progress_history`'s O(1)-read optimization — see that key's
+    /// doc comment), so the leaf list is already fully materialized in
+    /// memory at zero extra storage cost. Recomputing `O(n)` leaf/node
+    /// hashes on top of that is `O(n)` extra CPU with no extra storage I/O,
+    /// which is cheaper than the storage cost an incremental accumulator
+    /// would need to persist and is simpler to get correct — and `n` is
+    /// bounded in practice to a handful of entries (three tier advances,
+    /// plus any admin dispute-resolution resets via `reset_player_level`),
+    /// not an unbounded log. See `ci/cpu-cost-budget.md` for the measured
+    /// cost this adds to `advance_level`.
+    fn mth_range(env: &Env, leaves: &Vec<BytesN<32>>, start: u32, end: u32) -> BytesN<32> {
+        let n = end - start;
+        if n == 1 {
+            return leaves.get(start).unwrap();
+        }
+        let k = Self::largest_pow2_lt(n);
+        let left = Self::mth_range(env, leaves, start, start + k);
+        let right = Self::mth_range(env, leaves, start + k, end);
+        Self::node_hash(env, &left, &right)
+    }
+
+    /// RFC 6962 audit path (`PATH`) for leaf `index` within `leaves[start..end]`,
+    /// appended into `proof` in leaf-to-root order (the order
+    /// `compute_root_from_proof` expects to replay). `index` is an absolute
+    /// position into the full `leaves` Vec, not relative to `start`.
+    fn path_range(
+        env: &Env,
+        leaves: &Vec<BytesN<32>>,
+        index: u32,
+        start: u32,
+        end: u32,
+        proof: &mut Vec<HistoryProofStep>,
+    ) {
+        let n = end - start;
+        if n == 1 {
+            return;
+        }
+        let k = Self::largest_pow2_lt(n);
+        if index - start < k {
+            Self::path_range(env, leaves, index, start, start + k, proof);
+            let right_root = Self::mth_range(env, leaves, start + k, end);
+            proof.push_back(HistoryProofStep {
+                sibling: right_root,
+                sibling_is_right: true,
+            });
+        } else {
+            Self::path_range(env, leaves, index, start + k, end, proof);
+            let left_root = Self::mth_range(env, leaves, start, start + k);
+            proof.push_back(HistoryProofStep {
+                sibling: left_root,
+                sibling_is_right: false,
+            });
+        }
+    }
+
+    /// Replay a proof against `entry`'s leaf hash to recompute the root it
+    /// implies. Never panics on a malformed `proof`: any `HistoryProofStep`
+    /// sequence — of any length, containing any bytes — deterministically
+    /// hashes to *some* 32-byte value, which simply will not equal the
+    /// stored root unless the proof is genuine.
+    fn compute_root_from_proof(
+        env: &Env,
+        entry: &ProgressEntry,
+        proof: &Vec<HistoryProofStep>,
+    ) -> BytesN<32> {
+        let mut current = Self::leaf_hash(env, entry);
+        for i in 0..proof.len() {
+            let step = proof.get(i).unwrap();
+            if step.sibling_is_right {
+                current = Self::node_hash(env, &current, &step.sibling);
+            } else {
+                current = Self::node_hash(env, &step.sibling, &current);
+            }
+        }
+        current
     }
 
     /// Record a progress entry for a player.
@@ -721,6 +997,18 @@ impl ProgressContract {
         env.storage()
             .persistent()
             .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        // Recompute the Merkle commitment root over the full (now-updated)
+        // history and persist it — see `mth_range`'s doc comment for why a
+        // full recompute from the just-read `history` Vec is the right
+        // trade-off here rather than an incremental accumulator.
+        let root_key = DataKey::HistoryRoot(player_id);
+        let leaves = Self::leaf_hashes(env, &history);
+        let root = Self::mth_range(env, &leaves, 0, leaves.len());
+        env.storage().persistent().set(&root_key, &root);
+        env.storage()
+            .persistent()
+            .extend_ttl(&root_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         Ok(())
     }

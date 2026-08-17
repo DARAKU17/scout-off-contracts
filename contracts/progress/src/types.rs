@@ -1,6 +1,21 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, BytesN};
 
 pub use scoutchain_shared_types::ProgressLevel;
+
+/// One step of a Merkle inclusion proof for [`ProgressEntry`] history
+/// commitments (see [`DataKey::HistoryRoot`]).
+///
+/// `sibling` is the hash this step combines with the accumulated hash so
+/// far; `sibling_is_right` records which side of the combination it sits
+/// on (`H(current, sibling)` vs `H(sibling, current)`), since the RFC
+/// 6962-style tree used here is not always evenly balanced and the
+/// combination order is therefore not inferable from position alone.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryProofStep {
+    pub sibling: BytesN<32>,
+    pub sibling_is_right: bool,
+}
 
 /// A single entry in the immutable progress history
 #[contracttype]
@@ -96,4 +111,11 @@ pub enum DataKey {
     /// The `Address` of the scout_access contract. Whitelisted as a secondary
     /// authorised caller of `advance_level` (for trial-offer Level-3 advances).
     ScoutAccessContract,
+    /// The current Merkle commitment root over a player's full
+    /// [`ProgressEntry`] history (an RFC 6962-style Merkle Tree Hash — see
+    /// `record_progress_entry`'s doc comment for the construction). Updated
+    /// on every history append alongside [`HistoryVec`]. Independently
+    /// verifiable via `verify_history_proof` without trusting the RPC node
+    /// that served the query — see `get_progress_root`.
+    HistoryRoot(u64),
 }
