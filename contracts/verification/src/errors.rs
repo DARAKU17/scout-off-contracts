@@ -93,10 +93,11 @@ pub enum VerificationError {
     /// outstanding; wait for one to resolve (commit or expire) before
     /// opening another.
     TooManyPendingVotes = 27,
-    /// `approve_milestone` was called while `get_milestone_threshold() > 1`.
-    /// Once an operator opts into k-of-n mode, all milestone commitments
-    /// must go through `attest_milestone` — there is no single-signature
-    /// bypass once threshold >= 2 is configured.
+    /// `approve_milestone` or `submit_attested_milestone` was called while
+    /// `get_milestone_threshold() > 1`. Once an operator opts into k-of-n
+    /// mode, all milestone commitments must go through `attest_milestone` —
+    /// there is no single-signature bypass, on-chain or off-chain-relayed,
+    /// once threshold >= 2 is configured.
     ThresholdModeRequiresAttestation = 28,
 }
 
