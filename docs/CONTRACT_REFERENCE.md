@@ -2251,6 +2251,126 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 ---
 
+### Merkle history commitment
+
+`get_progress_history` and friends are only as trustworthy as the RPC node
+that answers the query — nothing lets a caller independently check that a
+returned `ProgressEntry` is genuinely part of the on-chain record without
+re-trusting that same node. `get_progress_root` / `verify_history_proof`
+close that gap: `record_progress_entry` maintains a cryptographic
+commitment (a Merkle root) over each player's full history, computed with
+`env.crypto().sha256()` — the only hash primitive `soroban-sdk` 25.3.1
+exposes — and any caller can verify an arbitrary historical entry against
+the current root using a proof, entirely on-chain, without trusting
+whichever node served the entry or the proof.
+
+**Construction: RFC 6962 Merkle Tree Hash, recomputed on append, not an
+MMR.** An incremental accumulator (Merkle Mountain Range or similar) is the
+natural shape for a log with unbounded, expensive-to-reread history. This
+one is neither: `record_progress_entry` already reads and rewrites the
+player's full `HistoryVec` on every append for an unrelated, pre-existing
+reason (`get_progress_history`'s O(1)-read optimization), so the complete
+leaf list is already materialized in memory at zero extra storage I/O.
+Recomputing the [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962) Merkle
+Tree Hash — a standard, formally specified, domain-separated binary tree
+construction that (unlike a naive Bitcoin-style pairwise tree) is well
+defined for any number of leaves, not just powers of two — from that
+already-materialized list costs `O(n)` extra `sha256` calls with no extra
+storage operations. `n` is bounded in practice: three tier advances plus
+any admin dispute-resolution resets via `reset_player_level`, not an
+unbounded log, so this stays cheap while being simpler to get correct than
+maintaining a separate incremental peaks structure. See
+`ci/cpu-cost-budget.md` for the measured cost this adds to `advance_level`.
+
+Leaf hashes are `H(0x00 || player_id || old_level_code || new_level_code ||
+updated_by.to_xdr() || updated_at || milestone_ref || ledger_sequence)` in
+that fixed field order (`level_code` is a stable 0–3 tier code, not the
+Rust enum discriminant); internal nodes are `H(0x01 || left || right)`. The
+`0x00`/`0x01` prefixes domain-separate leaves from internal nodes, closing
+the classic second-preimage attack against naive Merkle trees (replaying an
+internal node's hash as if it were a leaf, or vice versa).
+
+**Proof format and bounded verification cost.** A proof is a `Vec` of
+`(sibling_hash, sibling_is_right)` steps, ordered leaf-to-root — the RFC
+6962 audit path. `verify_history_proof` never panics on bad input: it
+rejects proofs longer than a fixed step cap outright (bounding adversarial
+verification cost regardless of what a caller submits) and otherwise simply
+replays the hash chain, which for any malformed, forged, or stale proof
+produces some 32-byte value that will not equal the stored root, returning
+`Ok(false)` rather than erring.
+
+#### `get_progress_root(player_id: u64) -> BytesN<32>`
+
+Return the current Merkle commitment root for a player's history. Returns
+32 zero bytes for a player with no recorded history (never a valid
+commitment for real history, and `verify_history_proof` never treats it as
+one — see that function's `PlayerNotFound` case).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_progress_root --player_id 1
+```
+
+---
+
+#### `get_history_proof(player_id: u64, index: u32) -> Result<Vec<HistoryProofStep>, ProgressError>`
+
+Generate a Merkle inclusion proof for the history entry at `index`
+(1-indexed, matching `get_history_entry`), valid against the player's
+*current* `get_progress_root`. A convenience for callers who would
+otherwise have to reimplement the tree construction off-chain — recomputed
+on demand, not stored (storing a proof per entry would require rewriting
+every prior entry's proof on each append). `verify_history_proof` accepts
+proofs from any source, not only this function.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` (no history, or `index` is `0` or beyond the entry count) |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_history_proof --player_id 1 --index 1
+```
+
+---
+
+#### `verify_history_proof(player_id: u64, entry: ProgressEntry, proof: Vec<HistoryProofStep>) -> Result<bool, ProgressError>`
+
+Verify that `entry` is genuinely committed in `player_id`'s history at the
+current root, using a caller-supplied Merkle proof. This is the
+independently-checkable half of the tamper-proof-history guarantee: the
+result is a pure function of `(player_id, entry, proof, stored_root)`
+computed entirely on-chain, so a caller does not need to trust the RPC node
+answering the call — it can be cross-checked against multiple nodes, or the
+caller can supply a proof it derived itself from `get_progress_history`.
+
+Returns `Ok(false)` — never panics — for a forged entry, a proof computed
+against a stale root (e.g. one predating the player's most recent append),
+or a structurally malformed proof (wrong length, empty when steps are
+required, or longer than the fixed step cap). Returns
+`Err(ProgressError::PlayerNotFound)` only when the player has no committed
+root at all — there is nothing to verify against, a different condition
+from an existing player's proof simply failing to verify.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `PlayerNotFound` (player has no history at all) |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- verify_history_proof --player_id 1 \
+  --entry '<ProgressEntry JSON>' --proof '<HistoryProofStep[] JSON>'
+```
+
+---
+
 #### `version() -> String`
 
 Return the deployed contract version string (from `Cargo.toml` at build time).
@@ -3552,6 +3672,18 @@ pub struct ProgressEntry {
     pub updated_at: u64,        // Unix seconds
     pub milestone_ref: u32,     // links to verification contract index
     pub ledger_sequence: u32,   // Soroban ledger sequence number (not a timestamp)
+}
+```
+
+### `HistoryProofStep`
+
+One step of a `verify_history_proof` / `get_history_proof` Merkle inclusion
+proof — see [Merkle history commitment](#merkle-history-commitment) above.
+
+```rust
+pub struct HistoryProofStep {
+    pub sibling: BytesN<32>,
+    pub sibling_is_right: bool, // combine as H(current, sibling) if true, else H(sibling, current)
 }
 ```
 

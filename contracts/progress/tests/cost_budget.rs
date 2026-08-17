@@ -15,6 +15,18 @@
 //! is intentionally left unset), so the measured cost reflects the progress
 //! contract's own work only, not the cross-contract sync path — that path is
 //! covered by the dedicated registration<->progress integration test instead.
+//!
+//! `advance_level` (and `reset_player_level`, which shares the same
+//! `record_progress_entry` path) additionally cover the Merkle commitment
+//! cost added by issue #700 — recomputing the RFC 6962 Merkle Tree Hash over
+//! the player's (already-materialized) history on every append, `O(n)`
+//! `sha256` calls where `n` is bounded to a handful of entries in practice.
+//! `ADVANCE_LEVEL_CPU_BUDGET` / `RESET_PLAYER_LEVEL_CPU_BUDGET` were not
+//! raised for this: both budgets already carry generous headroom (see the
+//! note below) that a handful of extra `sha256` calls should not exhaust,
+//! but this has not been confirmed against a real CI run in this
+//! environment (no Rust toolchain available — see below) and should be
+//! checked against the first post-merge CI report.
 
 use scoutchain_progress::{ProgressContract, ProgressContractClient};
 use scoutchain_shared_types::ProgressLevel;
@@ -29,6 +41,12 @@ use soroban_sdk::{testutils::Address as _, Address, Env};
 const ADVANCE_LEVEL_CPU_BUDGET: u64 = 15_000_000;
 const RESET_PLAYER_LEVEL_CPU_BUDGET: u64 = 12_000_000;
 const GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET: u64 = 10_000_000;
+// New with issue #700; same "generous placeholder, no toolchain to measure
+// a real baseline" caveat as the constants above. Verification does a
+// handful of sha256 calls proportional to proof length (bounded to
+// MAX_PROOF_STEPS = 32 in the worst adversarial case, ~1-2 in the realistic
+// case), so this should sit well under the placeholder.
+const VERIFY_HISTORY_PROOF_CPU_BUDGET: u64 = 8_000_000;
 
 fn setup() -> (Env, ProgressContractClient<'static>, Address) {
     let env = Env::default();
@@ -89,5 +107,24 @@ fn cost_get_progress_history_page() {
         &env,
         "get_progress_history_page",
         GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET,
+    );
+}
+
+#[test]
+fn cost_verify_history_proof() {
+    let (env, client, verification) = setup();
+    client.advance_level(&verification, &1u64, &1u32);
+    client.advance_level(&verification, &1u64, &2u32);
+    client.advance_level(&verification, &1u64, &3u32);
+
+    let entry = client.get_history_entry(&1u64, &2u32);
+    let proof = client.get_history_proof(&1u64, &2u32);
+
+    env.cost_estimate().budget().reset_default();
+    client.verify_history_proof(&1u64, &entry, &proof);
+    assert_cpu_budget(
+        &env,
+        "verify_history_proof",
+        VERIFY_HISTORY_PROOF_CPU_BUDGET,
     );
 }
