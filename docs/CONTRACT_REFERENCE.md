@@ -1111,6 +1111,19 @@ not block a fresh vote in round 1. The claim's storage record itself is
 reused in place (not deleted), so it never becomes silently-unreachable dead
 storage — `is_attestation_window_expired` reports its state explicitly.
 
+**The off-chain-signed relay path is gated identically to `approve_milestone`.**
+`submit_attested_milestone` (issue #703) commits a milestone via
+`commit_approved_milestone` — the same shared commit function
+`attest_milestone` uses at threshold — on the strength of exactly one
+validator's ed25519 signature. Once `set_milestone_threshold(n)` with `n >= 2`
+is configured, `submit_attested_milestone` also rejects every call with
+`ThresholdModeRequiresAttestation`, exactly like `approve_milestone`. Without
+this, k-of-n mode would eliminate the single-signature bypass through
+`approve_milestone` while leaving an equivalent, unmonitored bypass open
+through the relay path — a single validator's off-chain signature could still
+unilaterally commit a milestone and trigger `progress.advance_level`, which
+is precisely the trust model this mechanism exists to replace.
+
 #### `attest_milestone(validator_wallet: Address, player_id: u64, description: String, evidence_hash: String) -> Result<AttestationStatus, VerificationError>`
 
 Cast one independent vote toward a k-of-n threshold milestone claim. Returns
@@ -1185,7 +1198,12 @@ before any validator has attested to it. Includes `vote_count`, `round`,
 #### `has_attested(player_id: u64, evidence_hash: String, validator_wallet: Address) -> bool`
 
 Whether `validator_wallet` has an active (not-yet-expired, not-yet-committed)
-vote recorded for this claim's current round.
+vote recorded for this claim's current round. Round-bumping on window expiry
+is lazy — it only happens inside the next `attest_milestone` call for a given
+claim — so this function independently re-checks the voting window itself
+rather than trusting the claim's on-disk `round` field alone; it returns
+`false` for a vote whose window has already elapsed even if no one has cast
+the next vote yet to formally roll the round over.
 
 | | |
 |---|---|

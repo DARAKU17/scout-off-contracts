@@ -1264,6 +1264,21 @@ impl VerificationContract {
         let mut live_refs: Vec<PendingVoteRef> = Vec::new(&env);
         for i in 0..existing_refs.len() {
             let vref = existing_refs.get(i).unwrap();
+            // This validator's own ref for the exact claim being voted on
+            // right now must be checked against `claim.round` in memory, not
+            // by re-reading storage: when this call is itself the one that
+            // just bumped the round on expiry (above), storage still shows
+            // the pre-bump round until this transaction's writes land further
+            // down. Reading storage here would then treat the just-expired
+            // round-N ref as still live, double-booking one slot in this
+            // validator's MAX_PENDING_VOTES_PER_VALIDATOR budget once the
+            // fresh round-(N+1) ref is pushed below.
+            if vref.player_id == player_id && vref.evidence_hash == evidence_hash {
+                if vref.round == claim.round {
+                    live_refs.push_back(vref);
+                }
+                continue;
+            }
             let other_key = DataKey::PendingMilestoneClaim(vref.player_id, vref.evidence_hash.clone());
             if let Some(other_claim) = env
                 .storage()
@@ -1353,12 +1368,27 @@ impl VerificationContract {
             &DataKey::PendingMilestoneClaim(player_id, evidence_hash.clone()),
         );
         match claim {
-            Some(c) => env.storage().persistent().has(&DataKey::PendingMilestoneVote(
-                player_id,
-                evidence_hash,
-                c.round,
-                validator_wallet,
-            )),
+            Some(c) => {
+                // Round-bumping on expiry is lazy — it only happens inside
+                // the next `attest_milestone` call for this claim, so a
+                // claim can sit in storage past its window with `c.round`
+                // still pointing at the stale round. Without this check,
+                // this function would report `true` for a vote that will
+                // not count toward any future threshold-cross, contradicting
+                // its own "not-yet-expired" contract.
+                let window = Self::get_voting_window_secs(env.clone());
+                let expired = c.vote_count > 0
+                    && env.ledger().timestamp().saturating_sub(c.created_at) > window;
+                if expired {
+                    return false;
+                }
+                env.storage().persistent().has(&DataKey::PendingMilestoneVote(
+                    player_id,
+                    evidence_hash,
+                    c.round,
+                    validator_wallet,
+                ))
+            }
             None => false,
         }
     }
@@ -1466,6 +1496,14 @@ impl VerificationContract {
     /// the validator. Validator identity is taken exclusively from the signed
     /// `attestation.validator_wallet` after `env.crypto().ed25519_verify`
     /// succeeds against that wallet's registered attestation key.
+    ///
+    /// Commits via the same `commit_approved_milestone` path `approve_milestone`
+    /// uses, on the strength of exactly one signature — so it is gated by
+    /// k-of-n threshold mode identically: once `get_milestone_threshold() > 1`,
+    /// this call rejects with `ThresholdModeRequiresAttestation` and
+    /// `attest_milestone` becomes the only path to commit. Without this gate,
+    /// this relay path would remain a single-signature bypass of a configured
+    /// threshold policy even after `approve_milestone` itself was closed.
     pub fn submit_attested_milestone(
         env: Env,
         relayer: Address,
@@ -1476,6 +1514,16 @@ impl VerificationContract {
         Self::require_approve_milestone_not_paused(&env)?;
         // Relayer authorizes fee payment only — holds no special privilege.
         relayer.require_auth();
+
+        // Once an operator has opted into k-of-n threshold mode, a single
+        // validator's off-chain-signed attestation must not be able to
+        // commit a milestone unilaterally either — this path calls the same
+        // `commit_approved_milestone` as `approve_milestone` on the strength
+        // of exactly one signature, so it needs the identical gate or it
+        // becomes an unmonitored bypass of the entire threshold mechanism.
+        if Self::get_milestone_threshold(env.clone()) > 1 {
+            return Err(VerificationError::ThresholdModeRequiresAttestation);
+        }
 
         // Cross-deployment / cross-network binding (checked before verify so a
         // stolen signature for another instance fails closed without relying on
