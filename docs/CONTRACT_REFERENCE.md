@@ -3039,15 +3039,23 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 #### `log_trial_offer(scout: Address, player_id: u64, details_hash: String) -> Result<u32, ScoutAccessError>`
 
-Record a trial offer on-chain. Scout must hold an active Elite subscription.
-`details_hash` is an IPFS/Arweave CID of the offer document. Also calls
-`progress.advance_level` if the progress contract is registered. Returns the
-trial offer index.
+Record a trial offer on-chain and escrow `trial_offer_escrow_stroops` (from
+`FeeConfig`) out of the scout's wallet. Scout must hold an active Elite
+subscription. `details_hash` is an IPFS/Arweave CID of the offer document.
+
+This is **step 1 of the two-step trial-offer flow** — it stores a
+`TrialOffer` record and a `TrialEscrow(amount, expires_at)` record and emits
+`trial_offer_logged`, but it does **not** call `progress.advance_level` and
+does **not** advance the player's level. The player must call
+[`confirm_trial_offer`](#confirm_trial_offerplayer_wallet-address-player_id-u64-index-u32-idempotency_nonce-optionstring---result-scoutaccesserror)
+before `expires_at` to release the escrow and advance to Level 3; see that
+entry for the confirmation-side checks and the expiry/refund branch. Returns
+the trial offer index.
 
 | | |
 |---|---|
 | **Auth** | `scout` must sign (Elite subscription required) |
-| **Errors** | `ContractPaused` · `InvalidInput` · `ScoutNotSubscribed` · `SubscriptionExpired` · `Unauthorized` · `TrialOfferRateLimited` · `Overflow` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `InvalidInput` · `ScoutNotSubscribed` · `SubscriptionExpired` · `Unauthorized` · `TrialOfferRateLimited` · `Overflow` |
 
 **Check precedence order** (when multiple error conditions are simultaneously
 true, the first matching check in this list wins):
@@ -3055,14 +3063,14 @@ true, the first matching check in this list wins):
 | Priority | Condition checked | Error returned |
 |----------|-------------------|---------------|
 | 1 | Contract is paused | `ContractPaused` (3) |
-| 2 | Scout auth | panic / host auth error |
-| 3 | `details_hash` fails CID validation | `InvalidInput` (15) |
-| 4 | No active subscription (no record or expired) | `ScoutNotSubscribed` (6) or `SubscriptionExpired` (7) |
-| 5 | Subscription tier is not Elite | `Unauthorized` (4) |
-| 6 | No `ContactRecord` exists for `(player_id, scout)` | `Unauthorized` (4) |
-| 7 | Rate limit: within 24 h cooldown for `(scout, player_id)` | `TrialOfferRateLimited` (19) |
-| 8 | Trial counter increment overflows | `Overflow` (10) |
-| 9 | Cross-contract `advance_level` fails for a reason other than `AlreadyAtMaxLevel` | `ProgressCallFailed` (14) |
+| 2 | Contract is not initialized | `NotInitialized` (2) |
+| 3 | Scout auth | panic / host auth error |
+| 4 | `details_hash` fails CID validation | `InvalidInput` (15) |
+| 5 | No active subscription (no record or expired) | `ScoutNotSubscribed` (6) or `SubscriptionExpired` (7) |
+| 6 | Subscription tier is not Elite | `Unauthorized` (4) |
+| 7 | No `ContactRecord` exists for `(player_id, scout)` | `Unauthorized` (4) |
+| 8 | Rate limit: within 24 h cooldown for `(scout, player_id)` | `TrialOfferRateLimited` (19) |
+| 9 | Trial counter increment overflows | `Overflow` (10) |
 
 > ✅ **Design note — `require_initialized` check added**: `log_trial_offer`
 > now calls `require_initialized` immediately after `require_not_paused`,
@@ -3070,22 +3078,29 @@ true, the first matching check in this list wins):
 > Fixed by the full guard-ordering audit (PR feat/797-798-801-835). See
 > [Design Discussion §1](#1-log_trial_offer-is-missing-require_initialized--resolved).
 
-> **Design note — `InvalidInput` before subscription check (Priority 3 before 4)**:
+> **Design note — `InvalidInput` before subscription check (Priority 4 before 5)**:
 > `details_hash` is validated before the subscription is looked up. This means
 > a scout with an expired subscription who also supplies a malformed CID sees
 > `InvalidInput`, not `SubscriptionExpired`. Prefer validating inputs as early
 > as possible; this ordering is correct.
 
-> **Design note — both `Unauthorized` codes share priority 5 and 6**: the
+> **Design note — both `Unauthorized` codes share priority 6 and 7**: the
 > tier check and the previous-contact check both return `Unauthorized` (4)
 > but are separate runtime conditions. If a caller has a non-Elite subscription
 > *and* has never contacted the player, they will only ever see `Unauthorized`
-> from the tier check (priority 5 fires first).
+> from the tier check (priority 6 fires first).
 
 > **Design note — `TrialOfferRateLimited` vs `Unauthorized` ordering
-> (Priority 7 after 5–6)**: the rate-limit check occurs after authorization.
+> (Priority 8 after 6–7)**: the rate-limit check occurs after authorization.
 > A non-Elite scout cannot trigger `TrialOfferRateLimited`; they will always
 > see `Unauthorized` first.
+
+> **Design note — `log_trial_offer` does not call `advance_level`**: level
+> advancement and its `ProgressCallFailed` (14) error live entirely in
+> `confirm_trial_offer`. A previous version of this document (and of the
+> contract) had `log_trial_offer` advance the level directly; the
+> escrow-based two-step flow replaced that in the current shipped contract
+> and this doc now matches it.
 
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
@@ -3093,6 +3108,78 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   --scout $SCOUT_ADDRESS \
   --player_id 1 \
   --details_hash '"QmTrialOfferDetails"'
+```
+
+---
+
+#### `confirm_trial_offer(player_wallet: Address, player_id: u64, index: u32, idempotency_nonce: Option<String>) -> Result<(), ScoutAccessError>`
+
+Confirm a previously logged trial offer. Called by the **player**, not the
+scout — this is step 2 of the two-step trial-offer flow. On success, removes
+the `TrialEscrow` record and calls `progress.advance_level` to advance the
+player to Level 3 (Elite Tier).
+
+If called after the escrow's `expires_at`, no level advancement is
+attempted: the escrowed fee is refunded to the originating scout, the
+`TrialEscrow` record is removed, `trial_offer_expired` is emitted, and the
+call returns `TrialOfferExpired`. The scout must call `log_trial_offer`
+again to create a new offer/escrow.
+
+`idempotency_nonce` is optional. If supplied and that nonce was already
+recorded by a prior successful confirmation, the call returns `Ok(())`
+without re-running escrow cleanup or the `advance_level` call — this makes
+it safe for a client to retry after a `ProgressCallFailed` error without
+double-spending the escrow or re-advancing the level.
+
+| | |
+|---|---|
+| **Auth** | `player_wallet` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `TrialOfferAlreadyConfirmed` · `TrialOfferNotFound` · `TrialOfferExpired` · `InvalidInput` · `ProgressCallFailed` |
+
+**Check precedence order** (when multiple error conditions are simultaneously
+true, the first matching check in this list wins):
+
+| Priority | Condition checked | Error returned |
+|----------|-------------------|---------------|
+| 1 | Contract is paused | `ContractPaused` (3) |
+| 2 | Contract is not initialized | `NotInitialized` (2) |
+| 3 | Player auth (`player_wallet`) | panic / host auth error |
+| 4 | No `TrialEscrow` record exists for `(player_id, index)` — never created, or already consumed by a prior confirmation/expiry sweep | `TrialOfferAlreadyConfirmed` (22) |
+| 5 | No `TrialOffer` record exists for `(player_id, index)` | `TrialOfferNotFound` (11) |
+| 6 | `now > escrow.expires_at` — escrow is refunded to the scout and the `TrialEscrow` record removed | `TrialOfferExpired` (23) |
+| 7 | `idempotency_nonce` supplied and already recorded from a prior confirmation | *(none — returns `Ok(())`)* |
+| 8 | Progress contract not registered | `InvalidInput` (15) |
+| 9 | Cross-contract `advance_level` fails | `ProgressCallFailed` (14) |
+
+> **Design note — `TrialOfferAlreadyConfirmed` also covers "never existed"
+> and "already expired" (Priority 4)**: the `TrialEscrow` record is removed
+> both by a successful confirmation and by the expiry-refund branch (and by
+> `expire_trial_offers`), so a missing escrow is ambiguous between "already
+> confirmed," "already expired and refunded," and "no such offer was ever
+> logged at this index." All three return `TrialOfferAlreadyConfirmed`;
+> callers should treat it as "nothing left to confirm" rather than
+> distinguishing the sub-cases.
+
+> **Design note — expiry check runs before the idempotency short-circuit
+> (Priority 6 before 7)**: a retried call carrying a previously-used nonce
+> still returns `TrialOfferExpired` if the offer has since expired — the
+> nonce only short-circuits a replay of a *successful* confirmation, not an
+> expired one.
+
+> **Design note — escrow release is gated on the cross-contract call
+> (Priority 9)**: the `TrialEscrow` record and its `OutstandingTrialEscrows`
+> index entry are only removed after `advance_level` returns successfully.
+> If the cross-contract call fails, the escrow is left in place so the call
+> can be retried (subject to `expires_at`), rather than being silently
+> forfeited.
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  --source $PLAYER_ADDRESS --network testnet \
+  -- confirm_trial_offer \
+  --player_wallet $PLAYER_ADDRESS \
+  --player_id 1 \
+  --index 1
 ```
 
 ---

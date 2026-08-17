@@ -128,7 +128,8 @@ Progress levels are configured per player and enforced on-chain by authorized va
 
 - `subscribe(scout_wallet, tier)` — Purchase a scout subscription to access filtered talent pool
 - `pay_to_contact(player_id, scout_wallet)` — Pay micro-fee to unlock premium data or initiate direct contact
-- `log_trial_offer(player_id, scout_wallet, details_hash)` — Record a trial offer on-chain, advancing player to Level 3
+- `log_trial_offer(player_id, scout_wallet, details_hash)` — Record a trial offer on-chain and escrow the trial fee (step 1 of 2; does not advance the player's level)
+- `confirm_trial_offer(player_id, index, player_wallet)` — Player confirms a pending trial offer before it expires, releasing the escrow and advancing the player to Level 3 (step 2 of 2)
 
 ### Subscription Tier Access
 
@@ -138,7 +139,7 @@ Each tier controls which player progress levels a scout can view and what action
 |------|--------------------------|----------------|---------------------------------|
 | **Basic** | Level 0–1 (Unverified, VerifiedIdentity) | ❌ Not available | ❌ Not available |
 | **Pro** | Level 0–2 (Unverified, VerifiedIdentity, PerformanceMilestones) | ✅ Available (contact fee applies) | ❌ Not available |
-| **Elite** | Level 0–3 (all levels) | ✅ Available (contact fee applies) | ✅ Available (advances player to Level 3) |
+| **Elite** | Level 0–3 (all levels) | ✅ Available (contact fee applies) | ✅ Available (escrows a fee; advances player to Level 3 once the player calls `confirm_trial_offer`) |
 
 **Notes:**
 - A scout without any active subscription cannot call `pay_to_contact` — the contract returns `ScoutNotSubscribed` (code 6).
@@ -180,7 +181,7 @@ Each tier controls which player progress levels a scout can view and what action
 - "Scored 5 goals in Local Cup" → Level 2 milestone, approved by registered coach (untagged — any active validator)
 - "Top speed clocked at 32 km/h" → Level 2 milestone, approved by certified trainer (`milestone_category: "physical-stats"` — only validators tagged for physical-stats)
 - "Academy confirms active membership" → Level 1 milestone, approved by KYC agent (`milestone_category: "identity-kyc"` — only validators tagged for identity-kyc)
-- "Trial offer received from FC Example" → Level 3 milestone, logged by scout
+- "Trial offer received from FC Example" → Level 3 milestone, logged by scout via `log_trial_offer` and confirmed by the player via `confirm_trial_offer`
 
 Validators gain optional **specialization tags** (e.g. `"physical-stats"`, `"identity-kyc"`, `"match-performance"`) when registered. When `approve_milestone` is called with a `milestone_category`, the contract enforces that the validator holds a matching tag — preventing, for example, a pure identity-KYC agent from approving physical performance data. Untagged milestones (category omitted) remain open to any active validator, preserving backward compatibility.
 
@@ -219,9 +220,22 @@ sequenceDiagram
     end
 
     rect rgb(255, 245, 235)
-        Note over Scout,Contract: Trial offer
+        Note over Scout,Contract: Trial offer — step 1: log
         Scout->>Contract: log_trial_offer(player_id, details_hash)
-        Contract-->>Player: progress updated to Level 3 (Elite Tier)
+        Contract->>Contract: escrow trial_offer_escrow_stroops from scout
+        Contract-->>Scout: trial index (trial_offer_logged event)
+    end
+
+    rect rgb(255, 245, 235)
+        Note over Player,Contract: Trial offer — step 2: confirm (player-initiated)
+        Player->>Contract: confirm_trial_offer(player_id, index)
+        alt now <= escrow.expires_at
+            Contract->>Contract: advance_level(player_id, index) [cross-contract call to progress]
+            Contract-->>Player: progress updated to Level 3 (trial_offer_confirmed event)
+        else now > escrow.expires_at
+            Contract->>Scout: refund escrowed fee
+            Contract-->>Player: TrialOfferExpired (trial_offer_expired event)
+        end
     end
 ```
 
@@ -244,7 +258,7 @@ sequenceDiagram
        │
        ▼
 ┌──────────────┐
-│  Level 3     │  ← Scout feedback or trial offer logged (Elite Tier)
+│  Level 3     │  ← Trial offer logged by scout, then confirmed by player before expiry (Elite Tier)
 └──────────────┘
 ```
 
@@ -254,7 +268,7 @@ sequenceDiagram
 |------|----|---------|
 | Level 0 | Level 1 | Validator calls `approve_milestone` — identity confirmed |
 | Level 1 | Level 2 | Validator calls `approve_milestone` — performance stats verified |
-| Level 2 | Level 3 | Scout calls `log_trial_offer` — trial or feedback recorded |
+| Level 2 | Level 3 | Scout calls `log_trial_offer` (escrows a fee), then the **player** calls `confirm_trial_offer` before the escrow expires — trial or feedback recorded. A confirmation logged after expiry refunds the scout instead (`TrialOfferExpired`); the level does not advance until confirmation succeeds. |
 
 ## Security Features
 
@@ -439,8 +453,8 @@ and [docs/INDEXER.md](docs/INDEXER.md).
    - Views tamper-proof progress history before committing to a trial
 
 4. **Trial & Elite Tier**
-   - Scout logs a trial offer on-chain via `log_trial_offer`
-   - Player advances to Level 3 (Elite Tier)
+   - Scout logs a trial offer on-chain via `log_trial_offer`, escrowing the trial fee
+   - Player calls `confirm_trial_offer` before the escrow expires to release the fee and advance to Level 3 (Elite Tier); a late confirmation refunds the scout instead
    - Connection agreement recorded as an immutable on-chain event
 
 5. **Admin / Validator Management**
@@ -662,8 +676,8 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | `subscription_created` | Scout purchases their very first subscription |
 | `subscription_renewed` | Scout renews or upgrades an existing subscription |
 | `player_contacted` | Scout pays to unlock player contact details |
-| `trial_offer_logged` | Scout records a trial offer, advancing player to Level 3 |
-| `trial_offer_confirmed` | Player confirms a pending trial offer before its expiry window closes |
+| `trial_offer_logged` | Scout records a trial offer and escrows the trial fee (does not advance the level) |
+| `trial_offer_confirmed` | Player confirms a pending trial offer before its expiry window closes, releasing the escrow and advancing the player to Level 3 |
 | `trial_offer_expired` | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | Admin withdraws accumulated platform fees |
 | `admin_transfer_proposed` | Current admin proposes a replacement address |
