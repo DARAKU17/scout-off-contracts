@@ -18,6 +18,7 @@ pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
 pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
 pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
+pub const FEE_CONFIG_DELAY_BYPASSED: &str = "fee_config_delay_bypassed";
 
 /// topics: (event_name, admin)  data: admin
 pub fn contract_initialized(env: &Env, admin: &Address) {
@@ -181,6 +182,28 @@ pub fn fee_config_updated(
 ) {
     env.events().publish(
         (Symbol::new(env, "fee_config_updated"), admin.clone()),
+        (old_config.clone(), new_config.clone()),
+    );
+}
+
+/// topics: (event_name, admin)  data: (old_config, new_config)
+///
+/// Emitted only by `update_fee_config`, alongside (never instead of)
+/// `fee_config_updated`, so indexers/auditors can tell — purely from the
+/// event stream — that this particular fee change bypassed the 7-day
+/// `propose_fee_config` / `activate_fee_config` delay (see
+/// docs/FEE_CONFIG_PROPOSAL_DESIGN.md). A `fee_config_updated` event that is
+/// *not* accompanied by this event in the same transaction, and is also not
+/// accompanied by a same-transaction `fee_config_proposed`, was activated via
+/// `activate_fee_config` after the full delay elapsed.
+pub fn fee_config_delay_bypassed(
+    env: &Env,
+    admin: &Address,
+    old_config: &crate::types::FeeConfig,
+    new_config: &crate::types::FeeConfig,
+) {
+    env.events().publish(
+        (Symbol::new(env, "fee_config_delay_bypassed"), admin.clone()),
         (old_config.clone(), new_config.clone()),
     );
 }
