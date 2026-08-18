@@ -185,7 +185,7 @@ have on-chain counterparts requiring TTL maintenance:
 | DB Table | On-Chain? | Soroban DataKey | Est. Entry Size |
 |----------|-----------|-----------------|-----------------|
 | `players` | ✅ | `Player(player_id)` | ~500 bytes |
-| `player_level_history` | ✅ | `HistoryEntry(player_id, index)` + `HistoryVec(player_id)` | ~200 bytes per entry; ~200 bytes + N×200 for vec |
+| `player_level_history` | ✅ | `HistoryEntry(player_id, index)` + bounded `HistoryPage(player_id, page_index)` shards | ~200 bytes per entry; ~200 bytes × page_size per shard, with fixed-size pages instead of one unbounded vec |
 | `scouts` | ✅ | `Scout(scout_id)` | ~300 bytes |
 | `validators` | ✅ | `Validator(wallet)` + `ValidatorVector` | ~300 bytes each; vec ~50 bytes base + N×32 |
 | `validator_history` | ❌ | Off-chain only | — |

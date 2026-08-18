@@ -41,6 +41,7 @@ use soroban_sdk::{testutils::Address as _, Address, Env};
 const ADVANCE_LEVEL_CPU_BUDGET: u64 = 15_000_000;
 const RESET_PLAYER_LEVEL_CPU_BUDGET: u64 = 12_000_000;
 const GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET: u64 = 10_000_000;
+const LONG_HISTORY_ADVANCE_LEVEL_CPU_BUDGET: u64 = 30_000_000;
 // New with issue #700; same "generous placeholder, no toolchain to measure
 // a real baseline" caveat as the constants above. Verification does a
 // handful of sha256 calls proportional to proof length (bounded to
@@ -107,6 +108,27 @@ fn cost_get_progress_history_page() {
         &env,
         "get_progress_history_page",
         GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET,
+    );
+}
+
+#[test]
+fn cost_advance_level_stays_bounded_even_with_long_history() {
+    let (env, client, verification) = setup();
+    let player_id = 42u64;
+
+    for i in 1..=24u32 {
+        client.advance_level(&verification, &player_id, &i);
+        if i % 4 == 0 {
+            client.reset_player_level(&player_id, &ProgressLevel::Unverified);
+        }
+    }
+
+    env.cost_estimate().budget().reset_default();
+    client.advance_level(&verification, &player_id, &99u32);
+    assert_cpu_budget(
+        &env,
+        "advance_level_long_history",
+        LONG_HISTORY_ADVANCE_LEVEL_CPU_BUDGET,
     );
 }
 

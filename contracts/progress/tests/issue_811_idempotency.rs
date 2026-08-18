@@ -116,13 +116,13 @@ fn raw_history_counter(h: &Harness, player_id: u64) -> u32 {
     })
 }
 
-/// Read the packed `HistoryVec` straight out of persistent storage.
-fn raw_history_vec(h: &Harness, player_id: u64) -> Vec<ProgressEntry> {
+/// Read the sharded `HistoryPage` for a single page straight out of storage.
+fn raw_history_page(h: &Harness, player_id: u64, page: u32) -> Vec<ProgressEntry> {
     h.env.as_contract(&h.contract_id, || {
         h.env
             .storage()
             .persistent()
-            .get(&DataKey::HistoryVec(player_id))
+            .get(&DataKey::HistoryPage(player_id, page))
             .unwrap_or_else(|| Vec::new(&h.env))
     })
 }
@@ -137,30 +137,51 @@ fn raw_player_level(h: &Harness, player_id: u64) -> Option<ProgressLevel> {
     })
 }
 
-/// The two history representations (`HistoryEntry(pid, i)` + `HistoryCounter`
-/// and the packed `HistoryVec`) are written by the same function and must never
-/// disagree — a divergence would mean a partially-applied append.
+/// The canonical history is sharded into bounded pages, but every entry still
+/// follows the same logical order as `HistoryEntry(player_id, i)` plus the
+/// counter. A divergence would mean a partially-applied append.
 fn assert_history_representations_agree(h: &Harness, player_id: u64) {
     let counter = raw_history_counter(h, player_id);
-    let packed = raw_history_vec(h, player_id);
+    let page_size = 8u32;
+    let mut reconstructed = Vec::new(&h.env);
+    for page in 0..=((counter.saturating_sub(1)) / page_size) {
+        let entries = raw_history_page(h, player_id, page);
+        for i in 0..entries.len() {
+            reconstructed.push_back(entries.get(i).unwrap());
+        }
+    }
     assert_eq!(
         counter,
-        packed.len(),
-        "HistoryCounter and HistoryVec disagree on entry count"
+        reconstructed.len(),
+        "HistoryCounter and reconstructed page history disagree on entry count"
     );
-    // Indices are 1-based.
     for i in 1..=counter {
         let indexed = h.client.get_history_entry(&player_id, &i);
-        let from_vec = packed.get(i - 1).expect("packed entry must exist");
+        let from_page = reconstructed.get(i - 1).expect("page entry must exist");
         assert_eq!(
-            indexed.new_level, from_vec.new_level,
-            "indexed and packed history disagree at index {i}"
+            indexed.new_level, from_page.new_level,
+            "indexed and paged history disagree at index {i}"
         );
         assert_eq!(
-            indexed.milestone_ref, from_vec.milestone_ref,
-            "indexed and packed history disagree at index {i}"
+            indexed.milestone_ref, from_page.milestone_ref,
+            "indexed and paged history disagree at index {i}"
         );
     }
+}
+
+#[test]
+fn test_history_is_sharded_into_fixed_pages() {
+    let h = setup();
+    let pid: u64 = 99;
+    for milestone in 1..=20u32 {
+        h.client.advance_level(&h.caller, &pid, &milestone);
+    }
+
+    let total = raw_history_counter(&h, pid);
+    assert_eq!(total, 20);
+    assert_eq!(raw_history_page(&h, pid, 0).len(), 8);
+    assert_eq!(raw_history_page(&h, pid, 1).len(), 8);
+    assert_eq!(raw_history_page(&h, pid, 2).len(), 4);
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
