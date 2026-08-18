@@ -91,6 +91,11 @@ pub enum ScoutAccessError {
     // ── Auto-renewal ──
     /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
     AutoRenewNotEnabled = 28,
+
+    // ── Evidence access grants ──
+    /// `admin_revoke_evidence_access` was called for a (player_id, scout)
+    /// pair with no `EvidenceAccessGrant` on record.
+    GrantNotFound = 29,
 }
 
 impl AdminError for ScoutAccessError {
@@ -159,5 +164,10 @@ mod tests {
     #[test]
     fn pro_contact_limit_reached_is_code_20() {
         assert_eq!(ScoutAccessError::ProContactLimitReached as u32, 20);
+    }
+
+    #[test]
+    fn grant_not_found_is_code_29() {
+        assert_eq!(ScoutAccessError::GrantNotFound as u32, 29);
     }
 }

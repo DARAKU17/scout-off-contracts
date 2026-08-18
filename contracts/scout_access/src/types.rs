@@ -131,6 +131,37 @@ pub struct FeeConfigHistoryEntry {
     pub updated_at: u64,
 }
 
+/// On-chain proof that `scout` is authorized to request the off-chain
+/// wrapped decryption key for `player_id`'s confidential evidence.
+///
+/// Written atomically by a successful `pay_to_contact` / `batch_contact_players`
+/// call (see `docs/EVIDENCE_PRIVACY.md`). This is an append-only fact about
+/// the past ("this scout was once entitled to see this evidence"), not a
+/// live entitlement check — it is never mutated except by
+/// `admin_revoke_evidence_access` flipping `revoked`. Subscription downgrade
+/// or expiry does not touch it. Revocation only ever gates *future*
+/// off-chain key-wrap requests; it cannot claw back a key that was already
+/// delivered before the revoke.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EvidenceAccessGrant {
+    /// Player identifier whose evidence this grant authorizes access to.
+    pub player_id: u64,
+    /// Scout wallet authorized by this grant.
+    pub scout: Address,
+    /// Ledger timestamp (Unix seconds) when the grant was issued.
+    pub granted_at: u64,
+    /// The scout's subscription tier at the moment the grant was issued.
+    /// Recorded for audit purposes; it is not re-checked afterward.
+    pub tier_at_grant: SubscriptionTier,
+    /// True once an admin has revoked this grant via
+    /// `admin_revoke_evidence_access`. The record is kept (never deleted) so
+    /// the audit trail of who was ever granted access stays intact.
+    pub revoked: bool,
+    /// Ledger timestamp (Unix seconds) of revocation, if any.
+    pub revoked_at: Option<u64>,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -200,4 +231,20 @@ pub enum DataKey {
     /// the caller to re-check `Subscription.expires_at` for exact filtering,
     /// which `get_subscriptions_expiring_before` already does.
     ExpiryBucket(u64),
+    /// (player_id, scout) → EvidenceAccessGrant. Canonical grant record;
+    /// see `docs/EVIDENCE_PRIVACY.md`. Written once by `pay_to_contact` /
+    /// `batch_contact_players` and only ever mutated by
+    /// `admin_revoke_evidence_access` (flips `revoked`/`revoked_at`).
+    EvidenceAccessGrant(u64, Address),
+    /// Monotonic count of grants ever issued for `player_id`, used to place
+    /// the next grant into `EvidenceAccessGrantPage(player_id, count / PAGE_SIZE)`.
+    /// Never decremented (grants are append-only, so revoking one does not
+    /// free its enumeration slot).
+    EvidenceAccessGrantCount(u64),
+    /// (player_id, page_index) → Vec<Address> of scouts, in issuance order,
+    /// fixed-size-paged so `get_player_access_grants` can seek directly to
+    /// the page(s) covering a given `offset`/`limit` window instead of
+    /// scanning every grant a popular player has ever accumulated. See
+    /// `ACCESS_GRANT_PAGE_SIZE` in `lib.rs`.
+    EvidenceAccessGrantPage(u64, u32),
 }

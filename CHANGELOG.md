@@ -28,6 +28,12 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v0.3.0 (scout_access)`
+- Release date: `2026-08-18`
+- Contracts affected: `scout_access`
+- Summary: Implements the `EvidenceAccessGrant` confidential-evidence authorization system specified in [docs/EVIDENCE_PRIVACY.md](docs/EVIDENCE_PRIVACY.md) (#1040). `pay_to_contact` and `batch_contact_players` now atomically write an `EvidenceAccessGrant(player_id, scout)` — `{granted_at, tier_at_grant, revoked, revoked_at}` — and emit `evidence_access_granted` on every successful contact, never on a rejected one. New query API: `has_evidence_access(player_id, scout) -> bool`, `get_evidence_access_grant(player_id, scout) -> Option<EvidenceAccessGrant>`, and paginated `get_player_access_grants(player_id, offset, limit) -> Vec<EvidenceAccessGrant>` (capped at 50/page, backed by a fixed-size sharded index so cost stays flat regardless of a player's total historical grant count — proven at 1,000+ grants). New admin-gated `admin_revoke_evidence_access(player_id, scout)` marks a grant revoked (never deletes it) and emits `evidence_access_revoked`; grants are append-only facts about a past, successful contact and are **not** auto-revoked by subscription downgrade or expiry — see EVIDENCE_PRIVACY.md for the full rationale and the caveat that revocation only gates future off-chain key-wrap requests. One error code appended: `GrantNotFound` (29). `migrations/004_evidence_access_grants.sql` adds the off-chain mirror table; `scripts/reconcile-indexer.js` reconciles it.
+- Classification: `Non-breaking (MINOR)`
+
 - Version: `v0.2.0 (verification)`
 - Release date: `2026-07-29`
 - Contracts affected: `verification`

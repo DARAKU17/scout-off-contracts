@@ -15,6 +15,7 @@ into PostgreSQL for fast querying.  It runs as a separate process from the API.
 | `trial_offers` | `scout_access.log_trial_offer` events | Trial offer records |
 | `subscriptions` | `scout_access.scout_subscribed` events | Active subscriptions |
 | `fee_withdrawals` | `scout_access.fees_withdrawn` events | Fee withdrawal audit log |
+| `evidence_access_grants` | `scout_access.evidence_access_granted` / `evidence_access_revoked` events | Confidential-evidence viewer authorizations (see [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md)) |
 
 ## Reconciliation
 
@@ -113,6 +114,7 @@ too, not only value-level drift on rows both sides already agree exist.
 | `scout_subscriptions` | `scout_access.get_subscribers_by_tier` (all three tiers) + `get_subscription` | tier, subscribed_at, expires_at |
 | `trial_offers` | `scout_access.get_trial_count` + `get_trial_offer`, per player | scout, details_hash, logged_at |
 | `contact_records` | `scout_access.get_player_contacts`, per player | existence only (the contract's `contacted_at` is a ledger timestamp; the DB column records indexer insert time, so it isn't a comparable field — see "Known gaps" below) |
+| `evidence_access_grants` | `scout_access.get_player_access_grants` (paginated, 50/page), per player | existence, `granted_at`, `tier_at_grant`, `revoked` |
 | `indexer_cursor` | Soroban RPC `getLatestLedger` (only if `--rpc-url` is passed) | reports ledger lag when it exceeds 100 ledgers; informational, not a hard mismatch |
 
 `player_level_history`, `validator_history`, `fee_config_history`, and
