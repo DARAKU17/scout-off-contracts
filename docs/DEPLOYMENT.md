@@ -72,17 +72,47 @@ stellar contract invoke \
 ```
 
 Both functions emit `progress_contract_updated` with the new address, so
-off-chain indexers see the change either way.
+off-chain indexers see the change either way. As of issue #1041 both also
+emit `wiring_updated` (address + a bumped re-wiring epoch) alongside it — see
+[`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+`verification.set_registration_contract` carries the identical first-call-only
+guard (with `update_registration_contract` as its own escape hatch) — it
+predates this doc section but works the same way.
 
+Every other `set_*_contract` setter across all four contracts — including
 `registration.set_progress_contract` and `scout_access.set_progress_contract`
-have no such guard — they can always be re-invoked to re-wire the link, and
-`scout_access` also exposes `update_progress_contract` as an alias for the
-same call so the same verb works across contracts.
+/ `set_registration_contract` — has no such guard: they can always be
+re-invoked to re-wire the link, and `scout_access` also exposes
+`update_progress_contract` as an alias for the same call so the same verb
+works across contracts. This asymmetry (verification's two links
+first-call-only, every other link freely re-settable) is deliberate and
+preserved for backward compatibility with already-deployed contracts — see
+`docs/WIRING_REGISTRY_DESIGN.md`'s re-wiring policy section for why it was
+not homogenised further.
 
-`./scripts/initialize.sh` is idempotent with respect to this link: if
-`set_progress_contract` on `verification` fails with `AlreadyConfigured`
+`./scripts/initialize.sh` is idempotent with respect to both of
+verification's guarded links: if `set_progress_contract` or
+`set_registration_contract` on `verification` fails with `AlreadyConfigured`
 (e.g. because the script is being re-run), it automatically falls back to
-`update_progress_contract` instead of aborting.
+`update_progress_contract` / `update_registration_contract` instead of
+aborting.
+
+### Checking wiring is actually consistent, not just "set"
+
+Every contract now exposes `get_wiring_state()`, returning each peer
+pointer's address **and** a monotonically-incrementing `epoch` bumped on
+every re-wiring call (`scoutchain_shared_types::WiringLink`). Because Soroban
+has no atomic multi-contract transaction, a re-wiring operation touching
+several contracts (e.g. redeploying `progress` requires updating three
+separate `ProgressContract` pointers on `verification`, `registration`, and
+`scout_access`) can fail or be interrupted partway through, leaving some
+pointers updated and others stale. `scripts/verify-cross-contract-wiring.sh`
+detects exactly this: it groups the platform's eight peer-address pointers by
+which contract they target, and flags a group as `PARTIAL` when some members
+agree with the target's actual deployed address and others don't — distinct
+from `NEVER_CONFIGURED` (nobody has wired it yet) and `FULLY_WIRED`. Run it
+with `--repair` to print just the corrective `stellar contract invoke`
+commands for whatever is inconsistent.
 
 ---
 
@@ -108,12 +138,20 @@ chmod +x scripts/deploy.sh
 ```bash
 chmod +x scripts/initialize.sh
 ./scripts/initialize.sh testnet
-# Sets admin, fee config, and wires all cross-contract links:
+# Sets admin, fee config, and wires all eight cross-contract links:
 # - Verification → Progress: verification.set_progress_contract
 # - Registration ← Progress: registration.set_progress_contract
+# - Verification → Registration: verification.set_registration_contract
 # - Progress → Verification: progress.set_verification_contract
 # - Progress → Registration: progress.set_registration_contract
+# - Progress → Scout Access: progress.set_scout_access_contract
 # - Scout Access → Progress: scout_access.set_progress_contract
+# - Scout Access → Registration: scout_access.set_registration_contract
+#
+# Then gates success on scripts/verify-cross-contract-wiring.sh — the script
+# aborts with a non-zero exit if any link is missing, misconfigured, or
+# partially re-wired, rather than declaring success just because none of the
+# individual `stellar contract invoke` calls above returned an error.
 ```
 
 ### 4. Generate TypeScript bindings
@@ -134,8 +172,11 @@ chmod +x testnet/seed.sh
 ### 6. Verify deployment health and wiring (recommended)
 
 After deploying and initializing, run the combined readiness check to confirm
-all four contracts are healthy (initialized and not paused) and all five
-cross-contract wiring links are correctly set before routing any traffic:
+all four contracts are healthy (initialized and not paused) and all eight
+cross-contract wiring links are correctly and consistently set — not just
+present, but agreeing with each other, catching a partially-applied re-wiring
+(see [Checking wiring is actually consistent](#checking-wiring-is-actually-consistent-not-just-set)
+above) — before routing any traffic:
 
 ```bash
 chmod +x scripts/full-readiness-check.sh
@@ -264,7 +305,7 @@ replace `0` with the desired starting ledger sequence number.
 - [ ] Run `./scripts/deploy.sh mainnet`
 - [ ] Run `./scripts/initialize.sh mainnet`
 - [ ] Verify all contract IDs in `.env.contracts`
-- [ ] **Run `./scripts/full-readiness-check.sh mainnet`** — confirms all four contracts are healthy and all five wiring links are set (recommended one-command post-deploy check)
+- [ ] **Run `./scripts/full-readiness-check.sh mainnet`** — confirms all four contracts are healthy and all eight wiring links are consistently set, with no partial re-wiring (recommended one-command post-deploy check)
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
 - [ ] Review [docs/STORAGE_COST_MODEL.md](STORAGE_COST_MODEL.md) and confirm the projected monthly storage rent is within budget at expected launch-day scale. Re-measure rent figures if the Stellar fee schedule has changed since the document's last-reviewed date.
 
@@ -470,7 +511,10 @@ You skipped the cross-contract wiring step. `approve_milestone` calls `advance_l
 ./scripts/verify-cross-contract-wiring.sh testnet
 ```
 
-This prints a ✅/❌ table for all five wiring links in one command. If any link shows ❌, fix it by running:
+This prints a ✅/❌ table for all eight wiring links in one command, plus a
+per-target-contract consistency rollup that flags a partial re-wiring
+separately from a link that was simply never configured. If any link shows
+❌, fix it by running:
 
 ```bash
 ./scripts/initialize.sh testnet
@@ -499,10 +543,26 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
   -- set_registration_contract \
   --addr $REGISTRATION_CONTRACT_ID
 
-# 5. Scout Access → Progress link
+# 5. Verification → Registration link (same first-call-only guard as #1;
+#    use update_registration_contract instead if this returns AlreadyConfigured)
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_registration_contract \
+  --reg_contract $REGISTRATION_CONTRACT_ID
+
+# 6. Progress → Scout Access link
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_scout_access_contract \
+  --addr $SCOUT_ACCESS_CONTRACT_ID
+
+# 7. Scout Access → Progress link
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- set_progress_contract \
   --addr $PROGRESS_CONTRACT_ID
+
+# 8. Scout Access → Registration link
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_registration_contract \
+  --addr $REGISTRATION_CONTRACT_ID
 ```
 
 This must be done once after every fresh deployment.

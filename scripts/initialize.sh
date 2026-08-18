@@ -161,6 +161,38 @@ stellar contract invoke \
   -- set_progress_contract \
   --addr "$PROGRESS_CONTRACT_ID"
 
+echo "==> Wiring verification → registration cross-contract link..."
+# verification.set_registration_contract carries the same first-call-only
+# guard as set_progress_contract above (AlreadyConfigured, error #11) — same
+# idempotent fallback to update_registration_contract on a re-run.
+set +e
+SET_REG_CONTRACT_OUTPUT=$(stellar contract invoke \
+  --id "$VERIFICATION_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_registration_contract \
+  --reg_contract "$REGISTRATION_CONTRACT_ID" 2>&1)
+SET_REG_CONTRACT_STATUS=$?
+set -e
+
+if [[ $SET_REG_CONTRACT_STATUS -ne 0 ]]; then
+  if echo "$SET_REG_CONTRACT_OUTPUT" | grep -q "Error(Contract, #11)"; then
+    echo "    verification registration contract already configured — re-wiring via update_registration_contract"
+    stellar contract invoke \
+      --id "$VERIFICATION_CONTRACT_ID" \
+      --source "$DEPLOYER" \
+      --network "$NETWORK" \
+      -- update_registration_contract \
+      --reg_contract "$REGISTRATION_CONTRACT_ID"
+  else
+    echo "$SET_REG_CONTRACT_OUTPUT" >&2
+    echo "ERROR: set_registration_contract failed on the verification contract." >&2
+    exit 1
+  fi
+else
+  echo "$SET_REG_CONTRACT_OUTPUT"
+fi
+
 echo "==> Wiring progress → verification cross-contract link..."
 stellar contract invoke \
   --id "$PROGRESS_CONTRACT_ID" \
@@ -177,6 +209,14 @@ stellar contract invoke \
   -- set_registration_contract \
   --addr "$REGISTRATION_CONTRACT_ID"
 
+echo "==> Wiring progress → scout_access cross-contract link..."
+stellar contract invoke \
+  --id "$PROGRESS_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_scout_access_contract \
+  --addr "$SCOUT_ACCESS_CONTRACT_ID"
+
 echo "==> Wiring scout_access → progress cross-contract link..."
 stellar contract invoke \
   --id "$SCOUT_ACCESS_CONTRACT_ID" \
@@ -185,6 +225,30 @@ stellar contract invoke \
   -- set_progress_contract \
   --addr "$PROGRESS_CONTRACT_ID"
 
+echo "==> Wiring scout_access → registration cross-contract link..."
+stellar contract invoke \
+  --id "$SCOUT_ACCESS_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_registration_contract \
+  --addr "$REGISTRATION_CONTRACT_ID"
+
+echo ""
+echo "==> Verifying wiring consistency (post-wiring gate)..."
+# Every wiring call above is a separate, independently-failable
+# `stellar contract invoke` — Soroban has no atomic multi-contract
+# transaction primitive, so this script cannot guarantee the calls above
+# landed consistently just because none of them returned a non-zero exit
+# code individually (e.g. a call could succeed while wiring the wrong
+# address due to an env var mistake). Gate success on an actual
+# cross-contract consistency check rather than assuming it from the absence
+# of errors above. See docs/WIRING_REGISTRY_DESIGN.md and issue #1041.
+if ! bash "$(dirname "${BASH_SOURCE[0]}")/verify-cross-contract-wiring.sh" "$NETWORK"; then
+  echo "" >&2
+  echo "ERROR: post-wiring consistency check failed — see output above." >&2
+  echo "       Run scripts/verify-cross-contract-wiring.sh --repair for the exact corrective calls." >&2
+  exit 1
+fi
 
 echo ""
 echo "==> Querying deployed contract versions..."

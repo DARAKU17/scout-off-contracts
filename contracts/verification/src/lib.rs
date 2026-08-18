@@ -20,14 +20,17 @@ pub use types::{
     AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
     Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
     PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
-    DiversityConfig,
+    VerificationWiringState,
 };
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Val, Vec};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::IntoVal;
 
-use scoutchain_shared_types::{require_admin, validate_cid, ProgressLevel, safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32}};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, validate_cid, write_wiring_link, ProgressLevel,
+    safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32},
+};
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
 /// Minimum credentials length for validator registration.
@@ -267,13 +270,17 @@ impl VerificationContract {
         if env.storage().instance().has(&DataKey::ProgressContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::ProgressContractSet, &true);
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -284,10 +291,14 @@ impl VerificationContract {
         progress_contract: Address,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -303,12 +314,16 @@ impl VerificationContract {
         if env.storage().instance().has(&DataKey::RegistrationContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::RegistrationContractSet, &true);
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
     }
 
@@ -319,10 +334,36 @@ impl VerificationContract {
         reg_contract: Address,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of both cross-contract peer address pointers held
+    /// by this contract (progress, registration), each with its address and
+    /// re-wiring epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired or paused contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> VerificationWiringState {
+        let progress_contract =
+            read_wiring_link(&env, &DataKey::ProgressContract, &DataKey::ProgressContractEpoch);
+        let registration_contract = read_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+        );
+        VerificationWiringState {
+            progress_contract,
+            registration_contract,
+        }
     }
 
     /// Set the minimum number of distinct validator regions required before
@@ -3537,6 +3578,9 @@ mod tests {
         let addr = Address::generate(&env);
         client.set_progress_contract(&addr);
 
+        // set_progress_contract now emits both the legacy
+        // progress_contract_updated event and the new wiring_updated event
+        // (issue #1041) on every successful call.
         let events = env.events().all();
         assert_eq!(
             events,
@@ -3549,7 +3593,17 @@ mod tests {
                         admin.clone(),
                     )
                         .into_val(&env),
-                    addr.into_val(&env)
+                    addr.clone().into_val(&env)
+                ),
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (addr, 1u32).into_val(&env)
                 )
             ]
         );
@@ -3557,6 +3611,12 @@ mod tests {
 
     #[test]
     fn test_update_progress_contract_succeeds() {
+        // Regression test: verification's legacy first-call-only guard
+        // (set_progress_contract → AlreadyConfigured on re-call, see
+        // test_set_progress_contract_second_call_returns_already_configured)
+        // must remain paired with a still-functional update_progress_contract
+        // escape hatch for intentional re-wiring (issue #1041 keeps this path
+        // deprecated-but-functional, not removed).
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -3565,6 +3625,116 @@ mod tests {
         let addr2 = Address::generate(&env);
         client.set_progress_contract(&addr1);
         client.update_progress_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(addr2));
+        assert_eq!(
+            state.progress_contract.epoch, 2,
+            "update_progress_contract must still bump the epoch, same as any other wiring setter"
+        );
+
+        // The legacy guard itself must still be intact: a further
+        // set_progress_contract call is still rejected, only
+        // update_progress_contract may re-wire past the first call.
+        let addr3 = Address::generate(&env);
+        let result = client.try_set_progress_contract(&addr3);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert_eq!(state.registration_contract.address, None);
+        assert_eq!(state.registration_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_both_links() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        let reg_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        client.set_registration_contract(&reg_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert_eq!(state.registration_contract.address, Some(reg_addr));
+        assert_eq!(state.registration_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_set_registration_contract_second_call_returns_already_configured() {
+        // registration_contract carries the same first-call-only legacy
+        // guard as progress_contract (both predate issue #1041) — verify it
+        // is untouched by the wiring-epoch rollout.
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr = Address::generate(&env);
+        client.set_registration_contract(&addr);
+
+        let result = client.try_set_registration_contract(&addr);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    #[test]
+    fn test_update_registration_contract_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.set_registration_contract(&addr1);
+        client.update_registration_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.registration_contract.address, Some(addr2));
+        assert_eq!(state.registration_contract.epoch, 2);
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let reg_addr = Address::generate(&env);
+        client.set_registration_contract(&reg_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "registration_contract"),
+                    )
+                        .into_val(&env),
+                    (reg_addr, 1u32).into_val(&env)
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -160,6 +160,24 @@ pub fn registration_contract_updated(env: &Env, admin: &Address, registration_co
     );
 }
 
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_progress_contract` / `update_progress_contract` /
+/// `set_registration_contract` call, in addition to (not replacing)
+/// `progress_contract_updated` / `registration_contract_updated`. `link`
+/// identifies which peer pointer changed (`"progress_contract"` or
+/// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
+    );
+}
+
 /// topics: (event_name, admin)  data: (proposed_config, proposed_at)
 pub fn fee_config_proposed(
     env: &Env,

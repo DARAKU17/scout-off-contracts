@@ -2,9 +2,11 @@
 # ScoutChain — full post-deploy readiness check
 #
 # Combines health-check.sh (init/pause status for all four contracts) and
-# verify-cross-contract-wiring.sh (all five cross-contract wiring links) into
-# a single pass/fail command.  Run this after every deployment or upgrade to
-# confirm all contracts are healthy and correctly wired before routing traffic.
+# verify-cross-contract-wiring.sh (all eight cross-contract wiring links,
+# grouped by target contract to detect a partial re-wiring — see
+# docs/WIRING_REGISTRY_DESIGN.md) into a single pass/fail command.  Run this
+# after every deployment or upgrade to confirm all contracts are healthy and
+# correctly wired before routing traffic.
 #
 # Usage:
 #   ./scripts/full-readiness-check.sh [testnet|mainnet|local]
@@ -133,97 +135,152 @@ done
 
 # ===========================================================================
 # SECTION 2 — Cross-contract wiring verification
-# Mirrors the logic in scripts/verify-cross-contract-wiring.sh without calling
-# it as a subprocess, so results feed the combined summary table.
+#
+# Classification logic (WIRED / MISCONFIGURED / UNCONFIGURED per link,
+# FULLY_WIRED / NEVER_CONFIGURED / PARTIAL per target-contract group) mirrors
+# scripts/verify-cross-contract-wiring.sh exactly — see that script's header
+# comment for the full design rationale (why groups are keyed by target
+# contract, what `epoch` is for, why detection doesn't auto-repair). Kept as
+# an inline duplicate here (not a subprocess call) so per-link results feed
+# this script's own combined summary table below; keep both in sync if the
+# classification logic changes.
 # ===========================================================================
 echo ""
-echo "--- Section 2: Cross-contract wiring (all 5 links) ---"
+echo "--- Section 2: Cross-contract wiring (all 8 links) ---"
 
-# ---------------------------------------------------------------------------
-# 2a. get_wiring_state() on the progress contract
-#     (covers 3 of the 5 links: registration, verification, scout_access)
-# ---------------------------------------------------------------------------
+REG_WIRING_OK=0; VER_WIRING_OK=0; PROG_WIRING_OK=0; SA_WIRING_OK=0
+REG_STATE=$(invoke "$REGISTRATION_CONTRACT_ID" get_wiring_state 2>&1) && REG_WIRING_OK=1
+VER_STATE=$(invoke "$VERIFICATION_CONTRACT_ID" get_wiring_state 2>&1) && VER_WIRING_OK=1
+PROG_STATE=$(invoke "$PROGRESS_CONTRACT_ID" get_wiring_state 2>&1) && PROG_WIRING_OK=1
+SA_STATE=$(invoke "$SCOUT_ACCESS_CONTRACT_ID" get_wiring_state 2>&1) && SA_WIRING_OK=1
+
+for entry in \
+  "registration:$REG_WIRING_OK" "verification:$VER_WIRING_OK" \
+  "progress:$PROG_WIRING_OK" "scout_access:$SA_WIRING_OK"; do
+  name="${entry%%:*}"; ok="${entry##*:}"
+  if [[ "$ok" -eq 0 ]]; then
+    echo "  ⚠️  ${name}: get_wiring_state() not available — contract may need upgrading."
+    record_warn "wiring:${name}:getter" "get_wiring_state() not available on ${name} contract"
+  fi
+done
+
+WIRING_ANALYSIS=$(REG_OK="$REG_WIRING_OK" VER_OK="$VER_WIRING_OK" PROG_OK="$PROG_WIRING_OK" SA_OK="$SA_WIRING_OK" \
+  REG_STATE="$REG_STATE" VER_STATE="$VER_STATE" PROG_STATE="$PROG_STATE" SA_STATE="$SA_STATE" \
+  REGISTRATION_CONTRACT_ID="$REGISTRATION_CONTRACT_ID" VERIFICATION_CONTRACT_ID="$VERIFICATION_CONTRACT_ID" \
+  PROGRESS_CONTRACT_ID="$PROGRESS_CONTRACT_ID" SCOUT_ACCESS_CONTRACT_ID="$SCOUT_ACCESS_CONTRACT_ID" \
+  python3 - <<'PYEOF'
+import json, os
+
+reg_ok, ver_ok, prog_ok, sa_ok = (
+    os.environ["REG_OK"] == "1", os.environ["VER_OK"] == "1",
+    os.environ["PROG_OK"] == "1", os.environ["SA_OK"] == "1",
+)
+reg_id, ver_id = os.environ["REGISTRATION_CONTRACT_ID"], os.environ["VERIFICATION_CONTRACT_ID"]
+prog_id, sa_id = os.environ["PROGRESS_CONTRACT_ID"], os.environ["SCOUT_ACCESS_CONTRACT_ID"]
+
+def load(ok, key):
+    if not ok:
+        return None
+    try:
+        return json.loads(os.environ.get(key, ""))
+    except Exception:
+        return None
+
+reg, ver, prog, sa = load(reg_ok, "REG_STATE"), load(ver_ok, "VER_STATE"), load(prog_ok, "PROG_STATE"), load(sa_ok, "SA_STATE")
+
+def flat_link(state, field):
+    if state is None:
+        return (None, None)
+    return (state.get(f"{field}_contract"), state.get(f"{field}_epoch"))
+
+def nested_link(state, field):
+    if state is None:
+        return (None, None)
+    link = state.get(f"{field}_contract") or {}
+    return (link.get("address"), link.get("epoch"))
+
+LINKS = [
+    ("verification", ver_ok, *nested_link(ver, "progress"), "progress", prog_id),
+    ("registration", reg_ok, *nested_link(reg, "progress"), "progress", prog_id),
+    ("scout_access", sa_ok, *nested_link(sa, "progress"), "progress", prog_id),
+    ("verification", ver_ok, *nested_link(ver, "registration"), "registration", reg_id),
+    ("progress", prog_ok, *flat_link(prog, "registration"), "registration", reg_id),
+    ("scout_access", sa_ok, *nested_link(sa, "registration"), "registration", reg_id),
+    ("progress", prog_ok, *flat_link(prog, "verification"), "verification", ver_id),
+    ("progress", prog_ok, *flat_link(prog, "scout_access"), "scout_access", sa_id),
+]
+
+def classify(address, epoch, expected_id):
+    if address is None or not epoch:
+        return "UNCONFIGURED"
+    if address == expected_id:
+        return "WIRED"
+    return "MISCONFIGURED"
+
+groups = {}
+for owner, owner_available, address, epoch, target, target_id in LINKS:
+    if not owner_available:
+        continue
+    status = classify(address, epoch, target_id)
+    print(f"LINK\t{owner}\t{target}\t{status}\t{address}\t{epoch}\t{target_id}")
+    groups.setdefault(target, []).append(status)
+
+for target, statuses in groups.items():
+    if all(s == "WIRED" for s in statuses):
+        group_status = "FULLY_WIRED"
+    elif all(s == "UNCONFIGURED" for s in statuses):
+        group_status = "NEVER_CONFIGURED"
+    else:
+        group_status = "PARTIAL"
+    print(f"GROUP\t{target}\t{group_status}")
+PYEOF
+)
+
+declare -A WIRING_GROUP_STATUS
+while IFS=$'\t' read -r kind a b c d e f; do
+  if [[ "$kind" == "GROUP" ]]; then
+    WIRING_GROUP_STATUS["$a"]="$b"
+    continue
+  fi
+  owner="$a"; target="$b"; status="$c"; address="$d"; epoch="$e"; target_id="$f"
+  cmd="stellar contract invoke --id \$${owner^^}_CONTRACT_ID --network $NETWORK --source \$DEPLOYER -- set_${target}_contract --addr \$${target^^}_CONTRACT_ID"
+  case "$status" in
+    WIRED)
+      echo "  ✅ OK: ${owner} → ${target}_contract: ${address} (epoch ${epoch})"
+      record_pass "wiring:${owner}→${target}" "${address} matches, epoch ${epoch}"
+      ;;
+    UNCONFIGURED)
+      echo "  ❌ FAIL: ${owner} → ${target}_contract: NOT SET"
+      record_fail "wiring:${owner}→${target}" "NOT SET — run: ${cmd}"
+      ;;
+    MISCONFIGURED)
+      echo "  ❌ FAIL: ${owner} → ${target}_contract: ${address} ≠ expected ${target_id}"
+      record_fail "wiring:${owner}→${target}" "${address} ≠ expected ${target_id} (epoch ${epoch} — run: ${cmd})"
+      ;;
+  esac
+done <<< "$WIRING_ANALYSIS"
+
 echo ""
-echo "  Checking progress contract wiring state..."
-
-if state=$(invoke "$PROGRESS_CONTRACT_ID" get_wiring_state 2>&1); then
-    reg_addr=$(echo "$state" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-v = d.get('registration_contract')
-print(v if v else 'NOT SET')
-" 2>/dev/null || echo "parse_error")
-
-    ver_addr=$(echo "$state" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-v = d.get('verification_contract')
-print(v if v else 'NOT SET')
-" 2>/dev/null || echo "parse_error")
-
-    sa_addr=$(echo "$state" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-v = d.get('scout_access_contract')
-print(v if v else 'NOT SET')
-" 2>/dev/null || echo "parse_error")
-
-    # Link 1: progress → registration_contract
-    if [[ "$reg_addr" == "NOT SET" || "$reg_addr" == "parse_error" ]]; then
-        echo "  ❌ FAIL: progress → registration_contract: NOT SET"
-        record_fail "wiring:progress→registration" "NOT SET — run: stellar contract invoke --id \$PROGRESS_CONTRACT_ID -- set_registration_contract --addr \$REGISTRATION_CONTRACT_ID"
-    elif [[ "$reg_addr" == "$REGISTRATION_CONTRACT_ID" ]]; then
-        echo "  ✅ OK: progress → registration_contract: ${reg_addr}"
-        record_pass "wiring:progress→registration" "${reg_addr} matches REGISTRATION_CONTRACT_ID"
-    else
-        echo "  ❌ FAIL: progress → registration_contract: ${reg_addr} ≠ expected ${REGISTRATION_CONTRACT_ID}"
-        record_fail "wiring:progress→registration" "${reg_addr} ≠ expected ${REGISTRATION_CONTRACT_ID}"
-    fi
-
-    # Link 2: progress → verification_contract
-    if [[ "$ver_addr" == "NOT SET" || "$ver_addr" == "parse_error" ]]; then
-        echo "  ❌ FAIL: progress → verification_contract: NOT SET"
-        record_fail "wiring:progress→verification" "NOT SET — run: stellar contract invoke --id \$PROGRESS_CONTRACT_ID -- set_verification_contract --addr \$VERIFICATION_CONTRACT_ID"
-    elif [[ "$ver_addr" == "$VERIFICATION_CONTRACT_ID" ]]; then
-        echo "  ✅ OK: progress → verification_contract: ${ver_addr}"
-        record_pass "wiring:progress→verification" "${ver_addr} matches VERIFICATION_CONTRACT_ID"
-    else
-        echo "  ❌ FAIL: progress → verification_contract: ${ver_addr} ≠ expected ${VERIFICATION_CONTRACT_ID}"
-        record_fail "wiring:progress→verification" "${ver_addr} ≠ expected ${VERIFICATION_CONTRACT_ID}"
-    fi
-
-    # Link 3: progress → scout_access_contract
-    if [[ "$sa_addr" == "NOT SET" || "$sa_addr" == "parse_error" ]]; then
-        echo "  ❌ FAIL: progress → scout_access_contract: NOT SET"
-        record_fail "wiring:progress→scout_access" "NOT SET — run: stellar contract invoke --id \$PROGRESS_CONTRACT_ID -- set_scout_access_contract --addr \$SCOUT_ACCESS_CONTRACT_ID"
-    elif [[ "$sa_addr" == "$SCOUT_ACCESS_CONTRACT_ID" ]]; then
-        echo "  ✅ OK: progress → scout_access_contract: ${sa_addr}"
-        record_pass "wiring:progress→scout_access" "${sa_addr} matches SCOUT_ACCESS_CONTRACT_ID"
-    else
-        echo "  ❌ FAIL: progress → scout_access_contract: ${sa_addr} ≠ expected ${SCOUT_ACCESS_CONTRACT_ID}"
-        record_fail "wiring:progress→scout_access" "${sa_addr} ≠ expected ${SCOUT_ACCESS_CONTRACT_ID}"
-    fi
-else
-    echo "  ⚠️  progress: get_wiring_state() not available — contract may need upgrading."
-    echo "     See docs/WIRING_REGISTRY_DESIGN.md — Step 1 of the wiring observability rollout."
-    record_warn "wiring:progress→registration" "get_wiring_state() not available on progress contract"
-    record_warn "wiring:progress→verification" "get_wiring_state() not available on progress contract"
-    record_warn "wiring:progress→scout_access" "get_wiring_state() not available on progress contract"
-fi
-
-# ---------------------------------------------------------------------------
-# 2b. Remaining links not yet exposed via get_wiring_state()
-#     (verification → progress, scout_access → progress)
-#     Report as pending Step 2 upgrade, mirroring verify-cross-contract-wiring.sh.
-# ---------------------------------------------------------------------------
-echo ""
-echo "  Remaining links (pending Step 2 upgrade — getter not yet on these contracts):"
-echo "  ⚠️  verification → progress_contract: getter not yet available on this contract."
-echo "  ⚠️  scout_access  → progress_contract: getter not yet available on this contract."
-echo "  Add get_wiring_state() to these contracts (see docs/WIRING_REGISTRY_DESIGN.md §Step 2)"
-echo "  and re-run this script to verify all five links."
-record_warn "wiring:verification→progress" "getter not yet available — pending Step 2 upgrade (docs/WIRING_REGISTRY_DESIGN.md)"
-record_warn "wiring:scout_access→progress"  "getter not yet available — pending Step 2 upgrade (docs/WIRING_REGISTRY_DESIGN.md)"
+echo "  Per-target-contract consistency (partial-rewiring detection):"
+for target in progress registration verification scout_access; do
+  gs="${WIRING_GROUP_STATUS[$target]:-UNKNOWN}"
+  case "$gs" in
+    FULLY_WIRED)
+      echo "  ✅ ${target}: all pointers naming it agree"
+      ;;
+    NEVER_CONFIGURED)
+      echo "  ⚠️  ${target}: no dependent has ever wired a pointer to it yet"
+      record_warn "wiring-group:${target}" "never configured"
+      ;;
+    PARTIAL)
+      echo "  ❌ FAIL: ${target}: PARTIAL — some dependents point at it correctly, others do not"
+      record_fail "wiring-group:${target}" "partial re-wiring detected — run scripts/verify-cross-contract-wiring.sh --repair"
+      ;;
+    UNKNOWN)
+      : # No owning contract's get_wiring_state() succeeded for this target; already warned above.
+      ;;
+  esac
+done
 
 # ===========================================================================
 # COMBINED SUMMARY TABLE

@@ -1,8 +1,8 @@
-use soroban_sdk::{contracttype, Address, String, Vec};
+use soroban_sdk::{contracttype, Address, String, Vec, Bytes};
 
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
-pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+pub use scoutchain_shared_types::{ContractHealth, ProgressLevel, WiringLink};
 
 /// Role identifier for migration authorizations.
 #[contracttype]
@@ -21,7 +21,7 @@ pub struct MigrationAuthorization {
     /// Role being migrated (player or scout).
     pub role: MigrationRole,
     /// Hash of the serialized profile data being authorized for migration.
-    pub profile_data_hash: Vec<u8>,
+    pub profile_data_hash: Bytes,
     /// Expected address of the new contract that will redeem this authorization.
     pub new_contract_hint: Address,
     /// Unique nonce to prevent replay. The signer should increment this for
@@ -31,7 +31,7 @@ pub struct MigrationAuthorization {
     pub expires_at: u64,
     /// ed25519 signature over the canonical message:
     /// `wallet || role || profile_data_hash || new_contract_hint || nonce || expires_at`
-    pub signature: Vec<u8>,
+    pub signature: Bytes,
 }
 
 /// Basic player vitals stored on-chain
@@ -120,6 +120,15 @@ pub struct FilterResult {
 pub enum PlayerStatus {
     Active,
     Deactivated,
+}
+
+/// Direct status for a scout.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScoutStatus {
+    Active,
+    Deactivated,
+    NotRegistered,
 }
 
 /// Structured verification record for a scout profile. Replaces/augments the
@@ -219,4 +228,8 @@ pub enum DataKey {
     /// Cooldown in seconds between repeated registration attempts from the
     /// same wallet. 0 means no cooldown. Configurable by admin.
     RegCooldownSecs(u64),
+    /// Tracks used nonces for migration authorizations to prevent replay attacks
+    MigrationNonce(Address, u64),
+    /// Deactivation flag for a scout profile
+    ScoutDeactivated(u64),
 }
