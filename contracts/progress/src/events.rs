@@ -6,6 +6,7 @@ pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
 pub const PROGRESS_UPDATED: &str = "progress_updated";
 pub const PLAYER_LEVEL_RESET: &str = "player_level_reset";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -52,6 +53,25 @@ pub fn player_level_reset(
     env.events().publish(
         (Symbol::new(env, "player_level_reset"), admin.clone()),
         (player_id, old_level.clone(), target_level.clone()),
+    );
+}
+
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_registration_contract` / `set_verification_contract`
+/// / `set_scout_access_contract` call. `link` identifies which of this
+/// contract's three peer pointers changed (`"registration_contract"`,
+/// `"verification_contract"`, or `"scout_access_contract"`) so a single
+/// indexer subscription can distinguish them without three separate event
+/// names. See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
     );
 }
 

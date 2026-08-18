@@ -2,7 +2,7 @@ use soroban_sdk::{contracttype, Address, String, Vec, Bytes};
 
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
-pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+pub use scoutchain_shared_types::{ContractHealth, ProgressLevel, WiringLink};
 
 /// Role identifier for migration authorizations.
 #[contracttype]

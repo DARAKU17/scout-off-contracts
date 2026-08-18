@@ -95,10 +95,14 @@ impl ProgressContract {
 
     /// Store the registration contract address so we can sync player levels (admin only).
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &addr, epoch);
         Ok(())
     }
 
@@ -122,10 +126,14 @@ impl ProgressContract {
     /// that the caller is the configured VerificationContract (admin only).
     pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::VerificationContract,
+            &DataKey::VerificationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "verification_contract", &addr, epoch);
         Ok(())
     }
 
@@ -133,10 +141,14 @@ impl ProgressContract {
     /// advance_level (for trial-offer Level-3 advances). Admin only.
     pub fn set_scout_access_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoutAccessContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ScoutAccessContract,
+            &DataKey::ScoutAccessContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "scout_access_contract", &addr, epoch);
         Ok(())
     }
 
@@ -752,10 +764,28 @@ impl ProgressContract {
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::ScoutAccessContract);
+        let registration_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RegistrationContractEpoch)
+            .unwrap_or(0);
+        let verification_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::VerificationContractEpoch)
+            .unwrap_or(0);
+        let scout_access_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ScoutAccessContractEpoch)
+            .unwrap_or(0);
         ProgressWiringState {
             registration_contract,
             verification_contract,
             scout_access_contract,
+            registration_epoch,
+            verification_epoch,
+            scout_access_epoch,
         }
     }
 
@@ -1698,7 +1728,25 @@ mod tests {
 
     #[test]
     fn test_reset_player_level_success() {
-        let (env, client, validator) = setup();
+        // Self-contained (rather than using the shared setup() helper) so
+        // this test can assert the exact wiring_updated-free event shape
+        // below against a known `admin` address. advance_level's on-chain
+        // milestone_ref validation only applies to the secondary
+        // (scout_access) caller path — the primary VerificationContract
+        // caller (any address, once set_verification_contract is called and
+        // auth is mocked) is trusted without a real deployed verification
+        // contract, matching the pattern already used by e.g.
+        // test_advance_level_sequence via setup().
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let validator = Address::generate(&env);
         let player_id = 1u64;
 
         client.advance_level(&validator, &player_id, &1u32);
