@@ -2594,16 +2594,24 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 #### `update_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
 
 Adjust subscription and contact fee rates. Same validation rules as
-`initialize`.
+`initialize`. This is an atomic, immediate, no-delay path that coexists by
+design with the timelocked `propose_fee_config` / `activate_fee_config`
+mechanism (see [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#option-coexist-chosen)) —
+it deliberately bypasses the latter's 7-day advance-notice guarantee and
+remains callable by the admin at any time, for any fee change (increase or
+decrease).
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
 > Adjusting the fee config emits the `fee_config_updated` event containing both the old and new `FeeConfig` values and also pushes the previous config into the bounded on-chain history (last 5 entries, oldest-first, accessible via `get_fee_config_history`). For a complete unbounded audit trail, replay events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
+>
+> **This call also emits a second, additive event: `fee_config_delay_bypassed`** — same `(old_config, new_config)` data shape as `fee_config_updated`, emitted in the same transaction — specifically so that indexers/auditors can distinguish "this fee change bypassed the 7-day delay via `update_fee_config`" from "this fee change went through `activate_fee_config` after the full delay," which otherwise emit an identical `fee_config_updated` event and are not otherwise distinguishable from the event stream alone. See [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#fee_config_delay_bypassed-new-1055).
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
 | **Errors** | `Unauthorized` · `InvalidInput` |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)`, immediately followed by `fee_config_delay_bypassed` with the same data |
 
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
@@ -3844,9 +3852,10 @@ pub struct FeeConfig {
 > 
 > Historical fee configurations must be reconstructed off-chain by replaying events into the indexer's `fee_config_history` table:
 > - `fee_config_proposed` marks when an increase is staged (proposal timestamp, proposed config).
-> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases).
+> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases, or immediately via the `update_fee_config` bypass — see next bullet).
+> - `fee_config_delay_bypassed` accompanies `fee_config_updated` in the same transaction *only* when `update_fee_config` was the source, letting the audit trail distinguish a delay-bypassing change from a delay-respecting `activate_fee_config` (#1055).
 > 
-> The audit trail is complete: every config change is visible via one of these two events, and subscribers can be notified of coming increases well in advance.
+> The audit trail is complete: every config change is visible via one of these events, subscribers can be notified of coming increases well in advance, and whether any given change honored that advance notice is itself auditable.
 
 
 ### `ProContactPeriod`
@@ -4044,7 +4053,9 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `trial_offer_expired` | event_name, scout (Address) | player_id (u64), index (u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | to (Address), amount (i128), timestamp (u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
-| `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed |
+| `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed (emitted by `update_fee_config`, `activate_fee_config`, and `propose_fee_config`'s immediate-decrease path) |
+| `fee_config_proposed` | event_name, admin (Address) | proposed_config (FeeConfig), proposed_at (u64) | Admin proposes a fee change via `propose_fee_config` — always emitted; also accompanied by `fee_config_updated` in the same transaction if the proposal was an immediate decrease |
+| `fee_config_delay_bypassed` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Emitted only by `update_fee_config`, alongside its own `fee_config_updated`, flagging that this fee change bypassed the 7-day `propose_fee_config`/`activate_fee_config` delay — see [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#fee_config_delay_bypassed-new-1055) |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Current admin proposes a replacement |
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |

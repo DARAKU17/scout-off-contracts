@@ -155,7 +155,25 @@ Emitted whenever a fee config *takes effect* (becomes active).
 
 - After `activate_fee_config`: old = previous active, new = newly activated.
 - After `propose_fee_config` for decreases only: old = previous active, new = newly activated (same transaction).
+- After `update_fee_config`: old = previous active, new = newly activated, with **zero advance notice** — see `fee_config_delay_bypassed` below.
 - After `initialize` (to establish baseline).
+
+### `fee_config_delay_bypassed` (New — #1055)
+
+**Topics:** `(event_name, admin)`  
+**Data:** `(old_config: FeeConfig, new_config: FeeConfig)` — same shape as `fee_config_updated`
+
+Emitted **only** by `update_fee_config`, in the same transaction as (and immediately after) its own `fee_config_updated` emission. This is purely additive: `fee_config_updated`'s own topics and data are unchanged for every caller, so existing consumers that only know about `fee_config_updated` are unaffected.
+
+**Why this event exists:** `update_fee_config` and `activate_fee_config` both emit an otherwise-identical `fee_config_updated` event, so before this event was added, an indexer or auditor reading the event stream alone could not tell whether a given fee change went through the 7-day advance-notice delay or bypassed it entirely via `update_fee_config` (see "Migration and Backwards Compatibility" below — `update_fee_config` remaining available and unrestricted is intentional, but it was previously *silently* unrestricted from an observability standpoint).
+
+**How to interpret the event stream:**
+
+| Same-transaction event(s) alongside `fee_config_updated` | What happened |
+|---|---|
+| `fee_config_delay_bypassed` | `update_fee_config` was called — the delay was bypassed entirely, no advance notice was given |
+| `fee_config_proposed` (no `fee_config_delay_bypassed`) | `propose_fee_config` was called with an all-decreases config — immediately activated by design (decreases don't need advance notice; see "Fee Decreases: No Delay Required" above) |
+| neither | `activate_fee_config` was called — the change went through the full 7-day delay as originally proposed |
 
 ---
 
@@ -264,6 +282,10 @@ Activate a pending fee configuration proposal after the 7-day delay has elapsed.
 - Admins can migrate fee changes to the propose/activate flow at their own pace.
 - Both paths coexist peacefully: if one path is used, the other's data (e.g., `PendingFeeConfig`) is not affected.
 
+> [!NOTE]
+> **`update_fee_config` is a known, auditable operational escape hatch.**
+> Because `update_fee_config` remains callable by the admin at any time, it can always be used to bypass the "7 days of advance notice" guarantee that `propose_fee_config` / `activate_fee_config` exists to provide — this is an intentional trade-off (see "Rationale" above), not a bug, and it is not disabled or restricted by this design. As of #1055, this bypass is no longer *silent*: `update_fee_config` emits an additional `fee_config_delay_bypassed` event (see "Events" above) alongside its `fee_config_updated` event, so indexers, scout-facing dashboards, and auditors can always tell whether a given active `FeeConfig` change was given the full 7-day delay or not, purely from the on-chain event stream.
+
 ---
 
 ## Rollback and Edge Cases
@@ -291,6 +313,6 @@ This prevents confusion about which proposal will be active when.
 1. **Delay Model:** Fixed 7-day constant.
 2. **Business Logic:** Subscriptions and payments always use the currently active config.
 3. **Fee Decreases:** Bypass the delay and activate immediately.
-4. **Events:** New `fee_config_proposed` event for proposals; existing `fee_config_updated` for all activations.
-5. **Coexistence:** `update_fee_config` unchanged; `propose_fee_config` and `activate_fee_config` are new.
+4. **Events:** New `fee_config_proposed` event for proposals; existing `fee_config_updated` for all activations; new `fee_config_delay_bypassed` event, additive to `fee_config_updated`, marking specifically the `update_fee_config` bypass path (#1055).
+5. **Coexistence:** `update_fee_config` unchanged (still atomic, immediate, unrestricted) but its delay-bypass is no longer silent — it's now distinguishable from `activate_fee_config` in the event stream; `propose_fee_config` and `activate_fee_config` are new.
 6. **Safety:** Pending proposals prevent scouts from being blindsided by fee increases.
