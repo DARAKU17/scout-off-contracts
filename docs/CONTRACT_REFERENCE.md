@@ -325,6 +325,42 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 ---
 
+#### `get_scout_by_wallet(wallet: Address) -> Result<ScoutProfile, ScoutChainError>`
+
+Retrieve a scout profile by wallet address, resolving the wallet to a
+`scout_id` via the `DataKey::ScoutByWallet` index and delegating to `get_scout`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ScoutNotFound` |
+| **Cross-contract calls** | Called *by* the `scout_access` contract's `subscribe()` — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md#cross-contract-integration). Before allowing a Pro-tier subscription, `subscribe()` calls this function to fetch `ScoutProfile.verification.verified` and rejects with `ScoutAccessError::ScoutNotVerified` (scout_access error code 27) if the scout isn't found or isn't verified. This read is not atomic with the subscription write — a scout's verification status is read at call time, so a verification revoked in the same ledger as a competing `subscribe()` call is not guaranteed to be observed. |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scout_by_wallet --wallet $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_scout_verification(scout_id: u64) -> Result<ScoutVerificationRecord, ScoutChainError>`
+
+Retrieve just the structured verification record (`verified`, `verified_by`,
+`verified_at`, `evidence_ref`, `method`) for a scout by ID, without the rest
+of the `ScoutProfile`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ScoutNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scout_verification --scout_id 1
+```
+
+---
+
 #### `get_player_count() -> u64`
 
 Return the total number of registered players. Returns `0` before the contract
@@ -3972,6 +4008,11 @@ pub struct TrialOffer {
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed via `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same trial offer |
 | 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's confirmation window elapsed |
+| 24 | `NoPendingFeeConfig` | `activate_fee_config` called with no pending proposal to activate |
+| 25 | `FeeConfigProposalNotReady` | `activate_fee_config` called before the pending proposal's activation delay elapsed |
+| 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |
+| 27 | `ScoutNotVerified` | Pro-tier `subscribe()` rejected an unverified (or not-found) scout — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md) |
+| 28 | `AutoRenewNotEnabled` | `renew_if_due` called for a scout without auto-renewal enabled |
 
 ---
 

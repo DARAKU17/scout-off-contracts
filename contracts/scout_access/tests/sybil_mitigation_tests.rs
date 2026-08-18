@@ -113,6 +113,45 @@ fn test_unverified_scout_cannot_subscribe_pro() {
     assert!(result.is_err(), "Unverified scout should not be able to subscribe to Pro");
 }
 
+/// Regression test for #1053 / #808: `subscribe()`'s Pro-tier gate must call
+/// through to `registration_contract::get_scout_by_wallet` (see
+/// `contracts/scout_access/src/lib.rs`'s `subscribe()`) and reject an
+/// unverified scout with the specific `ScoutAccessError::ScoutNotVerified`
+/// (code 27) error, and must let a verified scout through — not just fail
+/// with *some* error, which the other tests in this file already check less
+/// precisely via `is_err()`.
+#[test]
+fn test_unverified_scout_rejected_with_scout_not_verified_error() {
+    use scoutchain_scout_access::ScoutAccessError;
+
+    let h = setup();
+
+    // scout1 is unverified by default: the specific error must be
+    // ScoutNotVerified, not just any error.
+    let result = h
+        .scout_access_client
+        .try_subscribe(&h.scout1, &SubscriptionTier::Pro);
+    assert_eq!(
+        result.expect_err("unverified scout must be rejected").expect("contract error"),
+        ScoutAccessError::ScoutNotVerified,
+        "unverified scout must be rejected specifically with ScoutNotVerified"
+    );
+
+    // Verify scout1 via the registration contract, then confirm the same
+    // subscribe() call now succeeds.
+    let scout1_profile = h
+        .registration_client
+        .get_scout_by_wallet(&h.scout1)
+        .expect("should find scout1");
+    h.registration_client
+        .verify_scout(&scout1_profile.scout_id)
+        .expect("verify should succeed");
+
+    h.scout_access_client
+        .subscribe(&h.scout1, &SubscriptionTier::Pro)
+        .expect("verified scout should be able to subscribe to Pro");
+}
+
 #[test]
 fn test_verified_scout_can_subscribe_pro() {
     let h = setup();
