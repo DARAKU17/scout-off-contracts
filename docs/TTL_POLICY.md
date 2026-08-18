@@ -53,7 +53,8 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 |---------|-----|---|
 | `PlayerLevel(player_id)` | 518,400 | Core identity: player's current tier/reputation. Never auto-archive dormant players. Extended on every `get_level()` read. |
 | `HistoryEntry(player_id, index)` | 518,400 | Permanent audit trail: milestone approvals are immutable. Extended on `advance_level` write and `get_history_entry` read. |
-| `HistoryVec(player_id)` | 518,400 | Optimization for history bulk queries; same lifetime as individual entries. Extended on write and read. |
+| `HistoryPage(player_id, page_index)` | 518,400 | Bounded history storage: player history is sharded into fixed-size pages so a single persistent key never grows without limit. Extended on append and on page reads. |
+| `HistoryVec(player_id)` | 518,400 | Legacy compatibility key retained for migration / recovery tooling; new writes populate `HistoryPage` shards instead of growing this monolithic vec. |
 | `HistoryCounter(player_id)` | 518,400 | Milestone index counter; must outlive all history entries. Extended on write. |
 | `Admin` | 518,400 | Cross-contract consistency. Bumped by `require_admin()` helper. |
 | `PendingAdmin` | 518,400 | Must survive admin proposal/acceptance window (typically seconds to minutes). |

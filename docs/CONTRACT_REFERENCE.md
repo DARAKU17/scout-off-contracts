@@ -2250,20 +2250,24 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `get_progress_history(player_id: u64) -> Vec<ProgressEntry>`
 
-Return all history entries for a player in chronological order. Internally reads
-a single `HistoryVec` persistent storage key regardless of entry count — O(1)
-reads instead of the previous O(N) loop. Returns an empty `Vec` for unknown
-player IDs.
+Return all history entries for a player in chronological order. The contract now
+stores the full logical history as bounded `HistoryPage(player_id, page_index)`
+shards (fixed-size pages, not one ever-growing `HistoryVec` key) and
+reconstructs the chronological list at read time. This keeps per-entry storage
+cost bounded even if a player experiences many resets or repeated re-entries.
+Returns an empty `Vec` for unknown player IDs.
 
-**Gas trade-off**: the Vec grows with each level change (max 3 entries per player
-given the four-tier model). Because the entire Vec is loaded in one read the cost
-is proportional to the serialised size of the Vec, not the number of reads.
+**Gas trade-off**: each page is a small, fixed-size `Vec<ProgressEntry>`, so the
+read cost scales with the number of pages touched rather than the total lifetime
+entry count in a single unbounded storage key. The logical history can still be
+reconstructed for Merkle commitments and auditing without exposing an
+unbounded per-player storage blob.
 
-**Migration note**: existing deployments that only have `HistoryEntry(player_id, i)`
-keys (written before this change) will return an empty Vec from this function.
-Use `get_history_entry` with individual indices to read pre-migration data, or
-run a one-time migration script that calls `advance_level` / `reset_player_level`
-to rewrite history into the new Vec key.
+**Migration note**: the legacy `HistoryVec(player_id)` key remains readable for
+compatibility with older deployments and recovery tooling, but new writes append
+to `HistoryPage` shards instead of extending the legacy vec. Existing data can
+still be recovered by concatenating the `HistoryEntry(player_id, i)` records in
+index order until a one-time migration is complete.
 
 | | |
 |---|---|

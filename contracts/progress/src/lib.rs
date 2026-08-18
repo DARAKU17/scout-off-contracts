@@ -25,6 +25,7 @@ const PERSISTENT_TTL_MAX: u32 = 518_400;
 const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const HISTORY_PAGE_SIZE: u32 = 8;
 
 // Minimal client for the registration contract.
 // Used to sync a player's level after advance_level / reset_player_level.
@@ -450,20 +451,23 @@ impl ProgressContract {
     }
 
     /// Return all history entries for a player in chronological order (index 1..=N).
-    /// Reads a single persistent storage key (`HistoryVec`) regardless of entry count,
-    /// reducing gas cost from O(N) individual reads to O(1).
+    /// The on-chain layout is now a bounded set of fixed-size `HistoryPage`
+    /// shards rather than one unbounded `HistoryVec` key. The function
+    /// reconstructs the logical history from those pages and keeps the
+    /// per-read/storage cost bounded by the page size instead of the full
+    /// historical count.
     /// Returns an empty Vec if the player has no history.
     pub fn get_progress_history(env: Env, player_id: u64) -> Vec<ProgressEntry> {
-        let vec_key = DataKey::HistoryVec(player_id);
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&vec_key)
-            .unwrap_or_else(|| Vec::new(&env));
-        if !history.is_empty() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        let history = Self::read_history_pages(&env, player_id);
+        let page_count = (history.len() as u32).saturating_add(HISTORY_PAGE_SIZE - 1)
+            / HISTORY_PAGE_SIZE;
+        for page_index in 0..page_count {
+            let key = DataKey::HistoryPage(player_id, page_index);
+            if env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+            }
         }
         history
     }
@@ -594,21 +598,10 @@ impl ProgressContract {
 
     /// Query history entries for a player since a given Unix timestamp.
     /// Returns all entries where `updated_at >= since_timestamp`.
-    /// Uses the HistoryVec for O(1) lookup, filters in-memory.
+    /// Rebuilds the logical history from fixed-size `HistoryPage` shards so the
+    /// query remains bounded even as the player's history grows.
     pub fn get_history_since(env: Env, player_id: u64, since_timestamp: u64) -> Vec<ProgressEntry> {
-        let vec_key = DataKey::HistoryVec(player_id);
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&vec_key)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        if !history.is_empty() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
-        }
-
+        let history = Self::read_history_pages(&env, player_id);
         let mut result: Vec<ProgressEntry> = Vec::new(&env);
         for i in 0..history.len() {
             if let Some(entry) = history.get(i) {
@@ -665,11 +658,7 @@ impl ProgressContract {
         player_id: u64,
         index: u32,
     ) -> Result<Vec<HistoryProofStep>, ProgressError> {
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::HistoryVec(player_id))
-            .unwrap_or_else(|| Vec::new(&env));
+        let history = Self::read_history_pages(&env, player_id);
         let n = history.len();
         if n == 0 || index == 0 || index > n {
             return Err(ProgressError::PlayerNotFound);
@@ -829,6 +818,65 @@ impl ProgressContract {
             .persistent()
             .get(&DataKey::PlayerLevel(player_id))
             .unwrap_or(ProgressLevel::Unverified)
+    }
+
+    fn history_page_index(index: u32) -> u32 {
+        (index.saturating_sub(1)) / HISTORY_PAGE_SIZE
+    }
+
+    fn read_history_pages(env: &Env, player_id: u64) -> Vec<ProgressEntry> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::HistoryCounter(player_id))
+            .unwrap_or(0u32);
+
+        if count == 0 {
+            return env
+                .storage()
+                .persistent()
+                .get(&DataKey::HistoryVec(player_id))
+                .unwrap_or_else(|| Vec::new(env));
+        }
+
+        let total_pages = (count + HISTORY_PAGE_SIZE - 1) / HISTORY_PAGE_SIZE;
+        let mut history: Vec<ProgressEntry> = Vec::new(env);
+        for page_index in 0..total_pages {
+            let page_key = DataKey::HistoryPage(player_id, page_index);
+            let page: Vec<ProgressEntry> = env
+                .storage()
+                .persistent()
+                .get(&page_key)
+                .unwrap_or_else(|| {
+                    let start = page_index * HISTORY_PAGE_SIZE + 1;
+                    let end = (start + HISTORY_PAGE_SIZE - 1).min(count);
+                    let mut reconstructed: Vec<ProgressEntry> = Vec::new(env);
+                    for idx in start..=end {
+                        if let Some(entry) = env
+                            .storage()
+                            .persistent()
+                            .get(&DataKey::HistoryEntry(player_id, idx))
+                        {
+                            reconstructed.push_back(entry);
+                        }
+                    }
+                    reconstructed
+                });
+            for i in 0..page.len() {
+                if let Some(entry) = page.get(i) {
+                    history.push_back(entry);
+                }
+            }
+        }
+
+        if history.is_empty() {
+            env.storage()
+                .persistent()
+                .get(&DataKey::HistoryVec(player_id))
+                .unwrap_or_else(|| Vec::new(env))
+        } else {
+            history
+        }
     }
 
     /// Numeric tier code for a `ProgressLevel`, used only for canonical leaf
@@ -1048,24 +1096,30 @@ impl ProgressContract {
             .persistent()
             .extend_ttl(&history_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
-        // Also append to the single-key Vec so get_progress_history costs O(1) reads.
-        let vec_key = DataKey::HistoryVec(player_id);
-        let mut history: Vec<ProgressEntry> = env
+        // Store the player's history in bounded pages instead of one ever-growing
+        // `HistoryVec` key. Every page remains small and fixed-size, while the
+        // logical history is reconstructed by concatenating the pages in order.
+        let page_index = Self::history_page_index(next_index);
+        let page_key = DataKey::HistoryPage(player_id, page_index);
+        let mut page: Vec<ProgressEntry> = env
             .storage()
             .persistent()
-            .get(&vec_key)
+            .get(&page_key)
             .unwrap_or_else(|| Vec::new(env));
-        history.push_back(entry);
-        env.storage().persistent().set(&vec_key, &history);
-        env.storage()
-            .persistent()
-            .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        page.push_back(entry.clone());
+        env.storage().persistent().set(&page_key, &page);
+        env.storage().persistent().extend_ttl(
+            &page_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Recompute the Merkle commitment root over the full (now-updated)
-        // history and persist it — see `mth_range`'s doc comment for why a
-        // full recompute from the just-read `history` Vec is the right
-        // trade-off here rather than an incremental accumulator.
+        // logical history from the page shards. This preserves the existing
+        // proof semantics while preventing a single persistent key from growing
+        // without bound.
         let root_key = DataKey::HistoryRoot(player_id);
+        let history = Self::read_history_pages(env, player_id);
         let leaves = Self::leaf_hashes(env, &history);
         let root = Self::mth_range(env, &leaves, 0, leaves.len());
         env.storage().persistent().set(&root_key, &root);
