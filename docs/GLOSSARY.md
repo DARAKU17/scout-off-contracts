@@ -245,6 +245,18 @@ cannot approve further milestones until re-activated. If a validator is revoked
 for cause (e.g. misconduct), their past milestones are flagged so they can be
 weighed appropriately by scouts and indexers.
 
+A validator may also carry **specialization tags** (e.g. `"physical-stats"`,
+`"identity-kyc"`, `"match-performance"`), set via
+`set_validator_specializations`. When `approve_milestone` is called with a
+non-`None` `milestone_category`, the contract requires the approving
+validator to hold a matching tag, rejecting the call with
+`SpecializationMismatch` (code 21) otherwise — preventing, for example, a
+pure identity-KYC agent from approving physical performance data. This is
+backward-compatible: a validator with no specializations (the default) is
+general-purpose, and an **omitted** `milestone_category` remains open to any
+active validator regardless of tags.
+
 - Relevant functions: `register_validator`, `revoke_validator`,
-  `get_validator_status`, `approve_milestone`, `get_milestone_with_validator_status` — see
+  `set_validator_specializations`, `get_validator_status`, `approve_milestone`,
+  `get_milestone_with_validator_status` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
