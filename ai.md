@@ -514,9 +514,21 @@ When the progress contract is not wired, a `progress_contract_not_set` event is 
    ```
 3. Retry the original transaction — because `ProgressCallFailed` aborts the whole transaction, there is no partial state to clean up.
 
+> **Retry only the original entry point, never `advance_level` directly (Issue #811 follow-up).**
+> `progress.advance_level` is **not** internally idempotent. It is a monotonic state-machine step: it reads the current level, computes `next()`, and appends a history entry. It does **not** key off `milestone_ref`, so calling it twice with the *same* `milestone_ref` advances two tiers and writes two history entries that are indistinguishable from a legitimate double advance.
+>
+> Retry is safe **only** because each production caller holds its own dedup key and the whole transaction reverts on failure:
+> - `verification.approve_milestone` → `DataKey::EvidenceUsed(evidence_hash)` (returns `DuplicateEvidence`, code 16)
+> - `scout_access.confirm_trial_offer` → `DataKey::ConfirmationNonce(...)` / absent `TrialEscrow` (returns `TrialOfferAlreadyConfirmed`, code 22)
+>
+> Because the failed attempt reverts, its dedup key is rolled back too, so the retry proceeds exactly once. An operator or new contract that calls `progress.advance_level` directly gets **no such protection** and must supply its own dedup key. Any new whitelisted caller of `advance_level` must do the same.
+>
+> Bounded blast radius: a replay can over-advance by at most three tiers; once at `EliteTier` further calls fail closed with `AlreadyAtMaxLevel` and write nothing. On the secondary (`scout_access`) path, a `milestone_ref` of `0` or one beyond the verification contract's real milestone count is rejected with `InvalidProgressTransition` (#457). Both are verified in `contracts/progress/tests/issue_811_idempotency.rs`.
+
 > **Tested guarantee (Issue #811):** This all-or-nothing claim is backed by adversarial tests, not just this prose explanation. See:
 > - `contracts/verification/tests/adversarial_atomicity.rs` — proves `approve_milestone` behavior on bad-wired progress contract and validates the `DuplicateEvidence` idempotency token as defense-in-depth.
 > - `contracts/scout_access/tests/adversarial_atomicity.rs` — equivalent tests for `confirm_trial_offer`, including the `TrialOfferAlreadyConfirmed` double-confirm guard.
+> - `contracts/progress/tests/issue_811_idempotency.rs` — audits the shared `advance_level` call target itself: pins the non-idempotent double-apply behaviour, proves rejected calls leave no partial state, and proves the `AlreadyAtMaxLevel` / `InvalidProgressTransition` fail-closed paths.
 >
 > **Idempotency defense-in-depth:** The `DuplicateEvidence` check (code 16) on `approve_milestone` acts as an explicit idempotency token: if a future refactor altered write ordering and partial state were committed, a retried call with the same evidence hash would return `DuplicateEvidence` rather than silently double-counting. For `confirm_trial_offer`, the absence of the `TrialEscrow` record (removed on first confirmation) serves the same purpose — a second call returns `TrialOfferAlreadyConfirmed` (code 22).
 

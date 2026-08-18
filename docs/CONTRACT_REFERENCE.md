@@ -273,6 +273,23 @@ progress contract address via cross-contract invocation.
 
 _Not intended for direct invocation. Called atomically by `progress.advance_level`._
 
+> **Idempotent — safe to retry (Issue #811 follow-up).** Unlike
+> `progress.advance_level`, this function is a *keyed absolute write*, not a
+> relative step: it sets the player's level to the supplied `level` rather than
+> deriving a next value. Replaying it with the same arguments converges on the
+> same state.
+>
+> The index maintenance is idempotent by construction: before adding the player
+> to the target bucket it removes them from **all four** level buckets, so a
+> replay cannot produce duplicate entries in `PlayersByLevel` or
+> `PlayersByLevelRegion` even though the underlying `level_index_add` /
+> `composite_index_add` helpers are unguarded `push_back`s.
+>
+> The only field that differs across replays is `updated_at` on the stored
+> profile, plus a repeated `player_level_synced` event and an extended
+> `PlayerLevel` TTL — none of which are state-corrupting. A replay against a
+> deleted player fails cleanly with `PlayerNotFound`.
+
 ---
 
 #### `get_player(player_id: u64) -> Result<PlayerProfile, ScoutChainError>`
@@ -2024,16 +2041,43 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 Advance a player's progress level by one tier. `milestone_ref` links back to
 the verification contract's milestone index. Returns the new `ProgressLevel`.
 
-When the verification contract address is configured, only that contract may
-invoke this function; otherwise `caller` must sign directly (useful for testing
-without a full cross-contract deployment).
+Only the configured `VerificationContract` (primary) or `ScoutAccessContract`
+(secondary, for trial-offer Level-3 advances) may invoke this function. There is
+**no open fallback**: if neither address is configured the call is rejected with
+`NotInitialized`. Auth is required from the *stored* whitelist address — the
+`caller` argument is recorded as `updated_by` in the history entry but is not
+itself the authorising party.
+
+On the secondary path, `milestone_ref` must be backed by a real milestone in the
+verification contract (`0 < milestone_ref <= get_milestone_count(player_id)`),
+otherwise the call fails with `InvalidProgressTransition` (#457).
 
 | | |
 |---|---|
-| **Auth** | Verification contract (production) or `caller` directly (test/unconfigured) |
-| **Errors** | `NotInitialized` · `ContractPaused` · `AlreadyAtMaxLevel` · `Overflow` · `Unauthorized` |
+| **Auth** | Configured verification contract (primary) or scout_access contract (secondary) |
+| **Errors** | `NotInitialized` · `ContractPaused` · `InvalidProgressTransition` · `AlreadyAtMaxLevel` · `Overflow` · `RegistrationCallFailed` |
 
 _Called atomically by `verification.approve_milestone`. Prefer that path in production._
+
+> **Not idempotent — do not retry this call directly (Issue #811 follow-up).**
+> `advance_level` is a monotonic state-machine step, not a keyed mutation: it
+> reads the current level, computes `next()`, and appends a history entry. It
+> does **not** deduplicate on `milestone_ref`, so two calls with the *same*
+> `milestone_ref` advance two tiers and append two history entries that are
+> indistinguishable from a legitimate double advance.
+>
+> Retry-after-uncertain-failure is safe only via the production entry points,
+> which each hold their own dedup key — `verification.approve_milestone` uses
+> `EvidenceUsed(evidence_hash)` (`DuplicateEvidence`), and
+> `scout_access.confirm_trial_offer` uses `ConfirmationNonce`
+> (`TrialOfferAlreadyConfirmed`). Because a failed attempt reverts the whole
+> transaction, the dedup key is rolled back with it and the retry applies
+> exactly once.
+>
+> Any new whitelisted caller **must** supply its own dedup key. Replay exposure
+> is bounded to three tiers: at `EliteTier` further calls fail closed with
+> `AlreadyAtMaxLevel` and write nothing. See
+> `contracts/progress/tests/issue_811_idempotency.rs`.
 
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
@@ -2050,10 +2094,16 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 Return the player's current progress level. Returns `Unverified` for unknown
 player IDs (no `PlayerNotFound` error).
 
+Reading is a keep-alive: when a `PlayerLevel` record exists, `get_level` extends
+its TTL so a dormant player's level is not lost to archival decay. The extension
+is skipped when no record exists — extending the TTL of an unwritten key raises
+`Storage/MissingValue`, which the host escalates to a panic, so an unguarded
+extension would make the documented `Unverified` default trap instead of return.
+
 | | |
 |---|---|
 | **Auth** | None |
-| **Errors** | None |
+| **Errors** | None — never traps, including for unknown player IDs |
 
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
