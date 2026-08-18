@@ -3,7 +3,11 @@ mod errors;
 mod events;
 mod types;
 use errors::ScoutAccessError;
-use types::{ContactRecord, DataKey, FeeConfigProposal, ProContactPeriod, Subscription, TrialEscrow, TrialOffer};
+use types::{
+    ContactRecord, DataKey, FeeConfigHistoryEntry, FeeConfigProposal, ProContactPeriod,
+    Subscription, TrialEscrow, TrialOffer,
+};
+
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
@@ -95,16 +99,6 @@ const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 // carry the same lifetime significance as identity records, so they follow their own (longer than default but reasonable) schedule.
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
-const PERSISTENT_TTL_MIN: u32 = 1_000;
-const PERSISTENT_TTL_MAX: u32 = 2_000;
-
-mod progress_contract {
-    use scoutchain_shared_types::ProgressLevel;
-
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
-    );
-}
 
 // #795: upper bound on how many OutstandingTrialEscrows entries
 // expire_trial_offers will examine in a single call, so a large backlog
@@ -134,7 +128,7 @@ const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
 // immediate past plus the pending proposal window (7 days), while keeping the
 // storage footprint fixed and predictable regardless of how many times fees
 // are updated over the contract's lifetime.
-const FEE_CONFIG_HISTORY_CAP: usize = 5;
+const FEE_CONFIG_HISTORY_CAP: u32 = 5;
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -497,15 +491,19 @@ impl ScoutAccessContract {
         // Sybil resistance: gate Pro-tier subscriptions to verified scouts only.
         // Basic and Elite tiers remain unrestricted.
         if tier == SubscriptionTier::Pro {
-            if let Ok(reg_contract_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::RegistrationContract) {
+            if let Some(reg_contract_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::RegistrationContract)
+            {
                 let reg_client = registration_contract::Client::new(&env, &reg_contract_addr);
                 match reg_client.try_get_scout_by_wallet(&scout) {
-                    Ok(scout_profile) => {
+                    Ok(Ok(scout_profile)) => {
                         if !scout_profile.verification.verified {
                             return Err(ScoutAccessError::ScoutNotVerified);
                         }
                     }
-                    Err(_) => {
+                    _ => {
                         // Scout not found in registration contract; deny Pro-tier access
                         return Err(ScoutAccessError::ScoutNotVerified);
                     }
@@ -1176,11 +1174,8 @@ impl ScoutAccessContract {
         // refund path (confirm_trial_offer's late-expiry branch and
         // expire_trial_offers) paid out funds the contract never held.
         let token_addr = Self::get_token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &scout,
-            &env.current_contract_address(),
-            &escrow_amount,
-        );
+        let contract_addr = env.current_contract_address();
+        token::Client::new(&env, &token_addr).transfer(&scout, &contract_addr, &escrow_amount);
 
         let escrow = TrialEscrow {
             amount: escrow_amount,
@@ -1275,13 +1270,8 @@ impl ScoutAccessContract {
             }
         }
 
-        // Cross-contract call: advance the player's progress level.
-        // Maintain bounded enumeration index for sweep operations.
-        Self::trial_escrow_index_insert(&env, player_id, next_index);
-
         // Cross-contract call: advance the player to Level 3 if progress contract is set.
-        if let Some(progress_addr) = env
-        // Call progress contract to advance level (using the index as milestone reference)
+        // Call progress contract to advance level (using the index as milestone reference).
         let progress_addr = match env
             .storage()
             .instance()
@@ -1331,29 +1321,6 @@ impl ScoutAccessContract {
         Ok(())
     }
 
-    /// Confirm a trial offer (admin-only for now; later may be called by escrow logic).
-    /// Removes the offer from the bounded enumeration index so it no longer appears
-    /// in sweep iterations.
-    pub fn confirm_trial_offer(env: Env, player_id: u64, trial_index: u32) -> Result<(), ScoutAccessError> {
-        Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
-
-        // Verify the offer exists before removing it from the index.
-        let _offer: TrialOffer = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TrialOffer(player_id, trial_index))
-            .ok_or(ScoutAccessError::InvalidInput)?;
-
-        Self::trial_escrow_index_remove(&env, player_id, trial_index);
-        events::trial_offer_confirmed(&env, player_id, trial_index);
-        Ok(())
-    }
-
-    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ScoutAccessError> {
-        Self::require_admin(&env)?;
-        let old_admin = Self::get_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
     /// Admin helper to sweep pending trial offers that have passed their
     /// expiry window: refunds the escrowed XLM to the originating scout,
     /// removes the `TrialEscrow` record, and emits `trial_offer_expired`
@@ -2023,55 +1990,6 @@ impl ScoutAccessContract {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Issue #821: Bounded trial-escrow enumeration index
-    // -------------------------------------------------------------------------
-    //
-    // A swap-remove Vec stored under `DataKey::TrialEscrowIndex` provides
-    // O(1) insertion, O(1) removal, and iteration cost bounded by the number
-    // of *currently outstanding* trial offers, not total historical volume.
-
-    fn trial_escrow_index_insert(env: &Env, player_id: u64, trial_index: u32) {
-        let mut index: Vec<(u64, u32)> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TrialEscrowIndex)
-            .unwrap_or_else(|| Vec::new(env));
-        index.push_back((player_id, trial_index));
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrialEscrowIndex, &index);
-    }
-
-    fn trial_escrow_index_remove(env: &Env, player_id: u64, trial_index: u32) {
-        let mut index: Vec<(u64, u32)> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TrialEscrowIndex)
-            .unwrap_or_else(|| Vec::new(env));
-
-        if let Some(pos) = index.iter().position(|(pid, tid)| *pid == player_id && *tid == trial_index) {
-            // Swap-remove: move last element into the removed slot, then pop.
-            let last = index.len() - 1;
-            if pos != last {
-                index.swap(pos, last);
-            }
-            index.pop();
-            env.storage()
-                .persistent()
-                .set(&DataKey::TrialEscrowIndex, &index);
-        }
-    }
-
-    /// Iterate all outstanding trial escrows. Used by `expire_trial_offers`.
-    pub(crate) fn trial_escrow_index_iter(env: &Env) -> Vec<(u64, u32)> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::TrialEscrowIndex)
-            .unwrap_or_else(|| Vec::new(env))
-            .iter()
-            .collect::<Vec<_>>()
-    }
 }
 
 // =============================================================================
@@ -2829,8 +2747,6 @@ mod tests {
     /// offer to be written back to index 1 (overwriting/orphaning the first
     /// offer that is still live).
     #[test]
-    fn test_trial_offer_not_orphaned_by_counter_expiry() {
-    #[test]
     fn test_trial_counter_survives_ttl_expiry_and_continues_incrementing() {
         let (env, admin, xlm, _contract_id, client) = setup();
 
@@ -3373,60 +3289,6 @@ mod tests {
         };
         let result = client.try_update_fee_config(&bad_fees);
         assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
-    }
-
-    // -------------------------------------------------------------------------
-    // Issue #821: Trial escrow enumeration index tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_trial_escrow_index_insert_and_iter() {
-        let (env, admin, xlm, client) = make_contract();
-        let scout = Address::generate(&env);
-        let player_id = 1u64;
-
-        // Log two trial offers for the same player.
-        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
-        let idx2 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash2"));
-
-        // The index should contain both entries.
-        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
-        assert_eq!(index.len(), 2);
-        assert!(index.contains(&(player_id, idx1)));
-        assert!(index.contains(&(player_id, idx2)));
-    }
-
-    #[test]
-    fn test_trial_escrow_index_remove_does_not_grow() {
-        let (env, admin, xlm, client) = make_contract();
-        let scout = Address::generate(&env);
-        let player_id = 1u64;
-
-        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
-        let idx2 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash2"));
-        let _idx3 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash3"));
-
-        // Confirm the middle entry out of order.
-        client.confirm_trial_offer(&player_id, &idx2);
-
-        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
-        assert_eq!(index.len(), 2);
-        assert!(!index.contains(&(player_id, idx2)));
-        assert!(index.contains(&(player_id, idx1)));
-        assert!(index.contains(&(player_id, _idx3)));
-    }
-
-    #[test]
-    fn test_trial_escrow_index_remove_all() {
-        let (env, admin, xlm, client) = make_contract();
-        let scout = Address::generate(&env);
-        let player_id = 1u64;
-
-        let idx1 = client.log_trial_offer(&scout, &player_id, &String::from_str(&env, "QmHash1"));
-        client.confirm_trial_offer(&player_id, &idx1);
-
-        let index = ScoutAccessContract::trial_escrow_index_iter(&env);
-        assert!(index.is_empty());
     }
 
     // -------------------------------------------------------------------------

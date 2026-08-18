@@ -51,14 +51,6 @@ pub fn trial_offer_logged(env: &Env, player_id: u64, scout: &Address) {
     );
 }
 
-pub fn trial_offer_confirmed(env: &Env, player_id: u64, trial_index: u32) {
-    env.events().publish(
-        (Symbol::new(env, "trial_offer_confirmed"),),
-        (player_id, trial_index),
-    );
-}
-
-pub fn fees_withdrawn(env: &Env, to: &Address, amount: i128) {
 /// topics: (event_name, scout)  data: (player_id, index)
 pub fn trial_offer_confirmed(env: &Env, player_id: u64, scout: &Address, index: u32) {
     env.events().publish(

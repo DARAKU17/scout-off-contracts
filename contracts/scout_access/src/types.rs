@@ -117,10 +117,6 @@ pub struct FeeConfig {
     /// (error 20) for the full per-tier access semantics, and `docs/GLOSSARY.md`
     /// for the definition of "Pro tier" and the contact quota model.
     pub pro_contact_limit: u32,
-    /// Escrow amount for trial offers (stroops)
-    pub trial_offer_escrow_stroops: i128,
-    /// Expiry window for trial offers (seconds)
-    pub trial_offer_expiry_secs: u64,
 }
 
 /// A single entry in the bounded on-chain fee configuration history.
@@ -160,9 +156,6 @@ pub enum DataKey {
     TrialCounter(u64),
     /// (player_id, trial_index) → TrialOffer
     TrialOffer(u64, u32),
-    /// Bounded enumeration of outstanding trial escrows.
-    /// Each entry is `(player_id, trial_index)` for a currently-open trial offer.
-    TrialEscrowIndex,
     /// progress contract address for cross-contract advance_level call
     ProgressContract,
     /// registration contract address for cross-contract scout verification checks
@@ -196,4 +189,15 @@ pub enum DataKey {
     /// scout wallet → bool; true if the scout has opted in to auto-renewal.
     /// Set by `set_auto_renew`, consumed by `renew_if_due`.
     AutoRenew(Address),
+    /// Day-granularity expiry bucket: (expires_at / 86_400) → Vec<Address>.
+    ///
+    /// Maintained by `subscribe` alongside `Subscription(scout)` so that
+    /// `get_expiring_subscriptions` can page through soon-to-expire
+    /// subscriptions in O(days_covered) without walking every scout.
+    ///
+    /// Tradeoff: coarse day-bucket granularity keeps index storage cost low
+    /// (one Vec per day with at least one subscriber) at the cost of requiring
+    /// the caller to re-check `Subscription.expires_at` for exact filtering,
+    /// which `get_subscriptions_expiring_before` already does.
+    ExpiryBucket(u64),
 }
