@@ -1510,6 +1510,33 @@ impl ScoutAccessContract {
         Ok(sub)
     }
 
+    /// Recover an archived (or expired-but-not-evicted) subscription entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction.
+    ///
+    /// Admin-only. Returns `SubscriptionRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_subscription_record(env: Env, scout: Address) -> Result<(), ScoutAccessError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::SubscriptionRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::subscription_record_restored(&env, &admin, &scout);
+        Ok(())
+    }
+
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::bump_instance_ttl(&env);
         Self::fee_config(&env)

@@ -277,3 +277,13 @@ pub fn subscription_auto_renewed(
         (tier.clone(), subscribed_at, expires_at),
     );
 }
+
+/// Emitted by `restore_subscription_record` when an admin re-extends an
+/// archived or expired subscription entry's TTL back to the policy value.
+/// topics: (event_name, admin)  data: scout
+pub fn subscription_record_restored(env: &Env, admin: &Address, scout: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_record_restored"), admin.clone()),
+        scout.clone(),
+    );
+}

@@ -393,6 +393,31 @@ impl ProgressContract {
         level
     }
 
+    /// Recover an archived (or expired-but-not-evicted) player-level entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction.
+    ///
+    /// Admin-only. Returns `PlayerLevelRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_player_level_record(env: Env, player_id: u64) -> Result<(), ProgressError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _level: ProgressLevel = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerLevel(player_id))
+            .ok_or(ProgressError::PlayerLevelRecordEvicted)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::PlayerLevel(player_id), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        events::player_level_record_restored(&env, &admin, player_id);
+        Ok(())
+    }
+
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
         Self::bump_instance_ttl(&env);
         let key = DataKey::HistoryCounter(player_id);

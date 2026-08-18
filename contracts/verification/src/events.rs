@@ -263,3 +263,23 @@ pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
         error_code,
     );
 }
+
+/// Emitted by `restore_validator_record` when an admin re-extends an archived
+/// or expired validator entry's TTL back to the core-identity policy value.
+/// topics: (event_name, admin)  data: wallet
+pub fn validator_record_restored(env: &Env, admin: &Address, wallet: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "validator_record_restored"), admin.clone()),
+        wallet.clone(),
+    );
+}
+
+/// Emitted by `restore_milestone_record` when an admin re-extends an archived
+/// or expired milestone entry's TTL back to the core-identity policy value.
+/// topics: (event_name, admin)  data: (player_id, index)
+pub fn milestone_record_restored(env: &Env, admin: &Address, player_id: u64, index: u32) {
+    env.events().publish(
+        (Symbol::new(env, "milestone_record_restored"), admin.clone()),
+        (player_id, index),
+    );
+}
