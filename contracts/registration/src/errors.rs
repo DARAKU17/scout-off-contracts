@@ -50,7 +50,7 @@ pub enum ScoutChainError {
 
     // ── Rate limiting ──
     /// Caller attempted to register again before the cooldown period elapsed.
-    RegistrationCooldown = 15,
+    RegistrationCooldown = 16,
 }
 
 impl AdminError for ScoutChainError {

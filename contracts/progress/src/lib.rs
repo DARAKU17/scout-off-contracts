@@ -359,18 +359,15 @@ impl ProgressContract {
 
     pub fn get_level(env: Env, player_id: u64) -> ProgressLevel {
         let key = &DataKey::PlayerLevel(player_id);
-        let level = env.storage()
-            .persistent()
-            .get(key)
-            .unwrap_or(ProgressLevel::Unverified);
-        
-        // Keep-alive: extend TTL on any read to prevent silent archival of dormant players.
-        // This is cheaper than losing a player's reputation to archival decay.
-        env.storage()
-            .persistent()
-            .extend_ttl(key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
-        
-        level
+        if env.storage().persistent().has(key) {
+            let level = env.storage().persistent().get(key).unwrap();
+            env.storage()
+                .persistent()
+                .extend_ttl(key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+            level
+        } else {
+            ProgressLevel::Unverified
+        }
     }
 
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
