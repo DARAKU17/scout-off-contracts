@@ -92,10 +92,16 @@ pub enum ScoutAccessError {
     /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
     AutoRenewNotEnabled = 28,
 
+    // ── Archival recovery ──
+    /// `restore_subscription_record` targeted a subscription entry whose
+    /// archival grace period has fully elapsed (evicted, not merely archived)
+    /// and is unrecoverable. (Codes 13 and 18 are reserved by tests.)
+    SubscriptionRecordEvicted = 29,
+
     // ── Evidence access grants ──
     /// `admin_revoke_evidence_access` was called for a (player_id, scout)
     /// pair with no `EvidenceAccessGrant` on record.
-    GrantNotFound = 29,
+    GrantNotFound = 30,
 }
 
 impl AdminError for ScoutAccessError {
@@ -167,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn grant_not_found_is_code_29() {
-        assert_eq!(ScoutAccessError::GrantNotFound as u32, 29);
+    fn grant_not_found_is_code_30() {
+        assert_eq!(ScoutAccessError::GrantNotFound as u32, 30);
     }
 }

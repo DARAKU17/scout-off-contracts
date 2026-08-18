@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
+    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile, ScoutVerificationRecord,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated
@@ -14,9 +14,10 @@ use types::{
 // scope for the rest of this module.
 pub use types::PlayerVitals;
 
-use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, write_wiring_link, safe_math::{safe_add_u64},
+};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
-use soroban_sdk::crypto::sha256;
 
 // Generated client stub for the progress contract — used to resolve a player's
 // current level at read time.  `level` is never stored in this contract.
@@ -214,7 +215,7 @@ impl RegistrationContract {
             .set(&DataKey::Player(player_id), &profile);
         env.storage()
             .persistent()
-            .set(&DataKey::PlayerByWallet(wallet), &player_id);
+            .set(&DataKey::PlayerByWallet(wallet.clone()), &player_id);
 
         let mut player_ids: Vec<u64> = env
             .storage()
@@ -264,6 +265,13 @@ impl RegistrationContract {
             wallet: wallet.clone(),
             region,
             verified,
+            verification: ScoutVerificationRecord {
+                verified,
+                verified_by: None,
+                verified_at: None,
+                evidence_ref: None,
+                method: None,
+            },
             registered_at,
         };
 
@@ -272,7 +280,7 @@ impl RegistrationContract {
             .set(&DataKey::Scout(scout_id), &profile);
         env.storage()
             .persistent()
-            .set(&DataKey::ScoutByWallet(wallet), &scout_id);
+            .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
 
         events::scout_registered(&env, scout_id, &wallet);
         Ok(())
@@ -290,13 +298,33 @@ impl RegistrationContract {
     }
 
     /// Store the progress contract address so filter_players can resolve
-    /// levels at query time (admin only).
+    /// levels at query time (admin only). Freely re-settable — no
+    /// first-call-only guard (see `docs/WIRING_REGISTRY_DESIGN.md` for why
+    /// this is the majority policy across all four contracts).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "progress_contract", &addr, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of the single cross-contract peer address pointer
+    /// held by this contract (progress), with its address and re-wiring
+    /// epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> RegistrationWiringState {
+        let progress_contract =
+            read_wiring_link(&env, &DataKey::ProgressContract, &DataKey::ProgressContractEpoch);
+        RegistrationWiringState { progress_contract }
     }
 
     /// Update a player's progress level. Only callable by the registered progress contract.
@@ -606,6 +634,7 @@ impl RegistrationContract {
             scout_id,
             wallet: wallet.clone(),
             region,
+            verified: false,
             verification: ScoutVerificationRecord {
                 verified: false,
                 verified_by: None,
@@ -642,352 +671,6 @@ impl RegistrationContract {
         Ok(scout_id)
     }
 
-    /// Seed a player profile directly using admin authority.
-    pub fn admin_seed_player(
-        env: Env,
-        wallet: Address,
-        vitals: PlayerVitals,
-        ipfs_hashes: Vec<String>,
-        level: ProgressLevel,
-        player_id: u64,
-        registered_at: u64,
-        updated_at: u64,
-    ) -> Result<u64, ScoutChainError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        Self::require_not_paused(&env)?;
-        Self::require_initialized(&env)?;
-
-        if vitals.age == 0 || vitals.age < MIN_PLAYER_AGE {
-            return Err(ScoutChainError::InvalidInput);
-        }
-        if vitals.position.len() > MAX_STRING_LEN
-            || vitals.region.len() > MAX_REGION_LEN
-            || vitals.nationality.len() > MAX_STRING_LEN
-        {
-            return Err(ScoutChainError::InvalidInput);
-        }
-        if vitals.age > MAX_PLAYER_AGE {
-            return Err(ScoutChainError::InvalidInput);
-        }
-        if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let stored = StoredPlayerProfile {
-            player_id,
-            wallet: wallet.clone(),
-            vitals,
-            ipfs_hashes,
-            registered_at,
-            updated_at,
-        };
-
-        env.storage().persistent().set(&DataKey::Player(player_id), &stored);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerByWallet(wallet.clone()), &player_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerLevel(player_id), &level);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerLevel(player_id),
-            PERSISTENT_TTL_MIN,
-            PERSISTENT_TTL_MAX,
-        );
-
-        let mut player_ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerIndex)
-            .unwrap_or_else(|| Vec::new(&env));
-        if !player_ids.iter().any(|id| id == player_id) {
-            player_ids.push_back(player_id);
-            env.storage().persistent().set(&DataKey::PlayerIndex, &player_ids);
-        }
-
-        Self::composite_index_add(&env, &level, &stored.vitals.region, player_id);
-        Self::level_index_add(&env, &level, player_id);
-
-        events::player_registered(&env, player_id, &wallet);
-        Ok(player_id)
-    }
-
-    /// Seed a scout profile directly using admin authority.
-    pub fn admin_seed_scout(
-        env: Env,
-        wallet: Address,
-        region: String,
-        scout_id: u64,
-        registered_at: u64,
-        verified: bool,
-    ) -> Result<u64, ScoutChainError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        Self::require_not_paused(&env)?;
-        Self::require_initialized(&env)?;
-
-        if region.len() > MAX_REGION_LEN {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let profile = ScoutProfile {
-            scout_id,
-            wallet: wallet.clone(),
-            region,
-            verified,
-            verification: ScoutVerificationRecord {
-                verified,
-                verified_by: if verified { Some(admin.clone()) } else { None },
-                verified_at: if verified { Some(env.ledger().timestamp()) } else { None },
-                evidence_ref: None,
-                method: if verified { Some(String::from_str(&env, "admin_manual")) } else { None },
-            },
-            registered_at,
-        };
-
-        env.storage().persistent().set(&DataKey::Scout(scout_id), &profile);
-        env.storage()
-            .persistent()
-            .set(&DataKey::ScoutByWallet(wallet.clone()), &scout_id);
-
-        events::scout_registered(&env, scout_id, &wallet);
-        Ok(scout_id)
-    }
-
-    // -------------------------------------------------------------------------
-    // Migration ticket protocol
-    // -------------------------------------------------------------------------
-
-    /// Redeem a player migration authorization signed by the player off-chain.
-    ///
-    /// A relayer with no player private key can call this function to recreate
-    /// a player's profile on a freshly deployed contract. The function verifies
-    /// the player's ed25519 signature over the canonical authorization message
-    /// before writing any state.
-    ///
-    /// The signed message covers:
-    /// `wallet || role(Player=0) || profile_data_hash || new_contract_hint || nonce || expires_at`
-    pub fn redeem_migration_player(
-        env: Env,
-        wallet: Address,
-        vitals: PlayerVitals,
-        ipfs_hashes: Vec<String>,
-        level: ProgressLevel,
-        player_id: u64,
-        registered_at: u64,
-        updated_at: u64,
-        authorization: MigrationAuthorization,
-    ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
-        Self::require_initialized(&env)?;
-
-        if authorization.role != MigrationRole::Player {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if authorization.wallet != wallet {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
-        {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let profile_data_hash = Self::profile_data_hash(&env, &wallet, &vitals, &ipfs_hashes, player_id, registered_at, updated_at);
-        if authorization.profile_data_hash != profile_data_hash {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let message = Self::migration_message(&env, &authorization);
-        let public_key = Self::address_to_ed25519(&env, &wallet);
-        let signature = Self::vec_to_signature(authorization.signature.clone());
-
-        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
-
-        let result = Self::admin_seed_player(&env, wallet, vitals, ipfs_hashes, level, player_id, registered_at, updated_at);
-        if result.is_ok() {
-            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Player, player_id, &authorization.new_contract_hint);
-        }
-        result
-    }
-
-    /// Redeem a scout migration authorization signed by the scout off-chain.
-    ///
-    /// A relayer with no scout private key can call this function to recreate
-    /// a scout's profile on a freshly deployed contract. The function verifies
-    /// the scout's ed25519 signature over the canonical authorization message
-    /// before writing any state.
-    ///
-    /// The signed message covers:
-    /// `wallet || role(Scout=1) || region_hash || new_contract_hint || nonce || expires_at`
-    pub fn redeem_migration_scout(
-        env: Env,
-        wallet: Address,
-        region: String,
-        scout_id: u64,
-        registered_at: u64,
-        verified: bool,
-        authorization: MigrationAuthorization,
-    ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
-        Self::require_initialized(&env)?;
-
-        if authorization.role != MigrationRole::Scout {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if authorization.wallet != wallet {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if authorization.expires_at > 0 && authorization.expires_at <= env.ledger().timestamp() {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::MigrationNonce(wallet.clone(), authorization.nonce))
-        {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let region_hash = Self::region_hash(&env, &region);
-        if authorization.profile_data_hash != region_hash {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        let message = Self::migration_message(&env, &authorization);
-        let public_key = Self::address_to_ed25519(&env, &wallet);
-        let signature = Self::vec_to_signature(authorization.signature.clone());
-
-        if !soroban_sdk::crypto::ed25519::verify(&public_key, &message, &signature) {
-            return Err(ScoutChainError::InvalidInput);
-        }
-
-        Self::mark_migration_nonce(&env, &wallet, authorization.nonce);
-
-        let result = Self::admin_seed_scout(&env, wallet, region, scout_id, registered_at, verified);
-        if result.is_ok() {
-            events::migration_redeemed(&env, &wallet, &crate::types::MigrationRole::Scout, scout_id, &authorization.new_contract_hint);
-        }
-        result
-    }
-
-    /// Compute a hash of the player profile data for migration authorization.
-    fn profile_data_hash(
-        env: &Env,
-        wallet: &Address,
-        vitals: &PlayerVitals,
-        ipfs_hashes: &Vec<String>,
-        player_id: u64,
-        registered_at: u64,
-        updated_at: u64,
-    ) -> Vec<u8> {
-        let mut hasher = sha256::Hasher::new(env);
-        for b in wallet.to_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in vitals.age.to_be_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in vitals.position.as_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in vitals.region.as_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in vitals.nationality.as_bytes() {
-            hasher.update(&[b]);
-        }
-        for hash in ipfs_hashes.iter() {
-            for b in hash.as_bytes() {
-                hasher.update(&[b]);
-            }
-        }
-        for b in player_id.to_be_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in registered_at.to_be_bytes() {
-            hasher.update(&[b]);
-        }
-        for b in updated_at.to_be_bytes() {
-            hasher.update(&[b]);
-        }
-        hasher.finalize().to_vec()
-    }
-
-    /// Compute a hash of the scout profile data for migration authorization.
-    fn region_hash(env: &Env, region: &String) -> Vec<u8> {
-        let mut hasher = sha256::Hasher::new(env);
-        for b in region.as_bytes() {
-            hasher.update(&[b]);
-        }
-        hasher.finalize().to_vec()
-    }
-
-    /// Construct the canonical message that a player/scout signs for migration.
-    fn migration_message(env: &Env, auth: &MigrationAuthorization) -> Vec<u8> {
-        let mut msg = Vec::new(env);
-        for b in auth.wallet.to_bytes() {
-            msg.push_back(b);
-        }
-        let role_byte = match auth.role {
-            MigrationRole::Player => 0u8,
-            MigrationRole::Scout => 1u8,
-        };
-        msg.push_back(role_byte);
-        for b in &auth.profile_data_hash {
-            msg.push_back(*b);
-        }
-        for b in auth.new_contract_hint.to_bytes() {
-            msg.push_back(b);
-        }
-        for b in auth.nonce.to_be_bytes() {
-            msg.push_back(*b);
-        }
-        for b in auth.expires_at.to_be_bytes() {
-            msg.push_back(*b);
-        }
-        msg
-    }
-
-    fn mark_migration_nonce(env: &Env, wallet: &Address, nonce: u64) {
-        let key = DataKey::MigrationNonce(wallet.clone(), nonce);
-        env.storage().persistent().set(&key, &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
-    }
-
-    /// Derive an ed25519 public key from a wallet address.
-    ///
-    /// Soroban Ed25519 addresses encode the public key starting at byte 1
-    /// (byte 0 is the type discriminator).
-    fn address_to_ed25519(env: &Env, address: &Address) -> [u8; 32] {
-        let bytes = address.to_bytes();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes.0[1..33]);
-        key
-    }
-
-    /// Convert a Vec<u8> signature into a fixed-size [u8; 64] array.
-    fn vec_to_signature(sig: Vec<u8>) -> [u8; 64] {
-        let mut arr = [0u8; 64];
-        arr.copy_from_slice(&sig);
-        arr
-    }
 
     // -------------------------------------------------------------------------
     // Queries
@@ -995,6 +678,55 @@ impl RegistrationContract {
 
     pub fn get_player(env: Env, player_id: u64) -> Result<PlayerProfile, ScoutChainError> {
         Self::load_player(&env, player_id)
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) player profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL out of the
+    /// minimal auto-restore window back to the full documented lifetime so it
+    /// cannot silently age into permanent eviction.
+    ///
+    /// Admin-only. Returns `PlayerRecordEvicted` if the entry has already been
+    /// fully evicted (key absent) and is no longer recoverable.
+    pub fn restore_player_record(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: PlayerProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Player(player_id))
+            .ok_or(ScoutChainError::PlayerRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Player(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::player_record_restored(&env, &admin, player_id);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) scout profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_player_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `ScoutRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_scout_record(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Scout(scout_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::scout_record_restored(&env, &admin, scout_id);
+        Ok(())
     }
 
     /// Return a lightweight player summary without IPFS hashes or wallet.
@@ -3189,6 +2921,75 @@ mod tests {
 
         let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
         assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_link_and_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+
+        // Freely re-settable — no first-call-only guard — and a second call
+        // must bump the epoch again, not reset it.
+        let new_progress_addr = Address::generate(&env);
+        client.set_progress_contract(&new_progress_addr);
+        let state2 = client.get_wiring_state();
+        assert_eq!(state2.progress_contract.address, Some(new_progress_addr));
+        assert_eq!(
+            state2.progress_contract.epoch, 2,
+            "re-wiring the same link must bump its epoch again"
+        );
+    }
+
+    #[test]
+    fn test_set_progress_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (progress_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------

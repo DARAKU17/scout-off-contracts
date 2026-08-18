@@ -28,19 +28,24 @@ fn setup() -> Harness {
     Harness { env, admin, client }
 }
 
-/// Advance `player_id` by `n` levels using a whitelisted secondary caller.
-/// We whitelist the caller as the ScoutAccessContract so advance_level
-/// accepts it without needing a real verification contract + milestone check.
+/// Advance `player_id` by `n` levels using a whitelisted caller.
 fn advance_n(h: &Harness, caller: &Address, player_id: u64, n: u32) {
     for i in 1..=n {
         h.client.advance_level(caller, &player_id, &i);
     }
 }
 
-/// Whitelist `addr` as the ScoutAccessContract (secondary caller for advance_level).
-fn setup_secondary_caller(h: &Harness) -> Address {
+/// Whitelist a fresh address on the *primary* (VerificationContract) path so
+/// `advance_level` accepts it.
+///
+/// The secondary (ScoutAccessContract) path is deliberately not used: since
+/// #457 it cross-calls `get_milestone_count` to validate `milestone_ref`,
+/// which requires a real deployed verification contract. Pagination behaviour
+/// is independent of milestone validation, so the primary path — which skips
+/// that check by design — keeps this harness focused.
+fn setup_whitelisted_caller(h: &Harness) -> Address {
     let caller = Address::generate(&h.env);
-    h.client.set_scout_access_contract(&caller);
+    h.client.set_verification_contract(&caller);
     caller
 }
 
@@ -51,7 +56,7 @@ fn setup_secondary_caller(h: &Harness) -> Address {
 fn test_first_page_no_cursor() {
     let h = setup();
     let player_id: u64 = 1;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
     advance_n(&h, &ver, player_id, 3); // 3 history entries
 
     let (entries, next_index, snapshot) =
@@ -68,7 +73,7 @@ fn test_first_page_no_cursor() {
 fn test_full_walk_no_gaps_no_duplicates() {
     let h = setup();
     let player_id: u64 = 2;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
     advance_n(&h, &ver, player_id, 3);
 
     let mut all_new_levels: soroban_sdk::Vec<ProgressLevel> =
@@ -106,7 +111,7 @@ fn test_full_walk_no_gaps_no_duplicates() {
 fn test_new_entries_not_visible_to_existing_cursor() {
     let h = setup();
     let player_id: u64 = 10;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
 
     // Start with 2 history entries
     advance_n(&h, &ver, player_id, 2);
@@ -156,7 +161,7 @@ fn test_empty_history() {
 fn test_exhausted_cursor_returns_empty() {
     let h = setup();
     let player_id: u64 = 5;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
     advance_n(&h, &ver, player_id, 1);
 
     // Exhaust in one page
@@ -176,7 +181,7 @@ fn test_exhausted_cursor_returns_empty() {
 fn test_limit_capped_at_50() {
     let h = setup();
     let player_id: u64 = 7;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
     // Only 3 entries available but we request 100
     advance_n(&h, &ver, player_id, 3);
 
@@ -191,7 +196,7 @@ fn test_limit_capped_at_50() {
 fn test_snapshot_isolation_two_consumers() {
     let h = setup();
     let player_id: u64 = 20;
-    let ver = setup_secondary_caller(&h);
+    let ver = setup_whitelisted_caller(&h);
 
     // Consumer A starts with 2 entries
     advance_n(&h, &ver, player_id, 2);

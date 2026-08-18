@@ -50,7 +50,16 @@ pub enum ScoutChainError {
 
     // ── Rate limiting ──
     /// Caller attempted to register again before the cooldown period elapsed.
-    RegistrationCooldown = 15,
+    RegistrationCooldown = 16,
+
+    // ── Archival recovery ──
+    /// `restore_player_record` targeted a player entry whose archival grace
+    /// period has fully elapsed (evicted, not merely archived) and is
+    /// unrecoverable.
+    PlayerRecordEvicted = 17,
+    /// `restore_scout_record` targeted a scout entry that has been fully
+    /// evicted and is unrecoverable.
+    ScoutRecordEvicted = 18,
 }
 
 impl AdminError for ScoutChainError {

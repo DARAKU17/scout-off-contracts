@@ -18,6 +18,8 @@ pub const PROGRESS_CONTRACT_UPDATED: &str = "progress_contract_updated";
 pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
 pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
 pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
+pub const FEE_CONFIG_DELAY_BYPASSED: &str = "fee_config_delay_bypassed";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 pub const EVIDENCE_ACCESS_GRANTED: &str = "evidence_access_granted";
 pub const EVIDENCE_ACCESS_REVOKED: &str = "evidence_access_revoked";
 
@@ -161,6 +163,24 @@ pub fn registration_contract_updated(env: &Env, admin: &Address, registration_co
     );
 }
 
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_progress_contract` / `update_progress_contract` /
+/// `set_registration_contract` call, in addition to (not replacing)
+/// `progress_contract_updated` / `registration_contract_updated`. `link`
+/// identifies which peer pointer changed (`"progress_contract"` or
+/// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
+    );
+}
+
 /// topics: (event_name, admin)  data: (proposed_config, proposed_at)
 pub fn fee_config_proposed(
     env: &Env,
@@ -183,6 +203,28 @@ pub fn fee_config_updated(
 ) {
     env.events().publish(
         (Symbol::new(env, "fee_config_updated"), admin.clone()),
+        (old_config.clone(), new_config.clone()),
+    );
+}
+
+/// topics: (event_name, admin)  data: (old_config, new_config)
+///
+/// Emitted only by `update_fee_config`, alongside (never instead of)
+/// `fee_config_updated`, so indexers/auditors can tell — purely from the
+/// event stream — that this particular fee change bypassed the 7-day
+/// `propose_fee_config` / `activate_fee_config` delay (see
+/// docs/FEE_CONFIG_PROPOSAL_DESIGN.md). A `fee_config_updated` event that is
+/// *not* accompanied by this event in the same transaction, and is also not
+/// accompanied by a same-transaction `fee_config_proposed`, was activated via
+/// `activate_fee_config` after the full delay elapsed.
+pub fn fee_config_delay_bypassed(
+    env: &Env,
+    admin: &Address,
+    old_config: &crate::types::FeeConfig,
+    new_config: &crate::types::FeeConfig,
+) {
+    env.events().publish(
+        (Symbol::new(env, "fee_config_delay_bypassed"), admin.clone()),
         (old_config.clone(), new_config.clone()),
     );
 }
@@ -236,6 +278,16 @@ pub fn subscription_auto_renewed(
             scout.clone(),
         ),
         (tier.clone(), subscribed_at, expires_at),
+    );
+}
+
+/// Emitted by `restore_subscription_record` when an admin re-extends an
+/// archived or expired subscription entry's TTL back to the policy value.
+/// topics: (event_name, admin)  data: scout
+pub fn subscription_record_restored(env: &Env, admin: &Address, scout: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_record_restored"), admin.clone()),
+        scout.clone(),
     );
 }
 

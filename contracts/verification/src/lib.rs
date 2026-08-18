@@ -20,13 +20,17 @@ pub use types::{
     AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
     Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
     PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
+    VerificationWiringState,
 };
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Val, Vec};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::IntoVal;
 
-use scoutchain_shared_types::{require_admin, validate_cid, ProgressLevel, safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32}};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, validate_cid, write_wiring_link, ProgressLevel,
+    safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32},
+};
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
 /// Minimum credentials length for validator registration.
@@ -235,6 +239,29 @@ impl VerificationContract {
     /// Store the progress contract address so approve_milestone can call it.
     /// Must be called after both contracts are deployed (admin only).
     /// Returns AlreadyConfigured if called more than once — use update_progress_contract instead.
+    
+    pub fn get_diversity_config(env: Env) -> Option<DiversityConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DiversityConfig)
+    }
+
+    pub fn set_diversity_config(
+        env: Env,
+        required_distinct_affiliations: u32,
+        starting_milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let config = DiversityConfig {
+            required_distinct_affiliations,
+            starting_milestone_index,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiversityConfig, &config);
+        Ok(())
+    }
+
     pub fn set_progress_contract(
         env: Env,
         progress_contract: Address,
@@ -243,13 +270,17 @@ impl VerificationContract {
         if env.storage().instance().has(&DataKey::ProgressContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::ProgressContractSet, &true);
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -260,10 +291,14 @@ impl VerificationContract {
         progress_contract: Address,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -279,12 +314,16 @@ impl VerificationContract {
         if env.storage().instance().has(&DataKey::RegistrationContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::RegistrationContractSet, &true);
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
     }
 
@@ -295,10 +334,36 @@ impl VerificationContract {
         reg_contract: Address,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of both cross-contract peer address pointers held
+    /// by this contract (progress, registration), each with its address and
+    /// re-wiring epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired or paused contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> VerificationWiringState {
+        let progress_contract =
+            read_wiring_link(&env, &DataKey::ProgressContract, &DataKey::ProgressContractEpoch);
+        let registration_contract = read_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+        );
+        VerificationWiringState {
+            progress_contract,
+            registration_contract,
+        }
     }
 
     /// Set the minimum number of distinct validator regions required before
@@ -393,6 +458,7 @@ impl VerificationContract {
         env: Env,
         wallet: Address,
         credentials: String,
+        affiliation: String,
         specializations: Vec<String>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -404,6 +470,10 @@ impl VerificationContract {
         }
 
         if credentials.len() < MIN_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+        
+        if affiliation.len() > MAX_CREDENTIALS_LEN {
             return Err(VerificationError::InvalidInput);
         }
 
@@ -445,6 +515,7 @@ impl VerificationContract {
         let validator = Validator {
             wallet: wallet.clone(),
             credentials,
+            affiliation,
             registered_at: env.ledger().timestamp(),
             active: true,
             specializations,
@@ -684,7 +755,7 @@ impl VerificationContract {
     /// changes are persisted.
     pub fn batch_register_validators(
         env: Env,
-        entries: Vec<(Address, String, Vec<String>)>,
+        entries: Vec<(Address, String, String, Vec<String>)>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
@@ -705,7 +776,10 @@ impl VerificationContract {
 
         // First pass: validate each entry without mutating state.
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
 
             // Length checks.
             if credentials.len() > MAX_CREDENTIALS_LEN || credentials.len() < MIN_CREDENTIALS_LEN {
@@ -725,7 +799,7 @@ impl VerificationContract {
 
             // Duplicate within the batch.
             for j in 0..i {
-                let (other_wallet, _, _) = entries.get(j).unwrap();
+                let (other_wallet, _, _, _) = entries.get(j).unwrap();
                 if other_wallet == wallet {
                     return Err(VerificationError::ValidatorAlreadyRegistered);
                 }
@@ -749,10 +823,14 @@ impl VerificationContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
             let validator = Validator {
                 wallet: wallet.clone(),
                 credentials: credentials.clone(),
+                affiliation: affiliation.clone(),
                 registered_at: env.ledger().timestamp(),
                 active: true,
                 specializations: specializations.clone(),
@@ -843,6 +921,60 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Recover an archived (or expired-but-not-evicted) validator entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction. It does NOT change `active`/`banned` flags (use
+    /// `restore_validator` for reactivation).
+    ///
+    /// Admin-only. Returns `ValidatorRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_validator_record(env: Env, wallet: Address) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Validator(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::validator_record_restored(&env, &admin, &wallet);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) milestone entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_validator_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `MilestoneRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_milestone_record(
+        env: Env,
+        player_id: u64,
+        index: u32,
+    ) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, index))
+            .ok_or(VerificationError::MilestoneRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Milestone(player_id, index),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::milestone_record_restored(&env, &admin, player_id, index);
+        Ok(())
+    }
+
     /// Update the specialization tags for an existing validator (admin only).
     ///
     /// Replaces the validator's current `specializations` list with the supplied
@@ -922,6 +1054,7 @@ impl VerificationContract {
         let new_validator = Validator {
             wallet: new_wallet.clone(),
             credentials: old_validator.credentials.clone(),
+            affiliation: old_validator.affiliation.clone(),
             registered_at: old_validator.registered_at,
             active: old_validator.active,
             specializations: old_validator.specializations.clone(),
@@ -2615,32 +2748,69 @@ impl VerificationContract {
             &evidence_hash,
         );
 
-        if let Some(progress_addr) = env
+        let validator: Validator = env
             .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ProgressContract)
-        {
-            let progress_client = progress_contract::Client::new(env, &progress_addr);
-            match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
-                Ok(_) => {}
-                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
-                    events::level_advancement_skipped(
-                        env,
-                        player_id,
-                        &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
-                    );
+            .persistent()
+            .get(&DataKey::Validator(validator_wallet.clone()))
+            .unwrap();
+
+        let mut player_affiliations: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerAffiliations(player_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        if !player_affiliations.contains(&validator.affiliation) {
+            player_affiliations.push_back(validator.affiliation.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::PlayerAffiliations(player_id), &player_affiliations);
+        }
+
+        let diversity_config = Self::get_diversity_config(env.clone());
+        let mut advance_allowed = true;
+        if let Some(config) = diversity_config {
+            if next_index >= config.starting_milestone_index {
+                if player_affiliations.len() < config.required_distinct_affiliations {
+                    advance_allowed = false;
                 }
-                Err(e) => {
-                    let code = match &e {
-                        Ok(pe) => *pe as u32,
-                        Err(_) => 0u32,
-                    };
-                    events::progress_call_failed(env, player_id, code);
-                    return Err(VerificationError::ProgressCallFailed);
+            }
+        }
+
+        if advance_allowed {
+            if let Some(progress_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::ProgressContract)
+            {
+                let progress_client = progress_contract::Client::new(env, &progress_addr);
+                match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
+                    Ok(_) => {}
+                    Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
+                        events::level_advancement_skipped(
+                            env,
+                            player_id,
+                            &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
+                        );
+                    }
+                    Err(e) => {
+                        let code = match &e {
+                            Ok(pe) => *pe as u32,
+                            Err(_) => 0u32,
+                        };
+                        events::progress_call_failed(env, player_id, code);
+                        return Err(VerificationError::ProgressCallFailed);
+                    }
+                }
+            } else {
+                if !env.storage().instance().has(&DataKey::ProgressContract) {
+                    events::progress_contract_not_set(env, player_id);
                 }
             }
         } else {
-            events::progress_contract_not_set(env, player_id);
+            if !env.storage().instance().has(&DataKey::ProgressContract) {
+                events::progress_contract_not_set(env, player_id);
+            }
         }
 
         Ok(next_index)
@@ -3462,6 +3632,9 @@ mod tests {
         let addr = Address::generate(&env);
         client.set_progress_contract(&addr);
 
+        // set_progress_contract now emits both the legacy
+        // progress_contract_updated event and the new wiring_updated event
+        // (issue #1041) on every successful call.
         let events = env.events().all();
         assert_eq!(
             events,
@@ -3474,7 +3647,17 @@ mod tests {
                         admin.clone(),
                     )
                         .into_val(&env),
-                    addr.into_val(&env)
+                    addr.clone().into_val(&env)
+                ),
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (addr, 1u32).into_val(&env)
                 )
             ]
         );
@@ -3482,6 +3665,12 @@ mod tests {
 
     #[test]
     fn test_update_progress_contract_succeeds() {
+        // Regression test: verification's legacy first-call-only guard
+        // (set_progress_contract → AlreadyConfigured on re-call, see
+        // test_set_progress_contract_second_call_returns_already_configured)
+        // must remain paired with a still-functional update_progress_contract
+        // escape hatch for intentional re-wiring (issue #1041 keeps this path
+        // deprecated-but-functional, not removed).
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -3490,6 +3679,116 @@ mod tests {
         let addr2 = Address::generate(&env);
         client.set_progress_contract(&addr1);
         client.update_progress_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(addr2));
+        assert_eq!(
+            state.progress_contract.epoch, 2,
+            "update_progress_contract must still bump the epoch, same as any other wiring setter"
+        );
+
+        // The legacy guard itself must still be intact: a further
+        // set_progress_contract call is still rejected, only
+        // update_progress_contract may re-wire past the first call.
+        let addr3 = Address::generate(&env);
+        let result = client.try_set_progress_contract(&addr3);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert_eq!(state.registration_contract.address, None);
+        assert_eq!(state.registration_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_both_links() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        let reg_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        client.set_registration_contract(&reg_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert_eq!(state.registration_contract.address, Some(reg_addr));
+        assert_eq!(state.registration_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_set_registration_contract_second_call_returns_already_configured() {
+        // registration_contract carries the same first-call-only legacy
+        // guard as progress_contract (both predate issue #1041) — verify it
+        // is untouched by the wiring-epoch rollout.
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr = Address::generate(&env);
+        client.set_registration_contract(&addr);
+
+        let result = client.try_set_registration_contract(&addr);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    #[test]
+    fn test_update_registration_contract_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.set_registration_contract(&addr1);
+        client.update_registration_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.registration_contract.address, Some(addr2));
+        assert_eq!(state.registration_contract.epoch, 2);
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let reg_addr = Address::generate(&env);
+        client.set_registration_contract(&reg_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "registration_contract"),
+                    )
+                        .into_val(&env),
+                    (reg_addr, 1u32).into_val(&env)
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -1,13 +1,25 @@
-use soroban_sdk::{Address, String};
-use scoutchain_chaos_tests::fixtures::Harness;
+use scoutchain_registration::PlayerVitals;
+use scoutchain_shared_types::ProgressLevel;
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, String, Vec};
+
+use crate::fixtures::{Harness, CONTACT_FEE};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Operation {
-    ApproveMilestone { player_idx: usize, validator_idx: usize },
+    ApproveMilestone {
+        player_idx: usize,
+        validator_idx: usize,
+    },
     RegisterPlayer,
     RegisterScout,
-    ContactPlayer { scout_idx: usize, player_idx: usize },
-    LogTrialOffer { scout_idx: usize, player_idx: usize },
+    ContactPlayer {
+        scout_idx: usize,
+        player_idx: usize,
+    },
+    LogTrialOffer {
+        scout_idx: usize,
+        player_idx: usize,
+    },
 }
 
 pub struct ScheduleGenerator {
@@ -19,8 +31,8 @@ impl ScheduleGenerator {
         Self { seed }
     }
 
-    pub fn generate(&mut self, max_ops: u32) -> Vec<Operation> {
-        let mut ops = Vec::new();
+    pub fn generate(&mut self, max_ops: u32) -> std::vec::Vec<Operation> {
+        let mut ops = std::vec::Vec::new();
         for _ in 0..max_ops {
             self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let op_type = (self.seed % 5) as usize;
@@ -47,49 +59,88 @@ impl ScheduleGenerator {
 }
 
 impl Harness {
-    pub fn apply(&mut self, op: &Operation) -> Result<(), String> {
+    pub fn apply(&mut self, op: &Operation) -> Result<(), std::string::String> {
         match op {
-            Operation::ApproveMilestone { player_idx, validator_idx } => {
-                let player = &self.players[*player_idx];
-                let validator = &self.validators[*validator_idx];
+            Operation::ApproveMilestone {
+                player_idx,
+                validator_idx,
+            } => {
+                let player_id = *self
+                    .player_ids
+                    .get(*player_idx)
+                    .ok_or_else(|| format!("player_idx {player_idx} out of range"))?;
+                let validator = self.validators.get(*validator_idx as u32).unwrap();
+                let cid = self.next_cid();
                 let result = self.verification.try_approve_milestone(
-                    validator,
-                    player,
+                    &validator,
+                    &player_id,
                     &String::from_str(&self.env, "chaos-test"),
-                    &String::from_str(&self.env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+                    &cid,
+                    &None,
                 );
-                result.map_err(|e| format!("approve_milestone failed: {:?}", e))
+                match result {
+                    // Prior level stays in last_observed_levels so the
+                    // end-of-schedule monotonicity check can see the delta.
+                    Ok(Ok(_)) => Ok(()),
+                    other => Err(format!("approve_milestone failed: {:?}", other)),
+                }
             }
-            Operation::ContactPlayer { scout_idx, player_idx } => {
-                let scout = &self.scouts[*scout_idx];
-                let player = &self.players[*player_idx];
-                let result = self.scout_access.try_pay_to_contact(scout, *player_idx as u64);
-                result.map_err(|e| format!("pay_to_contact failed: {:?}", e))
+            Operation::ContactPlayer {
+                scout_idx,
+                player_idx,
+            } => {
+                let scout = self.scouts.get(*scout_idx as u32).unwrap();
+                let player_id = *self
+                    .player_ids
+                    .get(*player_idx)
+                    .ok_or_else(|| format!("player_idx {player_idx} out of range"))?;
+                StellarAssetClient::new(&self.env, &self.xlm).mint(&scout, &CONTACT_FEE);
+                let result = self.scout_access.try_pay_to_contact(&scout, &player_id);
+                match result {
+                    Ok(Ok(())) => {
+                        self.record_fee_delta(CONTACT_FEE);
+                        Ok(())
+                    }
+                    other => Err(format!("pay_to_contact failed: {:?}", other)),
+                }
             }
-            Operation::LogTrialOffer { scout_idx, player_idx } => {
-                let scout = &self.scouts[*scout_idx];
-                let player = &self.players[*player_idx];
-                let result = self.scout_access.try_log_trial_offer(
-                    scout,
-                    player,
-                    &String::from_str(&self.env, "chaos-trial"),
-                );
-                result.map_err(|e| format!("log_trial_offer failed: {:?}", e))
+            Operation::LogTrialOffer {
+                scout_idx,
+                player_idx,
+            } => {
+                let scout = self.scouts.get(*scout_idx as u32).unwrap();
+                let player_id = *self
+                    .player_ids
+                    .get(*player_idx)
+                    .ok_or_else(|| format!("player_idx {player_idx} out of range"))?;
+                let cid = self.next_cid();
+                let result = self
+                    .scout_access
+                    .try_log_trial_offer(&scout, &player_id, &cid);
+                match result {
+                    Ok(Ok(_)) => Ok(()),
+                    other => Err(format!("log_trial_offer failed: {:?}", other)),
+                }
             }
             Operation::RegisterPlayer => {
                 let wallet = Address::generate(&self.env);
+                let mut hashes = Vec::new(&self.env);
+                hashes.push_back(String::from_str(&self.env, "QmCID2"));
                 let result = self.registration.try_register_player(
                     &wallet,
-                    &scoutchain_registration::PlayerVitals {
+                    &PlayerVitals {
                         age: 20,
                         position: String::from_str(&self.env, "Midfielder"),
                         region: String::from_str(&self.env, "East Africa"),
                         nationality: String::from_str(&self.env, "Kenya"),
                     },
-                    &vec![String::from_str(&self.env, "QmCID2")],
+                    &hashes,
                 );
-                if result.is_ok() {
-                    self.players.push(wallet);
+                if let Ok(Ok(pid)) = result {
+                    self.players.push_back(wallet);
+                    self.player_ids.push(pid);
+                    self.last_observed_levels
+                        .insert(pid, ProgressLevel::Unverified);
                 }
                 Ok(())
             }
@@ -100,7 +151,7 @@ impl Harness {
                     &String::from_str(&self.env, "North Africa"),
                 );
                 if result.is_ok() {
-                    self.scouts.push(wallet);
+                    self.scouts.push_back(wallet);
                 }
                 Ok(())
             }

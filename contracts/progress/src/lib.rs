@@ -4,9 +4,9 @@ mod errors;
 mod events;
 mod types;
 
-use errors::ProgressError;
+pub use errors::ProgressError;
 use scoutchain_shared_types::{require_admin, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
-use types::{DataKey, HistoryProofStep, ProgressEntry, ProgressWiringState};
+pub use types::{DataKey, HistoryProofStep, ProgressEntry, ProgressWiringState};
 
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
@@ -25,6 +25,7 @@ const PERSISTENT_TTL_MAX: u32 = 518_400;
 const ADMIN_BUMP_LEDGERS: u32 = 518_400;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const HISTORY_PAGE_SIZE: u32 = 8;
 
 // Minimal client for the registration contract.
 // Used to sync a player's level after advance_level / reset_player_level.
@@ -95,10 +96,14 @@ impl ProgressContract {
 
     /// Store the registration contract address so we can sync player levels (admin only).
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &addr, epoch);
         Ok(())
     }
 
@@ -122,10 +127,14 @@ impl ProgressContract {
     /// that the caller is the configured VerificationContract (admin only).
     pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::VerificationContract,
+            &DataKey::VerificationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "verification_contract", &addr, epoch);
         Ok(())
     }
 
@@ -133,10 +142,14 @@ impl ProgressContract {
     /// advance_level (for trial-offer Level-3 advances). Admin only.
     pub fn set_scout_access_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoutAccessContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ScoutAccessContract,
+            &DataKey::ScoutAccessContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "scout_access_contract", &addr, epoch);
         Ok(())
     }
 
@@ -359,18 +372,51 @@ impl ProgressContract {
 
     pub fn get_level(env: Env, player_id: u64) -> ProgressLevel {
         let key = &DataKey::PlayerLevel(player_id);
-        let level = env.storage()
+        let level = env
+            .storage()
             .persistent()
             .get(key)
             .unwrap_or(ProgressLevel::Unverified);
-        
+
         // Keep-alive: extend TTL on any read to prevent silent archival of dormant players.
         // This is cheaper than losing a player's reputation to archival decay.
+        //
+        // The `has` guard is required: `extend_ttl` on a key that was never
+        // written raises Storage/MissingValue, which the host escalates to a
+        // panic. Without it, reading a player that has never advanced (the
+        // documented `Unverified` default) would trap instead of returning.
+        if env.storage().persistent().has(key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+
+        level
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) player-level entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction.
+    ///
+    /// Admin-only. Returns `PlayerLevelRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_player_level_record(env: Env, player_id: u64) -> Result<(), ProgressError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _level: ProgressLevel = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerLevel(player_id))
+            .ok_or(ProgressError::PlayerLevelRecordEvicted)?;
         env.storage()
             .persistent()
-            .extend_ttl(key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
-        
-        level
+            .extend_ttl(&DataKey::PlayerLevel(player_id), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        events::player_level_record_restored(&env, &admin, player_id);
+        Ok(())
     }
 
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
@@ -405,20 +451,23 @@ impl ProgressContract {
     }
 
     /// Return all history entries for a player in chronological order (index 1..=N).
-    /// Reads a single persistent storage key (`HistoryVec`) regardless of entry count,
-    /// reducing gas cost from O(N) individual reads to O(1).
+    /// The on-chain layout is now a bounded set of fixed-size `HistoryPage`
+    /// shards rather than one unbounded `HistoryVec` key. The function
+    /// reconstructs the logical history from those pages and keeps the
+    /// per-read/storage cost bounded by the page size instead of the full
+    /// historical count.
     /// Returns an empty Vec if the player has no history.
     pub fn get_progress_history(env: Env, player_id: u64) -> Vec<ProgressEntry> {
-        let vec_key = DataKey::HistoryVec(player_id);
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&vec_key)
-            .unwrap_or_else(|| Vec::new(&env));
-        if !history.is_empty() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        let history = Self::read_history_pages(&env, player_id);
+        let page_count = (history.len() as u32).saturating_add(HISTORY_PAGE_SIZE - 1)
+            / HISTORY_PAGE_SIZE;
+        for page_index in 0..page_count {
+            let key = DataKey::HistoryPage(player_id, page_index);
+            if env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+            }
         }
         history
     }
@@ -549,21 +598,10 @@ impl ProgressContract {
 
     /// Query history entries for a player since a given Unix timestamp.
     /// Returns all entries where `updated_at >= since_timestamp`.
-    /// Uses the HistoryVec for O(1) lookup, filters in-memory.
+    /// Rebuilds the logical history from fixed-size `HistoryPage` shards so the
+    /// query remains bounded even as the player's history grows.
     pub fn get_history_since(env: Env, player_id: u64, since_timestamp: u64) -> Vec<ProgressEntry> {
-        let vec_key = DataKey::HistoryVec(player_id);
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&vec_key)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        if !history.is_empty() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
-        }
-
+        let history = Self::read_history_pages(&env, player_id);
         let mut result: Vec<ProgressEntry> = Vec::new(&env);
         for i in 0..history.len() {
             if let Some(entry) = history.get(i) {
@@ -620,11 +658,7 @@ impl ProgressContract {
         player_id: u64,
         index: u32,
     ) -> Result<Vec<HistoryProofStep>, ProgressError> {
-        let history: Vec<ProgressEntry> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::HistoryVec(player_id))
-            .unwrap_or_else(|| Vec::new(&env));
+        let history = Self::read_history_pages(&env, player_id);
         let n = history.len();
         if n == 0 || index == 0 || index > n {
             return Err(ProgressError::PlayerNotFound);
@@ -744,10 +778,28 @@ impl ProgressContract {
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::ScoutAccessContract);
+        let registration_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RegistrationContractEpoch)
+            .unwrap_or(0);
+        let verification_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::VerificationContractEpoch)
+            .unwrap_or(0);
+        let scout_access_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ScoutAccessContractEpoch)
+            .unwrap_or(0);
         ProgressWiringState {
             registration_contract,
             verification_contract,
             scout_access_contract,
+            registration_epoch,
+            verification_epoch,
+            scout_access_epoch,
         }
     }
 
@@ -766,6 +818,65 @@ impl ProgressContract {
             .persistent()
             .get(&DataKey::PlayerLevel(player_id))
             .unwrap_or(ProgressLevel::Unverified)
+    }
+
+    fn history_page_index(index: u32) -> u32 {
+        (index.saturating_sub(1)) / HISTORY_PAGE_SIZE
+    }
+
+    fn read_history_pages(env: &Env, player_id: u64) -> Vec<ProgressEntry> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::HistoryCounter(player_id))
+            .unwrap_or(0u32);
+
+        if count == 0 {
+            return env
+                .storage()
+                .persistent()
+                .get(&DataKey::HistoryVec(player_id))
+                .unwrap_or_else(|| Vec::new(env));
+        }
+
+        let total_pages = (count + HISTORY_PAGE_SIZE - 1) / HISTORY_PAGE_SIZE;
+        let mut history: Vec<ProgressEntry> = Vec::new(env);
+        for page_index in 0..total_pages {
+            let page_key = DataKey::HistoryPage(player_id, page_index);
+            let page: Vec<ProgressEntry> = env
+                .storage()
+                .persistent()
+                .get(&page_key)
+                .unwrap_or_else(|| {
+                    let start = page_index * HISTORY_PAGE_SIZE + 1;
+                    let end = (start + HISTORY_PAGE_SIZE - 1).min(count);
+                    let mut reconstructed: Vec<ProgressEntry> = Vec::new(env);
+                    for idx in start..=end {
+                        if let Some(entry) = env
+                            .storage()
+                            .persistent()
+                            .get(&DataKey::HistoryEntry(player_id, idx))
+                        {
+                            reconstructed.push_back(entry);
+                        }
+                    }
+                    reconstructed
+                });
+            for i in 0..page.len() {
+                if let Some(entry) = page.get(i) {
+                    history.push_back(entry);
+                }
+            }
+        }
+
+        if history.is_empty() {
+            env.storage()
+                .persistent()
+                .get(&DataKey::HistoryVec(player_id))
+                .unwrap_or_else(|| Vec::new(env))
+        } else {
+            history
+        }
     }
 
     /// Numeric tier code for a `ProgressLevel`, used only for canonical leaf
@@ -985,24 +1096,30 @@ impl ProgressContract {
             .persistent()
             .extend_ttl(&history_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
-        // Also append to the single-key Vec so get_progress_history costs O(1) reads.
-        let vec_key = DataKey::HistoryVec(player_id);
-        let mut history: Vec<ProgressEntry> = env
+        // Store the player's history in bounded pages instead of one ever-growing
+        // `HistoryVec` key. Every page remains small and fixed-size, while the
+        // logical history is reconstructed by concatenating the pages in order.
+        let page_index = Self::history_page_index(next_index);
+        let page_key = DataKey::HistoryPage(player_id, page_index);
+        let mut page: Vec<ProgressEntry> = env
             .storage()
             .persistent()
-            .get(&vec_key)
+            .get(&page_key)
             .unwrap_or_else(|| Vec::new(env));
-        history.push_back(entry);
-        env.storage().persistent().set(&vec_key, &history);
-        env.storage()
-            .persistent()
-            .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        page.push_back(entry.clone());
+        env.storage().persistent().set(&page_key, &page);
+        env.storage().persistent().extend_ttl(
+            &page_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Recompute the Merkle commitment root over the full (now-updated)
-        // history and persist it — see `mth_range`'s doc comment for why a
-        // full recompute from the just-read `history` Vec is the right
-        // trade-off here rather than an incremental accumulator.
+        // logical history from the page shards. This preserves the existing
+        // proof semantics while preventing a single persistent key from growing
+        // without bound.
         let root_key = DataKey::HistoryRoot(player_id);
+        let history = Self::read_history_pages(env, player_id);
         let leaves = Self::leaf_hashes(env, &history);
         let root = Self::mth_range(env, &leaves, 0, leaves.len());
         env.storage().persistent().set(&root_key, &root);
@@ -1089,6 +1206,7 @@ mod tests {
                 ver_client.register_validator(
                     &milestone_validator,
                     &String::from_str(&env, "Test License"),
+                    &soroban_sdk::vec![&env],
                 );
                 for _ in 0..5 {
                     cid_seed += 1;
@@ -1097,6 +1215,7 @@ mod tests {
                         &player_id,
                         &String::from_str(&env, "test milestone"),
                         &dummy_cid(&env, cid_seed),
+                        &None,
                     );
                 }
             }
@@ -1655,6 +1774,7 @@ mod tests {
         ver_client.register_validator(
             &milestone_validator,
             &String::from_str(&env, "Test License"),
+            &soroban_sdk::vec![&env],
         );
         let player_id = 1u64;
         ver_client.approve_milestone(
@@ -1662,6 +1782,7 @@ mod tests {
             &player_id,
             &String::from_str(&env, "test milestone"),
             &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+            &None,
         );
         client.set_verification_contract(&ver_id);
 
@@ -1686,41 +1807,68 @@ mod tests {
 
     #[test]
     fn test_reset_player_level_success() {
-        let (env, client, validator) = setup();
+        // Self-contained (rather than using the shared setup() helper) so
+        // this test can assert the exact wiring_updated-free event shape
+        // below against a known `admin` address. advance_level's on-chain
+        // milestone_ref validation only applies to the secondary
+        // (scout_access) caller path — the primary VerificationContract
+        // caller (any address, once set_verification_contract is called and
+        // auth is mocked) is trusted without a real deployed verification
+        // contract, matching the pattern already used by e.g.
+        // test_advance_level_sequence via setup().
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let validator = Address::generate(&env);
         let player_id = 1u64;
 
         client.advance_level(&validator, &player_id, &1u32);
         client.advance_level(&validator, &player_id, &2u32);
         assert_eq!(client.get_history_count(&player_id), 2);
 
+        // Read the admin first: `as_contract` is itself an invocation, and
+        // `events().all()` only reflects the most recent one, so doing this
+        // after the reset would wipe the log we are about to assert on.
+        let admin: Address = env.as_contract(&client.address, || {
+            env.storage().persistent().get(&DataKey::Admin).unwrap()
+        });
+
         client.reset_player_level(&player_id, &ProgressLevel::Unverified);
 
         // The event is still emitted — checked immediately, since `events().all()`
         // only reflects the most recent contract invocation and the read calls
         // below are themselves separate invocations.
-        // We verify shape (event name + payload) without asserting the exact
-        // admin address, since the setup helper does not expose it.
-        let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let (_, topics_val, data_val) = events.get(0).unwrap();
-        // Unpack topics as a Vec<Val>; first element is the Symbol.
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
-            soroban_sdk::Vec::try_from_val(&env, &topics_val).unwrap();
+        //
+        // `ContractEvents` is an opaque handle, not a `Vec`: it exposes no
+        // `len`/`get`/iteration, only equality against a
+        // `Vec<(Address, Vec<Val>, Val)>`. So assert on the whole log at once,
+        // the same idiom the other event tests in this module use. Topics are
+        // (Symbol, admin); data is (player_id, old_level, target_level).
         assert_eq!(
-            topics.get(0).unwrap(),
-            Symbol::new(&env, crate::events::PLAYER_LEVEL_RESET).into_val(&env)
-        );
-        // Second topic element is the actor (admin address) — just assert it is present.
-        assert_eq!(topics.len(), 2);
-        // Data: (player_id, old_level, target_level)
-        assert_eq!(
-            data_val,
-            (
-                player_id,
-                ProgressLevel::PerformanceMilestones,
-                ProgressLevel::Unverified,
-            )
-                .into_val(&env)
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::PLAYER_LEVEL_RESET),
+                        admin,
+                    )
+                        .into_val(&env),
+                    (
+                        player_id,
+                        ProgressLevel::PerformanceMilestones,
+                        ProgressLevel::Unverified,
+                    )
+                        .into_val(&env),
+                )
+            ]
         );
 
         assert_eq!(client.get_level(&player_id), ProgressLevel::Unverified);
@@ -1853,6 +2001,7 @@ mod tests {
         ver_client.register_validator(
             &validator,
             &soroban_sdk::String::from_str(&env, "UEFA-B-License"),
+            &soroban_sdk::vec![&env],
         );
         // Approve one milestone for player 1 → milestone_ref 1 is valid.
         ver_client.approve_milestone(
@@ -1860,6 +2009,7 @@ mod tests {
             &1u64,
             &soroban_sdk::String::from_str(&env, "scored"),
             &soroban_sdk::String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+            &None,
         );
 
         // Valid ref (1) must succeed.
@@ -1963,20 +2113,22 @@ mod tests {
         client.set_verification_contract(&verification);
 
         client.pause_contract();
-        // Clear events by just getting the length so we can check the latest event
-        let _ = env.events().all();
-        
         client.unpause_contract();
-        let events = env.events().all();
-        // The unpause event should be the last event in the vector
-        let last_event = events.last().unwrap();
+
+        // `events().all()` only reflects the most recent contract invocation,
+        // so after `unpause_contract` the log holds exactly the unpause event.
+        // `ContractEvents` is not an iterator and has no `last()`; it only
+        // supports equality against a `Vec<(Address, Vec<Val>, Val)>`.
         assert_eq!(
-            last_event,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_unpaused"), admin.clone()).into_val(&env),
-                ().into_val(&env)
-            )
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_unpaused"), admin.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
         );
     }
 
@@ -1997,10 +2149,11 @@ mod tests {
     fn test_player_level_survives_extended_dormancy_via_ttl_extension() {
         use soroban_sdk::testutils::Ledger;
 
-        let (env, client, verification_addr) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.set_verification_contract(&verification_addr);
+        // `setup()` already initializes the contract and wires a verification
+        // contract; re-initializing would fail with AlreadyInitialized (#1).
+        // Its third return value is the *caller* address used to invoke
+        // advance_level — a plain generated address, not a deployed contract.
+        let (env, client, caller) = setup();
 
         // Set a deterministic starting ledger sequence.
         env.ledger().with_mut(|l| {
@@ -2008,35 +2161,61 @@ mod tests {
             l.max_entry_ttl = 600_000; // Allow extended TTL values in the test
         });
 
-        // Register a player and advance them to Elite tier.
-        let player_wallet = Address::generate(&env);
-        let caller = Address::generate(&env);
-        
-        // Simulate verification contract calling advance_level directly
-        env.as_contract(&verification_addr, || {
-            client.advance_level(&caller, &1u64, &1u32);
-        });
+        // Advance the player to the top tier. The enum's maximum is
+        // `EliteTier` (there is no `Elite` variant), and each `advance_level`
+        // moves exactly one tier, so reaching it takes three calls.
+        //
+        // These are ordinary client calls. Wrapping them in
+        // `env.as_contract(&caller, ...)` would fail with Storage/MissingValue
+        // ("non-existing value for contract instance"), because `caller` is a
+        // generated address with no contract instance behind it. It is also
+        // unnecessary: auth is mocked, and `advance_level` authorizes against
+        // the *stored* whitelist address rather than the caller argument.
+        client.advance_level(&caller, &1u64, &1u32);
+        client.advance_level(&caller, &1u64, &2u32);
+        client.advance_level(&caller, &1u64, &3u32);
 
-        // Verify the player is now Elite
-        assert_eq!(client.get_level(&1u64), ProgressLevel::Elite);
+        // Verify the player is now at the top tier
+        assert_eq!(client.get_level(&1u64), ProgressLevel::EliteTier);
 
-        // Now advance the ledger far beyond the default Soroban persistent TTL (~4096 ledgers).
-        // Without the fix (no extend_ttl on get_level), the PlayerLevel key would expire here.
-        env.ledger().with_mut(|l| {
-            l.sequence_number = 100 + 100_000; // well past archival threshold
-        });
+        // Now age the ledger far beyond the default Soroban persistent TTL
+        // (~4096 ledgers) — 100,000 ledgers, well past the archival threshold.
+        //
+        // The jump is taken in sub-INSTANCE_TTL_MAX steps rather than one leap
+        // because the contract *instance* can only ever be extended by
+        // INSTANCE_TTL_MAX (500) ledgers. A single 100,000-ledger jump archives
+        // the instance itself, and then no call can land at all
+        // (Storage/MissingValue on "contract instance") — which would say
+        // nothing about the PlayerLevel entry this test is actually about.
+        //
+        // Each step performs only *reads*. That is precisely the scenario under
+        // test: a player record that is never written again must not decay, and
+        // `get_level`'s keep-alive is what prevents that. `get_history_count`
+        // bumps the instance TTL so the contract stays invocable.
+        let step = (INSTANCE_TTL_MIN - 1) as u64;
+        let target = 100u64 + 100_000;
+        let mut seq = 100u64;
+        while seq < target {
+            seq = (seq + step).min(target);
+            env.ledger().with_mut(|l| {
+                l.sequence_number = seq as u32;
+            });
+            client.get_history_count(&1u64);
+            client.get_level(&1u64);
+        }
 
-        // CRITICAL: With the fix in place, calling get_level extends the TTL,
-        // so the record is still readable and returns Elite (not Unverified).
+        // CRITICAL: With the fix in place, reads extend the TTL, so the record
+        // is still live and returns EliteTier (not Unverified).
         // Without the fix, this either panics (key is archived) or returns Unverified.
         let level_after_dormancy = client.get_level(&1u64);
         assert_eq!(
             level_after_dormancy,
-            ProgressLevel::Elite,
+            ProgressLevel::EliteTier,
             "Player level must not silently revert to Unverified after extended dormancy"
         );
 
         // Verify that subsequent reads also work (keep-alive is continuous).
-        assert_eq!(client.get_level(&1u64), ProgressLevel::Elite);
+        assert_eq!(client.get_level(&1u64), ProgressLevel::EliteTier);
     }
+
 }

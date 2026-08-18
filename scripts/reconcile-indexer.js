@@ -413,10 +413,20 @@ async function reconcileSubscriptions(pg, cfg, report) {
   const { rows } = await pg.query("SELECT * FROM scout_subscriptions");
   const byScout = new Map(rows.map((r) => [r.scout, r]));
 
+  // Current wall-clock time in Unix seconds, used to detect subscriptions
+  // that have expired on-chain but whose DB row still appears active.
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  // Collect the set of scouts that are known to the contract (across all
+  // tiers) so we can also catch DB rows that have no on-chain counterpart.
+  const chainScouts = new Set();
+
   for (const tier of ["Basic", "Pro", "Elite"]) {
     const result = invoke(cfg.network, cfg.source, cfg.scoutAccessId, "get_subscribers_by_tier", ["--tier", tier]);
     if (!result.ok) continue;
+
     for (const scout of result.value) {
+      chainScouts.add(scout);
       const dbRow = byScout.get(scout);
       const chainSub = invoke(cfg.network, cfg.source, cfg.scoutAccessId, "get_subscription", ["--scout", scout]);
       if (!chainSub.ok) continue;
@@ -426,9 +436,55 @@ async function reconcileSubscriptions(pg, cfg, report) {
         report.add("scout_subscriptions", scout, "existence", "present", "missing");
         continue;
       }
+
+      // --- Core field checks ---
       report.check("scout_subscriptions", scout, "tier", s.tier, dbRow.tier);
       report.check("scout_subscriptions", scout, "subscribed_at", asBigIntString(s.subscribed_at), asBigIntString(dbRow.subscribed_at));
       report.check("scout_subscriptions", scout, "expires_at", asBigIntString(s.expires_at), asBigIntString(dbRow.expires_at));
+
+      // --- Tier divergence: on-chain subscription has expired but the DB row
+      // still records the scout as active.  The contract treats an expired
+      // subscription the same as no subscription (error 7 SubscriptionExpired),
+      // so an off-chain query using the DB row would incorrectly grant the
+      // scout access they no longer have on-chain.
+      const chainExpiredOnChain = Number(s.expires_at) < nowSecs;
+      const dbExpiredOnChain = dbRow.expires_at !== null && Number(dbRow.expires_at) < nowSecs;
+      if (chainExpiredOnChain !== dbExpiredOnChain) {
+        report.add(
+          "scout_subscriptions",
+          scout,
+          "active_state",
+          chainExpiredOnChain ? "expired" : "active",
+          dbExpiredOnChain ? "expired" : "active",
+          `on-chain expires_at=${s.expires_at} db expires_at=${dbRow.expires_at} now=${nowSecs}`,
+        );
+      }
+
+      // --- Auto-renewal flag divergence: check whether the DB tracks the
+      // per-scout auto_renew opt-in consistently with on-chain state.
+      // The column may not exist yet in older deployments, so we only check
+      // it when the DB row has the column (non-undefined).
+      if (dbRow.auto_renew !== undefined) {
+        const autoRenewResult = invoke(
+          cfg.network, cfg.source, cfg.scoutAccessId, "get_auto_renew", ["--scout", scout],
+        );
+        if (autoRenewResult.ok) {
+          const chainAutoRenew = autoRenewResult.value === true;
+          const dbAutoRenew = dbRow.auto_renew === true;
+          report.check("scout_subscriptions", scout, "auto_renew", chainAutoRenew, dbAutoRenew);
+        }
+      }
+    }
+  }
+
+  // Detect DB rows that have no on-chain counterpart at any tier.  This can
+  // happen when the indexer wrote a subscription row but the on-chain record
+  // was never created (e.g., the subscribe transaction was rolled back) or was
+  // subsequently deleted by a contract upgrade.
+  for (const [scout, dbRow] of byScout) {
+    if (!chainScouts.has(scout)) {
+      report.add("scout_subscriptions", scout, "existence", "missing", "present",
+        "scout exists in DB but not found under any tier on-chain");
     }
   }
 }

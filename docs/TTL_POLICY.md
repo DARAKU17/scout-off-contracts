@@ -53,7 +53,8 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 |---------|-----|---|
 | `PlayerLevel(player_id)` | 518,400 | Core identity: player's current tier/reputation. Never auto-archive dormant players. Extended on every `get_level()` read. |
 | `HistoryEntry(player_id, index)` | 518,400 | Permanent audit trail: milestone approvals are immutable. Extended on `advance_level` write and `get_history_entry` read. |
-| `HistoryVec(player_id)` | 518,400 | Optimization for history bulk queries; same lifetime as individual entries. Extended on write and read. |
+| `HistoryPage(player_id, page_index)` | 518,400 | Bounded history storage: player history is sharded into fixed-size pages so a single persistent key never grows without limit. Extended on append and on page reads. |
+| `HistoryVec(player_id)` | 518,400 | Legacy compatibility key retained for migration / recovery tooling; new writes populate `HistoryPage` shards instead of growing this monolithic vec. |
 | `HistoryCounter(player_id)` | 518,400 | Milestone index counter; must outlive all history entries. Extended on write. |
 | `Admin` | 518,400 | Cross-contract consistency. Bumped by `require_admin()` helper. |
 | `PendingAdmin` | 518,400 | Must survive admin proposal/acceptance window (typically seconds to minutes). |
@@ -100,29 +101,56 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 
 | DataKey | TTL | Justification |
 |---------|-----|---|
-| `Subscription(scout)` | 518,400 | Scout's subscription tier and expiry. Extended on `subscribe`, `upgrade`, `pay_to_contact`, and `log_trial_offer`. |
-| `ContactRecord(player_id, scout)` | 518,400 | Contact history: immutable record of scout outreach. Extended on `pay_to_contact` write. |
+| `Admin` | 518,400 | Cross-contract consistency. Extended by `require_admin()` helper (30 days) on admin calls, `initialize`, `propose_admin`, and `accept_admin`. |
+| `PendingAdmin` | 518,400 | Proposed admin transfer key. Extended on `propose_admin` (30 days) to prevent archival during handoff window. Removed on `accept_admin`. |
+| `Initialized` | 500 (Instance) | Contract initialization flag. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max) on mutating operations. |
+| `Paused` | 500 (Instance) | Contract pause circuit breaker flag. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
+| `FeeConfig` | 500 (Instance) | Platform fee configuration. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
+| `PendingFeeConfig` | 518,400 | Proposed fee config awaiting timelock activation. Extended on `propose_fee_config` (30 days). Removed on execution. |
+| `AccumulatedFees` | 500 (Instance) | Protocol fee accumulation balance. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
+| `XlmToken` | 500 (Instance) | Native XLM token contract address. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
+| `Subscription(scout)` | 518,400 | Scout's subscription tier and expiry. Extended on `subscribe`, `renew`, `upgrade` writes and `get_subscription` reads. |
+| `ContactRecord(player_id, scout)` | 518,400 | Contact history: immutable record of scout outreach. Extended on `pay_to_contact` write and `get_contact_record` read. |
+| `ScoutContacts(scout)` | 518,400 | Index of all player IDs contacted by a scout. Extended on `pay_to_contact`/`log_trial_offer` write and `get_scout_contacts` read. |
+| `ContactCount(scout, month_bucket)` | Default (~4,096) | Legacy monthly contact tracking bucket. Written in `increment_contact_count_by` without `extend_ttl` (no TTL bump in code; flagged for separate fix). |
+| `TrialCounter(player_id)` | 518,400 | Per-player trial offer index counter. Extended on `log_trial_offer` write and `get_trial_offer_count` read. |
 | `TrialOffer(player_id, index)` | 518,400 | Trial offer record. Extended on `log_trial_offer` write and `get_trial_offer` read. |
-| `TrialOfferLastSent(scout, player_id)` | 518,400 | Rate-limit cooldown. Extended on `log_trial_offer` write. |
-| `ProContactCount(scout)` | 518,400 | Pro-tier contact quota tracking. Extended on contact operations. |
-| `Admin` | 518,400 | Cross-contract consistency. |
+| `ProgressContract` | 518,400 | Address of Progress contract for cross-contract level updates. Extended on `set_progress_contract` write and `get_progress_contract` read. |
+| `RegistrationContract` | 518,400 | Address of Registration contract for cross-contract scout checks. Extended on `set_registration_contract` write and `get_registration_contract` read. |
+| `TrialOfferLastSent(scout, player_id)` | 518,400 | Rate-limit cooldown timestamp. Extended on `log_trial_offer` write. |
+| `TierSubscribers(tier)` | 518,400 | Subscriber list index per tier. Extended in `add_to_tier_index` and `remove_from_tier_index` write operations. |
+| `ProContactCount(scout)` | 518,400 | Pro-tier contact quota tracking. Extended on contact operations (`pay_to_contact`/`log_trial_offer`) and `get_pro_contact_count` read. |
+| `PlayerContacts(player_id)` | 518,400 | Inbound scout contact index for a player. Extended on `pay_to_contact`/`log_trial_offer` writes and `get_player_contacts` read. |
+| `ScoutTrialOffers(scout)` | 518,400 | Index of trial offers logged by a scout. Extended on `log_trial_offer` write and `get_scout_trial_offers` read. |
+| `TrialEscrow(player_id, index)` | Default (~4,096) | Escrow hold record. Written in `log_trial_offer` without `extend_ttl` (no TTL bump in code; flagged for separate fix). |
+| `OutstandingTrialEscrows` | 518,400 | Sweep index of unconfirmed trial escrows. Extended on `log_trial_offer`, `expire_trial_offers`, and `get_outstanding_trial_escrows` read. |
+| `FeeConfigHistory` | 500 (Instance) | Bounded history of active fee configurations. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
+| `ConfirmationNonce(nonce)` | 518,400 | Idempotency marker for `confirm_trial_offer` retries. Extended on `confirm_trial_offer` write. |
+| `AutoRenew(scout)` | 518,400 | Scout auto-renewal opt-in flag. Extended on `set_auto_renew` write and `get_auto_renew` read. |
+| `ExpiryBucket(day)` | 518,400 | Day-granularity subscription expiry index for pagination. Extended in `add_to_expiry_bucket` write. |
 
 **Keep-Alive Mechanism:**
-- Scout subscription and contact operations automatically extend all related TTLs.
-- Trial offer reads extend the offer TTL, preventing silent loss of opportunity history.
+- Instance keys (`Initialized`, `Paused`, `FeeConfig`, `AccumulatedFees`, `XlmToken`, `FeeConfigHistory`) are bumped on every state-modifying contract entry point via `bump_instance_ttl`.
+- Scout subscription, auto-renew, contact, and trial offer operations automatically extend related persistent TTLs.
+- `TrialOffer` and index reads extend their respective TTLs, preventing silent loss of opportunity and index state.
+- `TrialEscrow` and `ContactCount` currently lack code-level TTL extensions and receive Soroban default persistent TTL (~4,096 ledgers). These missing TTL call sites are flagged for resolution in a separate bug issue.
 
 ## Recovery Paths (Archived-but-Not-Evicted Data)
 
 Soroban's archival model allows a grace period where a key is archived (not available to `get()` / `has()`) but not yet evicted (still recoverable via `restore()`).
 
-**Current Implementation:**
-- No explicit `restore_*` functions are implemented in any contract.
-- Archived data is allowed to silently age toward eviction without recovery attempts.
+**Current Implementation (issue #1066):**
+- Each contract exposes explicit, admin-gated `restore_*_record()` entrypoints that load the entry (auto-restoring it if archived), re-extend its TTL back to the full core-identity policy value (`PERSISTENT_TTL_MAX`, 518,400 ledgers), and emit a `*_record_restored` event:
+  - `registration::restore_player_record(player_id)`, `registration::restore_scout_record(scout_id)`
+  - `verification::restore_validator_record(wallet)`, `verification::restore_milestone_record(player_id, index)`
+  - `progress::restore_player_level_record(player_id)`
+  - `scout_access::restore_subscription_record(scout)`
+- If the targeted key is fully evicted (absent), the call fails with a dedicated error (`*RecordEvicted`) rather than silently succeeding, so operators can distinguish "recovered" from "gone".
+- Note: `verification::restore_validator` is a distinct reactivation path (flips `active`/`banned`); `restore_validator_record` only re-extends TTL and leaves status flags untouched.
 
 **Future Enhancement (not in this issue):**
-- Implement `restore_player_record()`, `restore_validator_record()` functions to recover archived-but-recoverable data.
 - Add off-chain monitoring to alert on imminent archival (e.g., when a key's TTL drops below 7 days).
-- See issue #XXX for detailed restoration architecture.
+- See issue #1066 for the implemented restoration architecture.
 
 ## Testing
 

@@ -5,14 +5,17 @@ mod types;
 pub use errors::ScoutAccessError;
 use types::{
     ContactRecord, DataKey, FeeConfigHistoryEntry, FeeConfigProposal, ProContactPeriod,
-    Subscription, TrialEscrow, TrialOffer,
+    ScoutAccessWiringState, Subscription, TrialEscrow, TrialOffer,
 };
 
 pub use types::{EvidenceAccessGrant, FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
-use scoutchain_shared_types::{require_admin, validate_cid, safe_math::{safe_add_u32, safe_add_u64, safe_add_i128, safe_mul_i128}, ContractHealth};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, validate_cid, write_wiring_link,
+    safe_math::{safe_add_u32, safe_add_u64, safe_add_i128, safe_mul_i128}, ContractHealth,
+};
 
 // Generated client for cross-contract calls to the progress contract.
 // The #[contractclient] macro generates a real Client that performs the
@@ -228,6 +231,11 @@ impl ScoutAccessContract {
             .set(&DataKey::FeeConfig, &fee_config);
 
         events::fee_config_updated(&env, &admin, &old_config, &fee_config);
+        // `update_fee_config` is the atomic, immediate, no-delay path — flag it
+        // as such so indexers/auditors can distinguish it from a delay-respecting
+        // `activate_fee_config` call, both of which otherwise emit an identical
+        // `fee_config_updated` event. See docs/FEE_CONFIG_PROPOSAL_DESIGN.md.
+        events::fee_config_delay_bypassed(&env, &admin, &old_config, &fee_config);
         Ok(())
     }
 
@@ -378,10 +386,14 @@ impl ScoutAccessContract {
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &addr);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &addr,
+        );
         events::progress_contract_updated(&env, &admin, &addr);
+        events::wiring_updated(&env, &admin, "progress_contract", &addr, epoch);
         Ok(())
     }
 
@@ -397,11 +409,37 @@ impl ScoutAccessContract {
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &addr,
+        );
         events::registration_contract_updated(&env, &admin, &addr);
+        events::wiring_updated(&env, &admin, "registration_contract", &addr, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of both cross-contract peer address pointers held
+    /// by this contract (progress, registration), each with its address and
+    /// re-wiring epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> ScoutAccessWiringState {
+        let progress_contract =
+            read_wiring_link(&env, &DataKey::ProgressContract, &DataKey::ProgressContractEpoch);
+        let registration_contract = read_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+        );
+        ScoutAccessWiringState {
+            progress_contract,
+            registration_contract,
+        }
     }
 
     /// Emergency refund: admin returns `amount` XLM (stroops) from the
@@ -1554,6 +1592,33 @@ impl ScoutAccessContract {
         Ok(sub)
     }
 
+    /// Recover an archived (or expired-but-not-evicted) subscription entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction.
+    ///
+    /// Admin-only. Returns `SubscriptionRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_subscription_record(env: Env, scout: Address) -> Result<(), ScoutAccessError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::SubscriptionRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::subscription_record_restored(&env, &admin, &scout);
+        Ok(())
+    }
+
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::bump_instance_ttl(&env);
         Self::fee_config(&env)
@@ -2358,8 +2423,6 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
-            trial_offer_escrow_stroops: 500_000,
-            trial_offer_expiry_secs: 3_600,
             pro_contact_limit: 20,
             trial_offer_escrow_stroops: 1_000_000,
             trial_offer_expiry_secs: 7_200,
@@ -2368,7 +2431,11 @@ mod tests {
         client.update_fee_config(&new_fees);
 
         // Assert that the fee_config_updated event was emitted with old and new
-        // config. Checked immediately — `events().all()` only reflects the most
+        // config, immediately followed by fee_config_delay_bypassed (#1055):
+        // update_fee_config is the atomic, no-delay path, so it must flag
+        // itself as such in the event stream, distinguishing it from an
+        // activate_fee_config call (which emits fee_config_updated alone).
+        // Checked immediately — `events().all()` only reflects the most
         // recent invocation, and the reads below are themselves separate invocations.
         let events = env.events().all().filter_by_contract(&contract_id);
         assert_eq!(
@@ -2378,6 +2445,11 @@ mod tests {
                 (
                     contract_id.clone(),
                     (Symbol::new(&env, "fee_config_updated"), _admin.clone(),).into_val(&env),
+                    (old_config.clone(), new_fees.clone()).into_val(&env)
+                ),
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "fee_config_delay_bypassed"), _admin.clone(),).into_val(&env),
                     (old_config, new_fees.clone()).into_val(&env)
                 )
             ]
@@ -3827,6 +3899,9 @@ mod tests {
 
         client.set_progress_contract(&progress_addr);
 
+        // set_progress_contract now emits both the legacy
+        // progress_contract_updated event and the new wiring_updated event
+        // (issue #1041) on every successful call.
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
             soroban_sdk::vec![
@@ -3839,6 +3914,16 @@ mod tests {
                     )
                         .into_val(&env),
                     progress_addr.clone().into_val(&env),
+                ),
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        _admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (progress_addr.clone(), 1u32).into_val(&env),
                 )
             ]
         );
@@ -3861,6 +3946,83 @@ mod tests {
                 Some(second)
             );
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (_, _admin, _xlm, _contract_id, client) = setup();
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert_eq!(state.registration_contract.address, None);
+        assert_eq!(state.registration_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_both_links_and_bumps_epoch() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        let progress_addr = Address::generate(&env);
+        let reg_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        client.set_registration_contract(&reg_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert_eq!(state.registration_contract.address, Some(reg_addr));
+        assert_eq!(state.registration_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+
+        // Freely re-settable — no first-call-only guard on either link — and
+        // a second call must bump the epoch again, not reset it.
+        let new_progress_addr = Address::generate(&env);
+        client.set_progress_contract(&new_progress_addr);
+        assert_eq!(
+            client.get_wiring_state().progress_contract.epoch,
+            2,
+            "re-wiring the same link must bump its epoch again"
+        );
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let (env, _admin, _xlm, contract_id, client) = setup();
+        let reg_addr = Address::generate(&env);
+
+        client.set_registration_contract(&reg_addr);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::REGISTRATION_CONTRACT_UPDATED),
+                        _admin.clone(),
+                    )
+                        .into_val(&env),
+                    reg_addr.clone().into_val(&env),
+                ),
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        _admin.clone(),
+                        Symbol::new(&env, "registration_contract"),
+                    )
+                        .into_val(&env),
+                    (reg_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------
