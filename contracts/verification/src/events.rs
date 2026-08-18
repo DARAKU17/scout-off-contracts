@@ -17,6 +17,7 @@ pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
 pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
 pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
 pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -145,6 +146,24 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
     env.events().publish(
         (Symbol::new(env, "progress_contract_updated"), admin.clone()),
         progress_contract.clone(),
+    );
+}
+
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_progress_contract` / `update_progress_contract` /
+/// `set_registration_contract` / `update_registration_contract` call, in
+/// addition to (not replacing) `progress_contract_updated`. `link`
+/// identifies which peer pointer changed (`"progress_contract"` or
+/// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
     );
 }
 

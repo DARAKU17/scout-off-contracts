@@ -4,8 +4,10 @@ mod errors;
 mod events;
 mod types;
 
-use errors::ProgressError;
-use scoutchain_shared_types::{require_admin, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
+pub use errors::ProgressError;
+use scoutchain_shared_types::{
+    require_admin, safe_math::safe_add_u32, write_wiring_link, ContractHealth, ProgressLevel,
+};
 use types::{DataKey, HistoryProofStep, ProgressEntry, ProgressWiringState};
 
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
@@ -95,10 +97,14 @@ impl ProgressContract {
 
     /// Store the registration contract address so we can sync player levels (admin only).
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &addr, epoch);
         Ok(())
     }
 
@@ -122,10 +128,14 @@ impl ProgressContract {
     /// that the caller is the configured VerificationContract (admin only).
     pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::VerificationContract,
+            &DataKey::VerificationContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "verification_contract", &addr, epoch);
         Ok(())
     }
 
@@ -133,10 +143,14 @@ impl ProgressContract {
     /// advance_level (for trial-offer Level-3 advances). Admin only.
     pub fn set_scout_access_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoutAccessContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ScoutAccessContract,
+            &DataKey::ScoutAccessContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "scout_access_contract", &addr, epoch);
         Ok(())
     }
 
@@ -744,10 +758,28 @@ impl ProgressContract {
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::ScoutAccessContract);
+        let registration_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RegistrationContractEpoch)
+            .unwrap_or(0);
+        let verification_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::VerificationContractEpoch)
+            .unwrap_or(0);
+        let scout_access_epoch = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ScoutAccessContractEpoch)
+            .unwrap_or(0);
         ProgressWiringState {
             registration_contract,
             verification_contract,
             scout_access_contract,
+            registration_epoch,
+            verification_epoch,
+            scout_access_epoch,
         }
     }
 
@@ -1089,6 +1121,7 @@ mod tests {
                 ver_client.register_validator(
                     &milestone_validator,
                     &String::from_str(&env, "Test License"),
+                    &soroban_sdk::Vec::new(&env),
                 );
                 for _ in 0..5 {
                     cid_seed += 1;
@@ -1097,6 +1130,7 @@ mod tests {
                         &player_id,
                         &String::from_str(&env, "test milestone"),
                         &dummy_cid(&env, cid_seed),
+                        &None,
                     );
                 }
             }
@@ -1655,6 +1689,7 @@ mod tests {
         ver_client.register_validator(
             &milestone_validator,
             &String::from_str(&env, "Test License"),
+            &soroban_sdk::Vec::new(&env),
         );
         let player_id = 1u64;
         ver_client.approve_milestone(
@@ -1662,6 +1697,7 @@ mod tests {
             &player_id,
             &String::from_str(&env, "test milestone"),
             &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+            &None,
         );
         client.set_verification_contract(&ver_id);
 
@@ -1686,7 +1722,25 @@ mod tests {
 
     #[test]
     fn test_reset_player_level_success() {
-        let (env, client, validator) = setup();
+        // Self-contained (rather than using the shared setup() helper) so
+        // this test can assert the exact wiring_updated-free event shape
+        // below against a known `admin` address. advance_level's on-chain
+        // milestone_ref validation only applies to the secondary
+        // (scout_access) caller path — the primary VerificationContract
+        // caller (any address, once set_verification_contract is called and
+        // auth is mocked) is trusted without a real deployed verification
+        // contract, matching the pattern already used by e.g.
+        // test_advance_level_sequence via setup().
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let validator = Address::generate(&env);
         let player_id = 1u64;
 
         client.advance_level(&validator, &player_id, &1u32);
@@ -1695,32 +1749,28 @@ mod tests {
 
         client.reset_player_level(&player_id, &ProgressLevel::Unverified);
 
-        // The event is still emitted — checked immediately, since `events().all()`
-        // only reflects the most recent contract invocation and the read calls
-        // below are themselves separate invocations.
-        // We verify shape (event name + payload) without asserting the exact
-        // admin address, since the setup helper does not expose it.
-        let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let (_, topics_val, data_val) = events.get(0).unwrap();
-        // Unpack topics as a Vec<Val>; first element is the Symbol.
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
-            soroban_sdk::Vec::try_from_val(&env, &topics_val).unwrap();
+        // env.events().all() returns only the events published by the last
+        // top-level contract invocation (reset_player_level here), which
+        // emits exactly one player_level_reset event.
         assert_eq!(
-            topics.get(0).unwrap(),
-            Symbol::new(&env, crate::events::PLAYER_LEVEL_RESET).into_val(&env)
-        );
-        // Second topic element is the actor (admin address) — just assert it is present.
-        assert_eq!(topics.len(), 2);
-        // Data: (player_id, old_level, target_level)
-        assert_eq!(
-            data_val,
-            (
-                player_id,
-                ProgressLevel::PerformanceMilestones,
-                ProgressLevel::Unverified,
-            )
-                .into_val(&env)
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    soroban_sdk::vec![
+                        &env,
+                        Symbol::new(&env, crate::events::PLAYER_LEVEL_RESET).into_val(&env),
+                        admin.clone().into_val(&env),
+                    ],
+                    (
+                        player_id,
+                        ProgressLevel::PerformanceMilestones,
+                        ProgressLevel::Unverified,
+                    )
+                        .into_val(&env),
+                ),
+            ]
         );
 
         assert_eq!(client.get_level(&player_id), ProgressLevel::Unverified);
@@ -1853,6 +1903,7 @@ mod tests {
         ver_client.register_validator(
             &validator,
             &soroban_sdk::String::from_str(&env, "UEFA-B-License"),
+            &soroban_sdk::Vec::new(&env),
         );
         // Approve one milestone for player 1 → milestone_ref 1 is valid.
         ver_client.approve_milestone(
@@ -1860,6 +1911,7 @@ mod tests {
             &1u64,
             &soroban_sdk::String::from_str(&env, "scored"),
             &soroban_sdk::String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+            &None,
         );
 
         // Valid ref (1) must succeed.
@@ -1963,20 +2015,25 @@ mod tests {
         client.set_verification_contract(&verification);
 
         client.pause_contract();
-        // Clear events by just getting the length so we can check the latest event
-        let _ = env.events().all();
-        
         client.unpause_contract();
-        let events = env.events().all();
-        // The unpause event should be the last event in the vector
-        let last_event = events.last().unwrap();
+
+        // env.events().all() returns only the events published by the last
+        // top-level contract invocation (client.unpause_contract() here) —
+        // not full history — so only contract_unpaused is expected.
         assert_eq!(
-            last_event,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_unpaused"), admin.clone()).into_val(&env),
-                ().into_val(&env)
-            )
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    soroban_sdk::vec![
+                        &env,
+                        Symbol::new(&env, "contract_unpaused").into_val(&env),
+                        admin.clone().into_val(&env),
+                    ],
+                    ().into_val(&env),
+                ),
+            ]
         );
     }
 
@@ -2018,7 +2075,7 @@ mod tests {
         });
 
         // Verify the player is now Elite
-        assert_eq!(client.get_level(&1u64), ProgressLevel::Elite);
+        assert_eq!(client.get_level(&1u64), ProgressLevel::EliteTier);
 
         // Now advance the ledger far beyond the default Soroban persistent TTL (~4096 ledgers).
         // Without the fix (no extend_ttl on get_level), the PlayerLevel key would expire here.
@@ -2032,11 +2089,109 @@ mod tests {
         let level_after_dormancy = client.get_level(&1u64);
         assert_eq!(
             level_after_dormancy,
-            ProgressLevel::Elite,
+            ProgressLevel::EliteTier,
             "Player level must not silently revert to Unverified after extended dormancy"
         );
 
         // Verify that subsequent reads also work (keep-alive is continuous).
-        assert_eq!(client.get_level(&1u64), ProgressLevel::Elite);
+        assert_eq!(client.get_level(&1u64), ProgressLevel::EliteTier);
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // Deliberately skip all three set_*_contract calls.
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.registration_contract, None);
+        assert_eq!(state.verification_contract, None);
+        assert_eq!(state.scout_access_contract, None);
+        assert_eq!(state.registration_epoch, 0);
+        assert_eq!(state.verification_epoch, 0);
+        assert_eq!(state.scout_access_epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_configured_links_and_bumps_epoch() {
+        let (env, client, _validator) = setup();
+        // setup() already calls set_verification_contract once.
+        let after_setup = client.get_wiring_state();
+        assert!(after_setup.verification_contract.is_some());
+        assert_eq!(after_setup.verification_epoch, 1);
+        assert_eq!(after_setup.registration_contract, None);
+        assert_eq!(after_setup.registration_epoch, 0);
+        assert!(!after_setup.is_fully_wired());
+
+        let reg_addr = Address::generate(&env);
+        let sa_addr = Address::generate(&env);
+        client.set_registration_contract(&reg_addr);
+        client.set_scout_access_contract(&sa_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.registration_contract, Some(reg_addr));
+        assert_eq!(state.scout_access_contract, Some(sa_addr));
+        assert_eq!(state.registration_epoch, 1);
+        assert_eq!(state.scout_access_epoch, 1);
+        assert!(state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_set_verification_contract_is_freely_re_settable_and_bumps_epoch_again() {
+        let (env, client, _validator) = setup();
+        assert_eq!(client.get_wiring_state().verification_epoch, 1);
+
+        // No re-wiring guard on progress's setters (unlike verification's
+        // legacy set_progress_contract) — a second call must succeed and
+        // bump the epoch again, not error.
+        let new_verification = Address::generate(&env);
+        client.set_verification_contract(&new_verification);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.verification_contract, Some(new_verification));
+        assert_eq!(
+            state.verification_epoch, 2,
+            "re-wiring the same link must bump its epoch again, not reset it"
+        );
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let reg_addr = Address::generate(&env);
+        client.set_registration_contract(&reg_addr);
+
+        let contract_id = client.address.clone();
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    soroban_sdk::vec![
+                        &env,
+                        Symbol::new(&env, crate::events::WIRING_UPDATED).into_val(&env),
+                        admin.into_val(&env),
+                        Symbol::new(&env, "registration_contract").into_val(&env),
+                    ],
+                    (reg_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
     }
 }

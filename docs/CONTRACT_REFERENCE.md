@@ -248,6 +248,8 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 Store the progress contract address so `set_player_level` may only be called
 by that contract. Must be called after both contracts are deployed (admin only).
+Freely re-settable — no guard. Bumps the link's re-wiring epoch and emits
+`wiring_updated` (`link = "progress_contract"`) on every call (issue #1041).
 
 | | |
 |---|---|
@@ -257,6 +259,26 @@ by that contract. Must be called after both contracts are deployed (admin only).
 ```bash
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- set_progress_contract --addr $PROGRESS_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> RegistrationWiringState`
+
+Returns a snapshot of the single peer-address pointer this contract holds
+(`progress_contract`), paired with its re-wiring epoch (`0` iff unset).
+`RegistrationWiringState::is_fully_wired()` returns `true` iff the address is
+set. Read-only, no auth required — see
+[`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -684,7 +706,12 @@ change the admin; the proposed address must still call `accept_admin`.
 Wire the progress contract address so `approve_milestone` can call
 `advance_level` cross-contract. Must be called once after deployment.
 Returns `AlreadyConfigured` on subsequent calls — use
-`update_progress_contract` for intentional re-wiring.
+`update_progress_contract` for intentional re-wiring. This first-call-only
+guard is deliberately preserved (issue #1041) for backward compatibility with
+already-deployed contracts, unlike every other `set_*_contract` setter across
+all four contracts, which is freely re-settable. Bumps the link's re-wiring
+epoch and emits `wiring_updated` (`link = "progress_contract"`) in addition
+to `progress_contract_updated`.
 
 | | |
 |---|---|
@@ -701,7 +728,8 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 #### `update_progress_contract(progress_contract: Address) -> Result<(), VerificationError>`
 
 Re-wire the progress contract address after the initial `set_progress_contract`
-call. Use when redeploying or rotating the progress contract.
+call. Use when redeploying or rotating the progress contract. Also bumps the
+link's re-wiring epoch and emits `wiring_updated`, same as `set_progress_contract`.
 
 | | |
 |---|---|
@@ -720,7 +748,10 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 Store the registration contract address so `dispute_milestone` can verify
 wallet-to-player-id ownership via cross-contract call. Must be called once
 after deployment. Returns `AlreadyConfigured` on subsequent calls — use
-`update_registration_contract` for intentional re-wiring.
+`update_registration_contract` for intentional re-wiring. Same
+deliberately-preserved first-call-only guard as `set_progress_contract`
+above (issue #1041). Bumps the link's re-wiring epoch and emits
+`wiring_updated` (`link = "registration_contract"`).
 
 | | |
 |---|---|
@@ -738,7 +769,8 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 Re-wire the registration contract address after the initial
 `set_registration_contract` call. Use when redeploying or rotating the
-registration contract.
+registration contract. Also bumps the link's re-wiring epoch and emits
+`wiring_updated`, same as `set_registration_contract`.
 
 | | |
 |---|---|
@@ -748,6 +780,27 @@ registration contract.
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- update_registration_contract --addr $NEW_REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> VerificationWiringState`
+
+Returns a snapshot of both peer-address pointers this contract holds
+(`progress_contract`, `registration_contract`), each as a
+`WiringLink { address: Option<Address>, epoch: u32 }`
+(`scoutchain_shared_types::WiringLink`). `VerificationWiringState::is_fully_wired()`
+returns `true` iff both links are configured. Read-only, no auth required —
+see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -2173,7 +2226,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID -- health
 
 #### `set_verification_contract(addr: Address) -> Result<(), ProgressError>`
 
-Store the verification contract address so `advance_level` can authenticate cross-contract callers. Without this, only direct `caller` auth is accepted (useful for testing). Admin only.
+Store the verification contract address so `advance_level` can authenticate cross-contract callers. Without this, only direct `caller` auth is accepted (useful for testing). Admin only. Freely re-settable — no guard. Bumps `VerificationContract`'s re-wiring epoch and emits `wiring_updated` (`link = "verification_contract"`) on every call (issue #1041).
 
 | | |
 |---|---|
@@ -2189,7 +2242,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `set_registration_contract(addr: Address) -> Result<(), ProgressError>`
 
-Store the registration contract address so `advance_level` can sync player levels via cross-contract call. Admin only.
+Store the registration contract address so `advance_level` can sync player levels via cross-contract call. Admin only. Freely re-settable — no guard. Bumps `RegistrationContract`'s re-wiring epoch and emits `wiring_updated` (`link = "registration_contract"`) on every call.
 
 | | |
 |---|---|
@@ -2205,7 +2258,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `set_scout_access_contract(addr: Address) -> Result<(), ProgressError>`
 
-Whitelist the scout_access contract as a secondary authorized caller of `advance_level` (for trial-offer Level-3 advances). Admin only.
+Whitelist the scout_access contract as a secondary authorized caller of `advance_level` (for trial-offer Level-3 advances). Admin only. Freely re-settable — no guard. Bumps `ScoutAccessContract`'s re-wiring epoch and emits `wiring_updated` (`link = "scout_access_contract"`) on every call.
 
 | | |
 |---|---|
@@ -2215,6 +2268,22 @@ Whitelist the scout_access contract as a secondary authorized caller of `advance
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
   -- set_scout_access_contract --addr $SCOUT_ACCESS_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> ProgressWiringState`
+
+Returns a snapshot of all three peer-address pointers this contract holds (`registration_contract`, `verification_contract`, `scout_access_contract`), each paired with a re-wiring epoch (`registration_epoch`, `verification_epoch`, `scout_access_epoch` — `0` iff the corresponding address is `None`). `ProgressWiringState::is_fully_wired()` returns `true` iff all three addresses are set. Read-only, no auth required, exempt from the pause/init guards so it stays callable on a mis-wired or paused contract — see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -2559,7 +2628,9 @@ proposal and does not immediately change the admin.
 Register the progress contract address so `log_trial_offer` can call
 `advance_level` cross-contract (admin only). Unlike
 `verification.set_progress_contract`, this has no first-call-only guard —
-it can always be re-invoked to re-wire the link.
+it can always be re-invoked to re-wire the link. Bumps the link's re-wiring
+epoch and emits `wiring_updated` (`link = "progress_contract"`) in addition
+to `progress_contract_updated` (issue #1041).
 
 | | |
 |---|---|
@@ -2587,6 +2658,46 @@ re-wire the progress contract link across contracts.
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_progress_contract --addr $NEW_PROGRESS_CONTRACT_ID
+```
+
+---
+
+#### `set_registration_contract(addr: Address) -> Result<(), ScoutAccessError>`
+
+Wire the registration contract address for Pro-tier scout verification
+gating (admin only). No first-call-only guard — freely re-settable. Bumps
+the link's re-wiring epoch and emits `wiring_updated`
+(`link = "registration_contract"`) in addition to
+`registration_contract_updated` (issue #1041).
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_registration_contract --addr $REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> ScoutAccessWiringState`
+
+Returns a snapshot of both peer-address pointers this contract holds
+(`progress_contract`, `registration_contract`), each as a
+`WiringLink { address: Option<Address>, epoch: u32 }`. `is_fully_wired()`
+returns `true` iff both links are configured. Read-only, no auth required —
+see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -3995,6 +4106,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `player_level_synced` | event_name, progress_contract (Address) | player_id (u64) | Progress contract syncs a player's level |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Current admin proposes a replacement |
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` re-wired the `progress_contract` peer link (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### verification
 
@@ -4018,6 +4130,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `attestation_recorded` | event_name, validator (Address) | player_id (u64), evidence_hash (String), vote_count (u32), threshold (u32) | `attest_milestone` vote accepted (including the threshold-crossing one) |
 | `attestation_window_expired` | event_name, player_id (u64) | evidence_hash (String), new_round (u32) | A sub-threshold claim's voting window elapsed; the next vote starts a fresh round |
 | `validator_votes_invalidated` | event_name, admin (Address) | wallet (Address), invalidated_count (u32) | `revoke_validator` retroactively stripped this validator's pending votes |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` / `update_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### progress
 
@@ -4029,6 +4142,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_registration_contract` / `set_verification_contract` / `set_scout_access_contract` re-wired a peer link — `link` is `"registration_contract"`, `"verification_contract"`, or `"scout_access_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### scout_access
 
@@ -4050,6 +4164,13 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
+
+---
+
+## Cross-Contract Wiring
+
+See [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md) for the full design: every contract's `get_wiring_state()` getter, the `WiringLink { address, epoch }` shape shared via `scoutchain_shared_types`, the re-wiring policy (freely re-settable everywhere except verification's two legacy first-call-only setters, preserved for backward compatibility), and how `scripts/verify-cross-contract-wiring.sh` detects a partially-applied re-wiring across the eight peer-address pointers.
 
 ---
 

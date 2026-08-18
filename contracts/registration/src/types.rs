@@ -2,7 +2,7 @@ use soroban_sdk::{contracttype, Address, String, Vec};
 
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
-pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+pub use scoutchain_shared_types::{ContractHealth, ProgressLevel, WiringLink};
 
 /// Role identifier for migration authorizations.
 #[contracttype]
@@ -219,4 +219,28 @@ pub enum DataKey {
     /// Cooldown in seconds between repeated registration attempts from the
     /// same wallet. 0 means no cooldown. Configurable by admin.
     RegCooldownSecs(u64),
+    /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
+    /// `set_progress_contract` call. See
+    /// `scoutchain_shared_types::WiringLink` and
+    /// `docs/WIRING_REGISTRY_DESIGN.md` (issue #1041).
+    ProgressContractEpoch,
+}
+
+/// Snapshot of the single cross-contract peer address pointer held by the
+/// registration contract, with its address and re-wiring epoch. Returned by
+/// `RegistrationContract::get_wiring_state`. See
+/// `docs/WIRING_REGISTRY_DESIGN.md` for the full cross-contract picture.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistrationWiringState {
+    /// Peer link to the progress contract, set via `set_progress_contract`.
+    /// Used by `filter_players` to resolve player levels at query time.
+    pub progress_contract: WiringLink,
+}
+
+impl RegistrationWiringState {
+    /// Returns `true` iff the peer link is configured.
+    pub fn is_fully_wired(&self) -> bool {
+        self.progress_contract.is_configured()
+    }
 }

@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile,
+    ProgressLevel, RegistrationWiringState, ScoutProfile, ScoutStatus, StoredPlayerProfile,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated
@@ -14,7 +14,9 @@ use types::{
 // scope for the rest of this module.
 pub use types::PlayerVitals;
 
-use scoutchain_shared_types::{require_admin, safe_math::{safe_add_u64}};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, write_wiring_link, safe_math::{safe_add_u64},
+};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use soroban_sdk::crypto::sha256;
 
@@ -290,13 +292,33 @@ impl RegistrationContract {
     }
 
     /// Store the progress contract address so filter_players can resolve
-    /// levels at query time (admin only).
+    /// levels at query time (admin only). Freely re-settable — no
+    /// first-call-only guard (see `docs/WIRING_REGISTRY_DESIGN.md` for why
+    /// this is the majority policy across all four contracts).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "progress_contract", &addr, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of the single cross-contract peer address pointer
+    /// held by this contract (progress), with its address and re-wiring
+    /// epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> RegistrationWiringState {
+        let progress_contract =
+            read_wiring_link(&env, &DataKey::ProgressContract, &DataKey::ProgressContractEpoch);
+        RegistrationWiringState { progress_contract }
     }
 
     /// Update a player's progress level. Only callable by the registered progress contract.
@@ -3189,6 +3211,75 @@ mod tests {
 
         let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
         assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_link_and_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+
+        // Freely re-settable — no first-call-only guard — and a second call
+        // must bump the epoch again, not reset it.
+        let new_progress_addr = Address::generate(&env);
+        client.set_progress_contract(&new_progress_addr);
+        let state2 = client.get_wiring_state();
+        assert_eq!(state2.progress_contract.address, Some(new_progress_addr));
+        assert_eq!(
+            state2.progress_contract.epoch, 2,
+            "re-wiring the same link must bump its epoch again"
+        );
+    }
+
+    #[test]
+    fn test_set_progress_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (progress_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------

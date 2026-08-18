@@ -58,6 +58,15 @@ pub struct ProgressWiringState {
     /// `set_scout_access_contract`. Whitelisted as the secondary authorised
     /// caller of `advance_level` for trial-offer Level-3 advances.
     pub scout_access_contract: Option<Address>,
+    /// Re-wiring epoch for `registration_contract` — bumped on every
+    /// `set_registration_contract` call. `0` iff `registration_contract` is
+    /// `None`. Added additively (issue #1041); see
+    /// `scoutchain_shared_types::WiringLink` for what epoch is for.
+    pub registration_epoch: u32,
+    /// Re-wiring epoch for `verification_contract`.
+    pub verification_epoch: u32,
+    /// Re-wiring epoch for `scout_access_contract`.
+    pub scout_access_epoch: u32,
 }
 
 impl ProgressWiringState {
@@ -118,4 +127,15 @@ pub enum DataKey {
     /// verifiable via `verify_history_proof` without trusting the RPC node
     /// that served the query — see `get_progress_root`.
     HistoryRoot(u64),
+    /// Re-wiring epoch for [`DataKey::RegistrationContract`], bumped by
+    /// every `set_registration_contract` call. See
+    /// `scoutchain_shared_types::WiringLink` and
+    /// `docs/WIRING_REGISTRY_DESIGN.md` (issue #1041).
+    RegistrationContractEpoch,
+    /// Re-wiring epoch for [`DataKey::VerificationContract`], bumped by
+    /// every `set_verification_contract` call.
+    VerificationContractEpoch,
+    /// Re-wiring epoch for [`DataKey::ScoutAccessContract`], bumped by
+    /// every `set_scout_access_contract` call.
+    ScoutAccessContractEpoch,
 }
