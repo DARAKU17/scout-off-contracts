@@ -35,6 +35,12 @@ pub enum ProgressError {
     // ── Admin transfer ──
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 10,
+
+    // ── Archival recovery ──
+    /// `restore_player_level_record` targeted a player-level entry whose
+    /// archival grace period has fully elapsed (evicted, not merely archived)
+    /// and is unrecoverable.
+    PlayerLevelRecordEvicted = 11,
 }
 
 impl AdminError for ProgressError {

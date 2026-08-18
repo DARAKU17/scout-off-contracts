@@ -114,3 +114,23 @@ pub fn scout_reactivated(env: &Env, scout_id: u64, admin: &Address) {
         scout_id,
     );
 }
+
+/// topics: (event_name, admin)  data: player_id
+/// Emitted by `restore_player_record` when an admin re-extends an archived or
+/// expired player profile's TTL back to the core-identity policy value.
+pub fn player_record_restored(env: &Env, admin: &Address, player_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "player_record_restored"), admin.clone()),
+        player_id,
+    );
+}
+
+/// topics: (event_name, admin)  data: scout_id
+/// Emitted by `restore_scout_record` when an admin re-extends an archived or
+/// expired scout profile's TTL back to the core-identity policy value.
+pub fn scout_record_restored(env: &Env, admin: &Address, scout_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "scout_record_restored"), admin.clone()),
+        scout_id,
+    );
+}

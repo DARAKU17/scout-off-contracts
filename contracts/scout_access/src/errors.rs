@@ -91,6 +91,12 @@ pub enum ScoutAccessError {
     // ── Auto-renewal ──
     /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
     AutoRenewNotEnabled = 28,
+
+    // ── Archival recovery ──
+    /// `restore_subscription_record` targeted a subscription entry whose
+    /// archival grace period has fully elapsed (evicted, not merely archived)
+    /// and is unrecoverable. (Codes 13 and 18 are reserved by tests.)
+    SubscriptionRecordEvicted = 29,
 }
 
 impl AdminError for ScoutAccessError {

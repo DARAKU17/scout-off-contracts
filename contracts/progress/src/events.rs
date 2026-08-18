@@ -70,3 +70,13 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
         (),
     );
 }
+
+/// Emitted by `restore_player_level_record` when an admin re-extends an
+/// archived or expired player-level entry's TTL back to the policy value.
+/// topics: (event_name, admin)  data: player_id
+pub fn player_level_record_restored(env: &Env, admin: &Address, player_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "player_level_record_restored"), admin.clone()),
+        player_id,
+    );
+}

@@ -138,14 +138,18 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 
 Soroban's archival model allows a grace period where a key is archived (not available to `get()` / `has()`) but not yet evicted (still recoverable via `restore()`).
 
-**Current Implementation:**
-- No explicit `restore_*` functions are implemented in any contract.
-- Archived data is allowed to silently age toward eviction without recovery attempts.
+**Current Implementation (issue #1066):**
+- Each contract exposes explicit, admin-gated `restore_*_record()` entrypoints that load the entry (auto-restoring it if archived), re-extend its TTL back to the full core-identity policy value (`PERSISTENT_TTL_MAX`, 518,400 ledgers), and emit a `*_record_restored` event:
+  - `registration::restore_player_record(player_id)`, `registration::restore_scout_record(scout_id)`
+  - `verification::restore_validator_record(wallet)`, `verification::restore_milestone_record(player_id, index)`
+  - `progress::restore_player_level_record(player_id)`
+  - `scout_access::restore_subscription_record(scout)`
+- If the targeted key is fully evicted (absent), the call fails with a dedicated error (`*RecordEvicted`) rather than silently succeeding, so operators can distinguish "recovered" from "gone".
+- Note: `verification::restore_validator` is a distinct reactivation path (flips `active`/`banned`); `restore_validator_record` only re-extends TTL and leaves status flags untouched.
 
 **Future Enhancement (not in this issue):**
-- Implement `restore_player_record()`, `restore_validator_record()` functions to recover archived-but-recoverable data.
 - Add off-chain monitoring to alert on imminent archival (e.g., when a key's TTL drops below 7 days).
-- See issue #XXX for detailed restoration architecture.
+- See issue #1066 for the implemented restoration architecture.
 
 ## Testing
 

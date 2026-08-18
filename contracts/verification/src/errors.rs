@@ -99,6 +99,15 @@ pub enum VerificationError {
     /// there is no single-signature bypass, on-chain or off-chain-relayed,
     /// once threshold >= 2 is configured.
     ThresholdModeRequiresAttestation = 28,
+
+    // ── Archival recovery ──
+    /// `restore_validator_record` targeted a validator entry whose archival
+    /// grace period has fully elapsed (evicted, not merely marked inactive) and
+    /// is unrecoverable.
+    ValidatorRecordEvicted = 30,
+    /// `restore_milestone_record` targeted a milestone entry that has been
+    /// fully evicted and is unrecoverable.
+    MilestoneRecordEvicted = 31,
 }
 
 impl AdminError for VerificationError {

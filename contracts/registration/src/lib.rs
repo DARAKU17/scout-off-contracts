@@ -658,6 +658,55 @@ impl RegistrationContract {
         Self::load_player(&env, player_id)
     }
 
+    /// Recover an archived (or expired-but-not-evicted) player profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL out of the
+    /// minimal auto-restore window back to the full documented lifetime so it
+    /// cannot silently age into permanent eviction.
+    ///
+    /// Admin-only. Returns `PlayerRecordEvicted` if the entry has already been
+    /// fully evicted (key absent) and is no longer recoverable.
+    pub fn restore_player_record(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: PlayerProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Player(player_id))
+            .ok_or(ScoutChainError::PlayerRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Player(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::player_record_restored(&env, &admin, player_id);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) scout profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_player_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `ScoutRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_scout_record(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Scout(scout_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::scout_record_restored(&env, &admin, scout_id);
+        Ok(())
+    }
+
     /// Return a lightweight player summary without IPFS hashes or wallet.
     pub fn get_player_summary(env: Env, player_id: u64) -> Result<PlayerSummary, ScoutChainError> {
         let profile = Self::load_player(&env, player_id)?;

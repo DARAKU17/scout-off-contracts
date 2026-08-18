@@ -843,6 +843,60 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Recover an archived (or expired-but-not-evicted) validator entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction. It does NOT change `active`/`banned` flags (use
+    /// `restore_validator` for reactivation).
+    ///
+    /// Admin-only. Returns `ValidatorRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_validator_record(env: Env, wallet: Address) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Validator(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::validator_record_restored(&env, &admin, &wallet);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) milestone entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_validator_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `MilestoneRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_milestone_record(
+        env: Env,
+        player_id: u64,
+        index: u32,
+    ) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, index))
+            .ok_or(VerificationError::MilestoneRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Milestone(player_id, index),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::milestone_record_restored(&env, &admin, player_id, index);
+        Ok(())
+    }
+
     /// Update the specialization tags for an existing validator (admin only).
     ///
     /// Replaces the validator's current `specializations` list with the supplied
