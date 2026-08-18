@@ -10,7 +10,6 @@ members = [
 resolver = "2"
 
 [workspace.package]
-# When bumping this version, also update docs/VERSIONING.md Version History.
 version = "0.1.0"
 edition = "2021"
 
