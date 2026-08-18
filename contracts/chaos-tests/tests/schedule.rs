@@ -59,7 +59,7 @@ impl ScheduleGenerator {
 }
 
 impl Harness {
-    pub fn apply(&mut self, op: &Operation) -> Result<(), String> {
+    pub fn apply(&mut self, op: &Operation) -> Result<(), std::string::String> {
         match op {
             Operation::ApproveMilestone {
                 player_idx,
