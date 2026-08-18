@@ -409,6 +409,18 @@ Pagination:
 - Both `offset` and `next_cursor` are *counts* of eligible (non-deactivated,
   filter-matching) entries, not player IDs.
 
+> **Past bug (#1017):** `next_cursor` used to be set to the raw `player_id` of
+> the last entry on the page while `offset` was always compared as a count of
+> eligible entries — different units that only coincided by accident when
+> player IDs were contiguous with no filter gaps. Paginating past a
+> non-matching player (e.g. a different position) between pages would skip
+> one eligible entry per such gap. Fixed by making `next_cursor` a count in
+> the same unit as `offset`, matching the contract documented above; both
+> code paths (the region-filtered fast path and the full-scan slow path) and
+> their doc comments were updated together, and a regression test
+> (`test_filter_players_pagination_cursor_no_gaps`) walks a filtered page
+> boundary to assert no entries are skipped or duplicated.
+
 | | |
 |---|---|
 | **Auth** | None |
