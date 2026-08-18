@@ -87,6 +87,10 @@ pub enum ScoutAccessError {
     // ── Sybil resistance ──
     /// Scout is not verified; cannot subscribe to Pro tier.
     ScoutNotVerified = 27,
+
+    // ── Auto-renewal ──
+    /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
+    AutoRenewNotEnabled = 28,
 }
 
 impl AdminError for ScoutAccessError {

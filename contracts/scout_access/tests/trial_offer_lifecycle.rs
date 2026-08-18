@@ -191,7 +191,9 @@ fn test_confirm_before_expiry_advances_level_and_emits_event() {
     assert_eq!(index, 1);
 
     // Confirm well within the expiry window (timestamp unchanged).
-    h.scout_access.confirm_trial_offer(&player_wallet, &player_id, &index);
+    // `idempotency_nonce` is optional — pass `None` for a plain confirm.
+    h.scout_access
+        .confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
 
     // Player must now be at EliteTier.
     assert_eq!(h.progress.get_level(&player_id), ProgressLevel::EliteTier);
@@ -257,7 +259,7 @@ fn test_confirm_after_expiry_refunds_escrow_and_emits_event() {
     // Attempt to confirm after expiry — must return TrialOfferExpired.
     let result = h
         .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index);
+        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
     assert!(
         result.is_err(),
         "confirm after expiry must return an error"
@@ -291,7 +293,7 @@ fn test_confirm_after_expiry_refunds_escrow_and_emits_event() {
     // Escrow must be cleaned up: a second confirm attempt returns AlreadyConfirmed.
     let second_result = h
         .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index);
+        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
     assert!(
         second_result.is_err(),
         "second confirm after expiry-refund must error (escrow already gone)"
@@ -326,12 +328,12 @@ fn test_double_confirm_returns_already_confirmed() {
 
     // First confirm — must succeed.
     h.scout_access
-        .confirm_trial_offer(&player_wallet, &player_id, &index);
+        .confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
 
     // Second confirm — escrow is gone, must return TrialOfferAlreadyConfirmed.
     let result = h
         .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index);
+        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
     assert!(
         result.is_err(),
         "second confirm must return TrialOfferAlreadyConfirmed"
@@ -356,7 +358,7 @@ fn test_confirm_without_prior_log_returns_error() {
     // No trial offer was ever logged for player_id = 4.
     let result = h
         .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &1u32);
+        .try_confirm_trial_offer(&player_wallet, &player_id, &1u32, &None::<String>);
     assert!(
         result.is_err(),
         "confirming a never-logged index must return an error"
