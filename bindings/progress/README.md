@@ -2,6 +2,10 @@
 
 TypeScript client bindings for the ScoutChain progress contract. For setup, generation, and usage instructions, see the [bindings README](../README.md); for available contract functions, see the [contract reference](../../docs/CONTRACT_REFERENCE.md).
 
+For a reference implementation that reads a player's current level and full
+advancement history (including paginated and incremental variants), see
+[`examples/getPlayerHistory.ts`](examples/README.md).
+
 <!-- AUTO-GENERATED FUNCTION LIST BEGIN - DO NOT EDIT MANUALLY -->
 
 ## Functions

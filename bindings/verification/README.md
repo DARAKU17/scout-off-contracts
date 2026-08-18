@@ -2,6 +2,10 @@
 
 TypeScript client bindings for the ScoutChain verification contract. For setup, generation, and usage instructions, see the [bindings README](../README.md); for available contract functions, see the [contract reference](../../docs/CONTRACT_REFERENCE.md).
 
+For a reference implementation of a real `approve_milestone` submission (built
+and verified against this client, including the cross-contract level advance it
+triggers), see [`examples/approveMilestone.ts`](examples/README.md).
+
 <!-- AUTO-GENERATED FUNCTION LIST BEGIN - DO NOT EDIT MANUALLY -->
 
 ## Functions
