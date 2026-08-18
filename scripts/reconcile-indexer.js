@@ -1,141 +1,4 @@
 #!/usr/bin/env node
-/**
- * reconcile-indexer.js
- *
- * Compares on-chain contract state against the local PostgreSQL indexer tables
- * and reports discrepancies.  Designed to be run as a cron job or manual
- * diagnostic tool.
- *
- * Usage:
- *   node scripts/reconcile-indexer.js [--contract <address>]
- *
- * Environment:
- *   DATABASE_URL  - PostgreSQL connection string
- *   RPC_URL       - Soroban RPC endpoint
- */
-
-const { Client } = require('pg');
-const { SorobanRpc } = require('@stellar/stellar-sdk');
-
-const RPC_URL = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
-const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://localhost/scoutchain';
-
-const client = new Client({ connectionString: DATABASE_URL });
-
-async function connectDb() {
-  await client.connect();
-}
-
-async function closeDb() {
-  await client.end();
-}
-
-async function fetchPlayersFromChain() {
-  // Placeholder: in production this would query the registration contract's
-  // filter_players or iterate stored player IDs via RPC.
-  return [];
-}
-
-async function fetchScoutsFromChain() {
-  // Placeholder: in production this would query the registration contract's
-  // scout registry via RPC.
-  return [];
-}
-
-async function reconcilePlayers() {
-  const chainPlayers = await fetchPlayersFromChain();
-  const { rows } = await client.query('SELECT player_id, wallet, deactivated FROM players');
-
-  const dbMap = new Map(rows.map((r) => [r.player_id, r]));
-  const chainMap = new Map(chainPlayers.map((p) => [p.id, p]));
-
-  const missingInDb = chainPlayers.filter((p) => !dbMap.has(p.id));
-  const missingOnChain = rows.filter((r) => !chainMap.has(r.player_id));
-
-  for (const p of missingInDb) {
-    console.warn(`[reconcile] player ${p.id} exists on-chain but missing in DB`);
-  }
-
-  for (const r of missingOnChain) {
-    console.warn(`[reconcile] player ${r.player_id} exists in DB but missing on-chain`);
-  }
-
-  // Check deactivated flag
-  for (const r of rows) {
-    const chain = chainMap.get(r.player_id);
-    if (!chain) continue;
-    const chainDeactivated = chain.deactivated === true;
-    if (r.deactivated !== chainDeactivated) {
-      console.warn(
-        `[reconcile] player ${r.player_id} deactivated mismatch: db=${r.deactivated} chain=${chainDeactivated}`
-      );
-    }
-  }
-
-  return { missingInDb, missingOnChain };
-}
-
-async function reconcileScouts() {
-  const chainScouts = await fetchScoutsFromChain();
-  const { rows } = await client.query('SELECT scout_id, wallet, verified FROM scouts');
-
-  const dbMap = new Map(rows.map((r) => [r.scout_id, r]));
-  const chainMap = new Map(chainScouts.map((s) => [s.id, s]));
-
-  const missingInDb = chainScouts.filter((s) => !dbMap.has(s.id));
-  const missingOnChain = rows.filter((r) => !chainMap.has(r.scout_id));
-
-  for (const s of missingInDb) {
-    console.warn(`[reconcile] scout ${s.id} exists on-chain but missing in DB`);
-  }
-
-  for (const r of missingOnChain) {
-    console.warn(`[reconcile] scout ${r.scout_id} exists in DB but missing on-chain`);
-  }
-
-  // Check verified flag
-  for (const r of rows) {
-    const chain = chainMap.get(r.scout_id);
-    if (!chain) continue;
-    const chainVerified = chain.verified === true;
-    if (r.verified !== chainVerified) {
-      console.warn(
-        `[reconcile] scout ${r.scout_id} verified mismatch: db=${r.verified} chain=${chainVerified}`
-      );
-    }
-  }
-
-  return { missingInDb, missingOnChain };
-}
-
-async function main() {
-  console.log('Starting indexer reconciliation...');
-  await connectDb();
-
-  try {
-    const playerReport = await reconcilePlayers();
-    const scoutReport = await reconcileScouts();
-
-    const hasIssues =
-      playerReport.missingInDb.length > 0 ||
-      playerReport.missingOnChain.length > 0 ||
-      scoutReport.missingInDb.length > 0 ||
-      scoutReport.missingOnChain.length > 0;
-
-    if (hasIssues) {
-      console.error('Reconciliation found discrepancies');
-      process.exitCode = 1;
-    } else {
-      console.log('Reconciliation passed: no discrepancies found');
-    }
-  } finally {
-    await closeDb();
-  }
-}
-
-main().catch((err) => {
-  console.error('Reconciliation failed:', err);
-  process.exit(1);
 // ScoutChain — on-chain/off-chain reconciliation tool.
 //
 // Compares live contract state (via `stellar contract invoke`) against the
@@ -549,10 +412,20 @@ async function reconcileSubscriptions(pg, cfg, report) {
   const { rows } = await pg.query("SELECT * FROM scout_subscriptions");
   const byScout = new Map(rows.map((r) => [r.scout, r]));
 
+  // Current wall-clock time in Unix seconds, used to detect subscriptions
+  // that have expired on-chain but whose DB row still appears active.
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  // Collect the set of scouts that are known to the contract (across all
+  // tiers) so we can also catch DB rows that have no on-chain counterpart.
+  const chainScouts = new Set();
+
   for (const tier of ["Basic", "Pro", "Elite"]) {
     const result = invoke(cfg.network, cfg.source, cfg.scoutAccessId, "get_subscribers_by_tier", ["--tier", tier]);
     if (!result.ok) continue;
+
     for (const scout of result.value) {
+      chainScouts.add(scout);
       const dbRow = byScout.get(scout);
       const chainSub = invoke(cfg.network, cfg.source, cfg.scoutAccessId, "get_subscription", ["--scout", scout]);
       if (!chainSub.ok) continue;
@@ -562,9 +435,55 @@ async function reconcileSubscriptions(pg, cfg, report) {
         report.add("scout_subscriptions", scout, "existence", "present", "missing");
         continue;
       }
+
+      // --- Core field checks ---
       report.check("scout_subscriptions", scout, "tier", s.tier, dbRow.tier);
       report.check("scout_subscriptions", scout, "subscribed_at", asBigIntString(s.subscribed_at), asBigIntString(dbRow.subscribed_at));
       report.check("scout_subscriptions", scout, "expires_at", asBigIntString(s.expires_at), asBigIntString(dbRow.expires_at));
+
+      // --- Tier divergence: on-chain subscription has expired but the DB row
+      // still records the scout as active.  The contract treats an expired
+      // subscription the same as no subscription (error 7 SubscriptionExpired),
+      // so an off-chain query using the DB row would incorrectly grant the
+      // scout access they no longer have on-chain.
+      const chainExpiredOnChain = Number(s.expires_at) < nowSecs;
+      const dbExpiredOnChain = dbRow.expires_at !== null && Number(dbRow.expires_at) < nowSecs;
+      if (chainExpiredOnChain !== dbExpiredOnChain) {
+        report.add(
+          "scout_subscriptions",
+          scout,
+          "active_state",
+          chainExpiredOnChain ? "expired" : "active",
+          dbExpiredOnChain ? "expired" : "active",
+          `on-chain expires_at=${s.expires_at} db expires_at=${dbRow.expires_at} now=${nowSecs}`,
+        );
+      }
+
+      // --- Auto-renewal flag divergence: check whether the DB tracks the
+      // per-scout auto_renew opt-in consistently with on-chain state.
+      // The column may not exist yet in older deployments, so we only check
+      // it when the DB row has the column (non-undefined).
+      if (dbRow.auto_renew !== undefined) {
+        const autoRenewResult = invoke(
+          cfg.network, cfg.source, cfg.scoutAccessId, "get_auto_renew", ["--scout", scout],
+        );
+        if (autoRenewResult.ok) {
+          const chainAutoRenew = autoRenewResult.value === true;
+          const dbAutoRenew = dbRow.auto_renew === true;
+          report.check("scout_subscriptions", scout, "auto_renew", chainAutoRenew, dbAutoRenew);
+        }
+      }
+    }
+  }
+
+  // Detect DB rows that have no on-chain counterpart at any tier.  This can
+  // happen when the indexer wrote a subscription row but the on-chain record
+  // was never created (e.g., the subscribe transaction was rolled back) or was
+  // subsequently deleted by a contract upgrade.
+  for (const [scout, dbRow] of byScout) {
+    if (!chainScouts.has(scout)) {
+      report.add("scout_subscriptions", scout, "existence", "missing", "present",
+        "scout exists in DB but not found under any tier on-chain");
     }
   }
 }

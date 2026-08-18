@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS scouts (
     scout_id        BIGINT       PRIMARY KEY,
     wallet          VARCHAR(56)  NOT NULL UNIQUE,
     region          VARCHAR(128) NOT NULL,
-    verified        BOOLEAN      NOT NULL DEFAULT FALSE,
     verified        BOOLEAN      NOT NULL DEFAULT FALSE, -- mirrors registration.get_scout(...).verified
     registered_at   BIGINT       NOT NULL,
     created_db_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
