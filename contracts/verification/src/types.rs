@@ -76,6 +76,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
+    /// Administrator-verified organizational affiliation (e.g. "FC Example Academy")
+    pub affiliation: String,
     /// Ledger timestamp when the validator was registered, in Unix seconds.
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
@@ -221,6 +223,13 @@ pub enum AttestationStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiversityConfig {
+    pub required_distinct_affiliations: u32,
+    pub starting_milestone_index: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     /// Proposed replacement admin awaiting acceptance by that address.
@@ -239,6 +248,10 @@ pub enum DataKey {
     ValidatorVector,
     TotalMilestoneCount,
     GlobalMilestoneIndex,
+    /// Persistent config for diversity-gated milestone advancement
+    DiversityConfig,
+    /// Persistent index: player_id → Vec<String> distinct affiliations that have contributed milestones
+    PlayerAffiliations(u64),
     /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
     /// for which that validator has approved at least one milestone.
     /// Updated on every `approve_milestone` call (duplicates are skipped).

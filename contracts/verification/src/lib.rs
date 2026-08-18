@@ -239,6 +239,29 @@ impl VerificationContract {
     /// Store the progress contract address so approve_milestone can call it.
     /// Must be called after both contracts are deployed (admin only).
     /// Returns AlreadyConfigured if called more than once — use update_progress_contract instead.
+    
+    pub fn get_diversity_config(env: Env) -> Option<DiversityConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DiversityConfig)
+    }
+
+    pub fn set_diversity_config(
+        env: Env,
+        required_distinct_affiliations: u32,
+        starting_milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let config = DiversityConfig {
+            required_distinct_affiliations,
+            starting_milestone_index,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiversityConfig, &config);
+        Ok(())
+    }
+
     pub fn set_progress_contract(
         env: Env,
         progress_contract: Address,
@@ -435,6 +458,7 @@ impl VerificationContract {
         env: Env,
         wallet: Address,
         credentials: String,
+        affiliation: String,
         specializations: Vec<String>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -446,6 +470,10 @@ impl VerificationContract {
         }
 
         if credentials.len() < MIN_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+        
+        if affiliation.len() > MAX_CREDENTIALS_LEN {
             return Err(VerificationError::InvalidInput);
         }
 
@@ -487,6 +515,7 @@ impl VerificationContract {
         let validator = Validator {
             wallet: wallet.clone(),
             credentials,
+            affiliation,
             registered_at: env.ledger().timestamp(),
             active: true,
             specializations,
@@ -726,7 +755,7 @@ impl VerificationContract {
     /// changes are persisted.
     pub fn batch_register_validators(
         env: Env,
-        entries: Vec<(Address, String, Vec<String>)>,
+        entries: Vec<(Address, String, String, Vec<String>)>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
@@ -747,7 +776,10 @@ impl VerificationContract {
 
         // First pass: validate each entry without mutating state.
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
 
             // Length checks.
             if credentials.len() > MAX_CREDENTIALS_LEN || credentials.len() < MIN_CREDENTIALS_LEN {
@@ -767,7 +799,7 @@ impl VerificationContract {
 
             // Duplicate within the batch.
             for j in 0..i {
-                let (other_wallet, _, _) = entries.get(j).unwrap();
+                let (other_wallet, _, _, _) = entries.get(j).unwrap();
                 if other_wallet == wallet {
                     return Err(VerificationError::ValidatorAlreadyRegistered);
                 }
@@ -791,10 +823,14 @@ impl VerificationContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
             let validator = Validator {
                 wallet: wallet.clone(),
                 credentials: credentials.clone(),
+                affiliation: affiliation.clone(),
                 registered_at: env.ledger().timestamp(),
                 active: true,
                 specializations: specializations.clone(),
@@ -964,6 +1000,7 @@ impl VerificationContract {
         let new_validator = Validator {
             wallet: new_wallet.clone(),
             credentials: old_validator.credentials.clone(),
+            affiliation: old_validator.affiliation.clone(),
             registered_at: old_validator.registered_at,
             active: old_validator.active,
             specializations: old_validator.specializations.clone(),
@@ -2657,32 +2694,69 @@ impl VerificationContract {
             &evidence_hash,
         );
 
-        if let Some(progress_addr) = env
+        let validator: Validator = env
             .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ProgressContract)
-        {
-            let progress_client = progress_contract::Client::new(env, &progress_addr);
-            match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
-                Ok(_) => {}
-                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
-                    events::level_advancement_skipped(
-                        env,
-                        player_id,
-                        &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
-                    );
+            .persistent()
+            .get(&DataKey::Validator(validator_wallet.clone()))
+            .unwrap();
+
+        let mut player_affiliations: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerAffiliations(player_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        if !player_affiliations.contains(&validator.affiliation) {
+            player_affiliations.push_back(validator.affiliation.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::PlayerAffiliations(player_id), &player_affiliations);
+        }
+
+        let diversity_config = Self::get_diversity_config(env.clone());
+        let mut advance_allowed = true;
+        if let Some(config) = diversity_config {
+            if next_index >= config.starting_milestone_index {
+                if player_affiliations.len() < config.required_distinct_affiliations {
+                    advance_allowed = false;
                 }
-                Err(e) => {
-                    let code = match &e {
-                        Ok(pe) => *pe as u32,
-                        Err(_) => 0u32,
-                    };
-                    events::progress_call_failed(env, player_id, code);
-                    return Err(VerificationError::ProgressCallFailed);
+            }
+        }
+
+        if advance_allowed {
+            if let Some(progress_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::ProgressContract)
+            {
+                let progress_client = progress_contract::Client::new(env, &progress_addr);
+                match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
+                    Ok(_) => {}
+                    Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
+                        events::level_advancement_skipped(
+                            env,
+                            player_id,
+                            &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
+                        );
+                    }
+                    Err(e) => {
+                        let code = match &e {
+                            Ok(pe) => *pe as u32,
+                            Err(_) => 0u32,
+                        };
+                        events::progress_call_failed(env, player_id, code);
+                        return Err(VerificationError::ProgressCallFailed);
+                    }
+                }
+            } else {
+                if !env.storage().instance().has(&DataKey::ProgressContract) {
+                    events::progress_contract_not_set(env, player_id);
                 }
             }
         } else {
-            events::progress_contract_not_set(env, player_id);
+            if !env.storage().instance().has(&DataKey::ProgressContract) {
+                events::progress_contract_not_set(env, player_id);
+            }
         }
 
         Ok(next_index)
