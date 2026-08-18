@@ -21,8 +21,11 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
 struct Harness {
     env: Env,
     client: ProgressContractClient<'static>,
-    /// Whitelisted secondary caller (set via `set_scout_access_contract`) so
-    /// `advance_level` works without deploying a real verification contract.
+    /// Whitelisted caller registered on the *primary* (VerificationContract)
+    /// path, so `advance_level` works without deploying a real verification
+    /// contract. The secondary path cross-calls `get_milestone_count` (#457)
+    /// and therefore needs a real contract; these tests only care about the
+    /// history commitment, not milestone validation.
     caller: Address,
 }
 
@@ -34,7 +37,7 @@ fn setup() -> Harness {
     let client = ProgressContractClient::new(&env, &id);
     client.initialize(&admin);
     let caller = Address::generate(&env);
-    client.set_scout_access_contract(&caller);
+    client.set_verification_contract(&caller);
     Harness { env, client, caller }
 }
 

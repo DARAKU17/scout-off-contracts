@@ -12,9 +12,9 @@ use scoutchain_scout_access::{
     FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    Address, Env,
+    Address, Env, IntoVal, Symbol,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,6 +39,7 @@ struct Harness {
     admin: Address,
     scout: Address,
     xlm: Address,
+    contract_id: Address,
     client: ScoutAccessContractClient<'static>,
 }
 
@@ -69,6 +70,7 @@ fn setup() -> Harness {
         admin,
         scout,
         xlm,
+        contract_id,
         client,
     }
 }
@@ -410,6 +412,98 @@ fn test_propose_after_activate_allows_new_proposal() {
     h.client
         .propose_fee_config(&config2)
         .expect("second proposal should succeed after first is activated");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: update_fee_config's delay-bypass is distinguishable in the event
+// stream from activate_fee_config's delay-respecting activation (#1055)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `update_fee_config` bypasses the 7-day propose/activate delay by design
+/// (see docs/FEE_CONFIG_PROPOSAL_DESIGN.md, "Coexist"). It must flag that
+/// bypass in the event stream: alongside the existing `fee_config_updated`
+/// event, it must also emit `fee_config_delay_bypassed` — an additive event
+/// that leaves `fee_config_updated`'s own topics/data unchanged for existing
+/// consumers.
+#[test]
+fn test_update_fee_config_emits_delay_bypassed_event() {
+    let h = setup();
+
+    let mut new_config = default_fees();
+    new_config.elite_sub_stroops = 9_000_000;
+
+    h.client
+        .update_fee_config(&new_config)
+        .expect("update_fee_config should succeed");
+
+    let events = h.env.events().all().filter_by_contract(&h.contract_id);
+
+    let has_topic = |name: &str| {
+        events.iter().any(|(_, topics, _)| {
+            topics
+                .get(0)
+                .map(|t| t == Symbol::new(&h.env, name).into_val(&h.env))
+                .unwrap_or(false)
+        })
+    };
+
+    assert!(
+        has_topic("fee_config_updated"),
+        "update_fee_config must still emit fee_config_updated"
+    );
+    assert!(
+        has_topic("fee_config_delay_bypassed"),
+        "update_fee_config must additionally emit fee_config_delay_bypassed"
+    );
+}
+
+/// `activate_fee_config`, by contrast, respects the full 7-day delay and must
+/// emit only `fee_config_updated` — never `fee_config_delay_bypassed`. This
+/// is the actual distinguishing signal an indexer/auditor relies on: a
+/// `fee_config_updated` event with no accompanying `fee_config_delay_bypassed`
+/// (and no accompanying `fee_config_proposed`, which would instead indicate
+/// propose_fee_config's own immediate-decrease shortcut) means the change
+/// went through the full delay.
+#[test]
+fn test_activate_fee_config_does_not_emit_delay_bypassed_event() {
+    let h = setup();
+
+    let mut new_config = default_fees();
+    new_config.elite_sub_stroops = 10_000_000; // Increase — requires the delay
+
+    h.client
+        .propose_fee_config(&new_config)
+        .expect("propose_fee_config should succeed");
+
+    h.env.ledger().with_mut(|l| {
+        l.timestamp = 1_000_000 + (7 * 24 * 60 * 60) + 1;
+    });
+
+    h.client
+        .activate_fee_config()
+        .expect("activate_fee_config should succeed");
+
+    // Only the activate_fee_config invocation's own events are relevant here;
+    // `events().all()` reflects the most recent invocation.
+    let events = h.env.events().all().filter_by_contract(&h.contract_id);
+
+    let has_topic = |name: &str| {
+        events.iter().any(|(_, topics, _)| {
+            topics
+                .get(0)
+                .map(|t| t == Symbol::new(&h.env, name).into_val(&h.env))
+                .unwrap_or(false)
+        })
+    };
+
+    assert!(
+        !has_topic("fee_config_delay_bypassed"),
+        "activate_fee_config must never emit fee_config_delay_bypassed"
+    );
+    assert!(
+        has_topic("fee_config_updated"),
+        "activate_fee_config must still emit fee_config_updated"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

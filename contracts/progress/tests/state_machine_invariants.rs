@@ -23,8 +23,8 @@ struct Harness {
     env: Env,
     admin: Address,
     client: ProgressContractClient<'static>,
-    /// Whitelisted secondary caller that can call advance_level without a
-    /// real verification contract (set via set_scout_access_contract).
+    /// Whitelisted caller for `advance_level`, registered as the *primary*
+    /// VerificationContract (see `setup`).
     caller: Address,
 }
 
@@ -36,10 +36,17 @@ fn setup() -> Harness {
     let client = ProgressContractClient::new(&env, &id);
     client.initialize(&admin);
 
-    // Whitelist a test address as secondary caller so advance_level works
-    // without a real verification contract.
+    // Whitelist a test address on the *primary* (VerificationContract) path.
+    //
+    // The secondary (ScoutAccessContract) path cannot be used here: since #457
+    // it cross-calls `get_milestone_count` on the configured verification
+    // contract to validate `milestone_ref`, which requires a real deployed
+    // contract and constrains which refs are accepted. The primary path skips
+    // that check by design — the verification contract is the source of truth
+    // for milestone data — so it is the right harness for level-transition
+    // invariants, which are about the state machine, not milestone lookup.
     let caller = Address::generate(&env);
-    client.set_scout_access_contract(&caller);
+    client.set_verification_contract(&caller);
 
     Harness { env, admin, client, caller }
 }

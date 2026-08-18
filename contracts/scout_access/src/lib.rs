@@ -217,6 +217,11 @@ impl ScoutAccessContract {
             .set(&DataKey::FeeConfig, &fee_config);
 
         events::fee_config_updated(&env, &admin, &old_config, &fee_config);
+        // `update_fee_config` is the atomic, immediate, no-delay path — flag it
+        // as such so indexers/auditors can distinguish it from a delay-respecting
+        // `activate_fee_config` call, both of which otherwise emit an identical
+        // `fee_config_updated` event. See docs/FEE_CONFIG_PROPOSAL_DESIGN.md.
+        events::fee_config_delay_bypassed(&env, &admin, &old_config, &fee_config);
         Ok(())
     }
 
@@ -2142,8 +2147,6 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
-            trial_offer_escrow_stroops: 500_000,
-            trial_offer_expiry_secs: 3_600,
             pro_contact_limit: 20,
             trial_offer_escrow_stroops: 1_000_000,
             trial_offer_expiry_secs: 7_200,
@@ -2152,7 +2155,11 @@ mod tests {
         client.update_fee_config(&new_fees);
 
         // Assert that the fee_config_updated event was emitted with old and new
-        // config. Checked immediately — `events().all()` only reflects the most
+        // config, immediately followed by fee_config_delay_bypassed (#1055):
+        // update_fee_config is the atomic, no-delay path, so it must flag
+        // itself as such in the event stream, distinguishing it from an
+        // activate_fee_config call (which emits fee_config_updated alone).
+        // Checked immediately — `events().all()` only reflects the most
         // recent invocation, and the reads below are themselves separate invocations.
         let events = env.events().all().filter_by_contract(&contract_id);
         assert_eq!(
@@ -2162,6 +2169,11 @@ mod tests {
                 (
                     contract_id.clone(),
                     (Symbol::new(&env, "fee_config_updated"), _admin.clone(),).into_val(&env),
+                    (old_config.clone(), new_fees.clone()).into_val(&env)
+                ),
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "fee_config_delay_bypassed"), _admin.clone(),).into_val(&env),
                     (old_config, new_fees.clone()).into_val(&env)
                 )
             ]

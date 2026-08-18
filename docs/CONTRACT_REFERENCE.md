@@ -273,6 +273,23 @@ progress contract address via cross-contract invocation.
 
 _Not intended for direct invocation. Called atomically by `progress.advance_level`._
 
+> **Idempotent — safe to retry (Issue #811 follow-up).** Unlike
+> `progress.advance_level`, this function is a *keyed absolute write*, not a
+> relative step: it sets the player's level to the supplied `level` rather than
+> deriving a next value. Replaying it with the same arguments converges on the
+> same state.
+>
+> The index maintenance is idempotent by construction: before adding the player
+> to the target bucket it removes them from **all four** level buckets, so a
+> replay cannot produce duplicate entries in `PlayersByLevel` or
+> `PlayersByLevelRegion` even though the underlying `level_index_add` /
+> `composite_index_add` helpers are unguarded `push_back`s.
+>
+> The only field that differs across replays is `updated_at` on the stored
+> profile, plus a repeated `player_level_synced` event and an extended
+> `PlayerLevel` TTL — none of which are state-corrupting. A replay against a
+> deleted player fails cleanly with `PlayerNotFound`.
+
 ---
 
 #### `get_player(player_id: u64) -> Result<PlayerProfile, ScoutChainError>`
@@ -321,6 +338,42 @@ Retrieve a scout profile by ID.
 ```bash
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- get_scout --scout_id 1
+```
+
+---
+
+#### `get_scout_by_wallet(wallet: Address) -> Result<ScoutProfile, ScoutChainError>`
+
+Retrieve a scout profile by wallet address, resolving the wallet to a
+`scout_id` via the `DataKey::ScoutByWallet` index and delegating to `get_scout`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ScoutNotFound` |
+| **Cross-contract calls** | Called *by* the `scout_access` contract's `subscribe()` — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md#cross-contract-integration). Before allowing a Pro-tier subscription, `subscribe()` calls this function to fetch `ScoutProfile.verification.verified` and rejects with `ScoutAccessError::ScoutNotVerified` (scout_access error code 27) if the scout isn't found or isn't verified. This read is not atomic with the subscription write — a scout's verification status is read at call time, so a verification revoked in the same ledger as a competing `subscribe()` call is not guaranteed to be observed. |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scout_by_wallet --wallet $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_scout_verification(scout_id: u64) -> Result<ScoutVerificationRecord, ScoutChainError>`
+
+Retrieve just the structured verification record (`verified`, `verified_by`,
+`verified_at`, `evidence_ref`, `method`) for a scout by ID, without the rest
+of the `ScoutProfile`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | `ScoutNotFound` |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_scout_verification --scout_id 1
 ```
 
 ---
@@ -408,6 +461,18 @@ Pagination:
 - `next_cursor` = 0 in the response means no further results.
 - Both `offset` and `next_cursor` are *counts* of eligible (non-deactivated,
   filter-matching) entries, not player IDs.
+
+> **Past bug (#1017):** `next_cursor` used to be set to the raw `player_id` of
+> the last entry on the page while `offset` was always compared as a count of
+> eligible entries — different units that only coincided by accident when
+> player IDs were contiguous with no filter gaps. Paginating past a
+> non-matching player (e.g. a different position) between pages would skip
+> one eligible entry per such gap. Fixed by making `next_cursor` a count in
+> the same unit as `offset`, matching the contract documented above; both
+> code paths (the region-filtered fast path and the full-scan slow path) and
+> their doc comments were updated together, and a regression test
+> (`test_filter_players_pagination_cursor_no_gaps`) walks a filtered page
+> boundary to assert no entries are skipped or duplicated.
 
 | | |
 |---|---|
@@ -2024,16 +2089,43 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 Advance a player's progress level by one tier. `milestone_ref` links back to
 the verification contract's milestone index. Returns the new `ProgressLevel`.
 
-When the verification contract address is configured, only that contract may
-invoke this function; otherwise `caller` must sign directly (useful for testing
-without a full cross-contract deployment).
+Only the configured `VerificationContract` (primary) or `ScoutAccessContract`
+(secondary, for trial-offer Level-3 advances) may invoke this function. There is
+**no open fallback**: if neither address is configured the call is rejected with
+`NotInitialized`. Auth is required from the *stored* whitelist address — the
+`caller` argument is recorded as `updated_by` in the history entry but is not
+itself the authorising party.
+
+On the secondary path, `milestone_ref` must be backed by a real milestone in the
+verification contract (`0 < milestone_ref <= get_milestone_count(player_id)`),
+otherwise the call fails with `InvalidProgressTransition` (#457).
 
 | | |
 |---|---|
-| **Auth** | Verification contract (production) or `caller` directly (test/unconfigured) |
-| **Errors** | `NotInitialized` · `ContractPaused` · `AlreadyAtMaxLevel` · `Overflow` · `Unauthorized` |
+| **Auth** | Configured verification contract (primary) or scout_access contract (secondary) |
+| **Errors** | `NotInitialized` · `ContractPaused` · `InvalidProgressTransition` · `AlreadyAtMaxLevel` · `Overflow` · `RegistrationCallFailed` |
 
 _Called atomically by `verification.approve_milestone`. Prefer that path in production._
+
+> **Not idempotent — do not retry this call directly (Issue #811 follow-up).**
+> `advance_level` is a monotonic state-machine step, not a keyed mutation: it
+> reads the current level, computes `next()`, and appends a history entry. It
+> does **not** deduplicate on `milestone_ref`, so two calls with the *same*
+> `milestone_ref` advance two tiers and append two history entries that are
+> indistinguishable from a legitimate double advance.
+>
+> Retry-after-uncertain-failure is safe only via the production entry points,
+> which each hold their own dedup key — `verification.approve_milestone` uses
+> `EvidenceUsed(evidence_hash)` (`DuplicateEvidence`), and
+> `scout_access.confirm_trial_offer` uses `ConfirmationNonce`
+> (`TrialOfferAlreadyConfirmed`). Because a failed attempt reverts the whole
+> transaction, the dedup key is rolled back with it and the retry applies
+> exactly once.
+>
+> Any new whitelisted caller **must** supply its own dedup key. Replay exposure
+> is bounded to three tiers: at `EliteTier` further calls fail closed with
+> `AlreadyAtMaxLevel` and write nothing. See
+> `contracts/progress/tests/issue_811_idempotency.rs`.
 
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
@@ -2050,10 +2142,16 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 Return the player's current progress level. Returns `Unverified` for unknown
 player IDs (no `PlayerNotFound` error).
 
+Reading is a keep-alive: when a `PlayerLevel` record exists, `get_level` extends
+its TTL so a dormant player's level is not lost to archival decay. The extension
+is skipped when no record exists — extending the TTL of an unwritten key raises
+`Storage/MissingValue`, which the host escalates to a panic, so an unguarded
+extension would make the documented `Unverified` default trap instead of return.
+
 | | |
 |---|---|
 | **Auth** | None |
-| **Errors** | None |
+| **Errors** | None — never traps, including for unknown player IDs |
 
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
@@ -2594,16 +2692,24 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 #### `update_fee_config(fee_config: FeeConfig) -> Result<(), ScoutAccessError>`
 
 Adjust subscription and contact fee rates. Same validation rules as
-`initialize`.
+`initialize`. This is an atomic, immediate, no-delay path that coexists by
+design with the timelocked `propose_fee_config` / `activate_fee_config`
+mechanism (see [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#option-coexist-chosen)) —
+it deliberately bypasses the latter's 7-day advance-notice guarantee and
+remains callable by the admin at any time, for any fee change (increase or
+decrease).
 
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
 > Adjusting the fee config emits the `fee_config_updated` event containing both the old and new `FeeConfig` values and also pushes the previous config into the bounded on-chain history (last 5 entries, oldest-first, accessible via `get_fee_config_history`). For a complete unbounded audit trail, replay events into the indexer's `fee_config_history` table (see [001_initial_schema.sql](migrations/001_initial_schema.sql#L135-L148)).
+>
+> **This call also emits a second, additive event: `fee_config_delay_bypassed`** — same `(old_config, new_config)` data shape as `fee_config_updated`, emitted in the same transaction — specifically so that indexers/auditors can distinguish "this fee change bypassed the 7-day delay via `update_fee_config`" from "this fee change went through `activate_fee_config` after the full delay," which otherwise emit an identical `fee_config_updated` event and are not otherwise distinguishable from the event stream alone. See [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#fee_config_delay_bypassed-new-1055).
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
 | **Errors** | `Unauthorized` · `InvalidInput` |
+| **Emits** | `fee_config_updated` with `(admin, old_config, new_config)`, immediately followed by `fee_config_delay_bypassed` with the same data |
 
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
@@ -3844,9 +3950,10 @@ pub struct FeeConfig {
 > 
 > Historical fee configurations must be reconstructed off-chain by replaying events into the indexer's `fee_config_history` table:
 > - `fee_config_proposed` marks when an increase is staged (proposal timestamp, proposed config).
-> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases).
+> - `fee_config_updated` marks when a config *takes effect* (either immediately for decreases, or after the 7-day delay for increases, or immediately via the `update_fee_config` bypass — see next bullet).
+> - `fee_config_delay_bypassed` accompanies `fee_config_updated` in the same transaction *only* when `update_fee_config` was the source, letting the audit trail distinguish a delay-bypassing change from a delay-respecting `activate_fee_config` (#1055).
 > 
-> The audit trail is complete: every config change is visible via one of these two events, and subscribers can be notified of coming increases well in advance.
+> The audit trail is complete: every config change is visible via one of these events, subscribers can be notified of coming increases well in advance, and whether any given change honored that advance notice is itself auditable.
 
 
 ### `ProContactPeriod`
@@ -3972,6 +4079,11 @@ pub struct TrialOffer {
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed via `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same trial offer |
 | 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's confirmation window elapsed |
+| 24 | `NoPendingFeeConfig` | `activate_fee_config` called with no pending proposal to activate |
+| 25 | `FeeConfigProposalNotReady` | `activate_fee_config` called before the pending proposal's activation delay elapsed |
+| 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |
+| 27 | `ScoutNotVerified` | Pro-tier `subscribe()` rejected an unverified (or not-found) scout — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md) |
+| 28 | `AutoRenewNotEnabled` | `renew_if_due` called for a scout without auto-renewal enabled |
 
 ---
 
@@ -4044,7 +4156,9 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `trial_offer_expired` | event_name, scout (Address) | player_id (u64), index (u32) | Trial offer confirmation window elapsed; escrowed fee refunded to scout |
 | `fees_withdrawn` | event_name, admin (Address) | to (Address), amount (i128), timestamp (u64) | Admin withdraws accumulated fees |
 | `subscription_refunded` | event_name, scout (Address) | amount (i128) | Admin issues emergency refund to a scout |
-| `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed |
+| `fee_config_updated` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Fee configuration changed (emitted by `update_fee_config`, `activate_fee_config`, and `propose_fee_config`'s immediate-decrease path) |
+| `fee_config_proposed` | event_name, admin (Address) | proposed_config (FeeConfig), proposed_at (u64) | Admin proposes a fee change via `propose_fee_config` — always emitted; also accompanied by `fee_config_updated` in the same transaction if the proposal was an immediate decrease |
+| `fee_config_delay_bypassed` | event_name, admin (Address) | old_config (FeeConfig), new_config (FeeConfig) | Emitted only by `update_fee_config`, alongside its own `fee_config_updated`, flagging that this fee change bypassed the 7-day `propose_fee_config`/`activate_fee_config` delay — see [`docs/FEE_CONFIG_PROPOSAL_DESIGN.md`](FEE_CONFIG_PROPOSAL_DESIGN.md#fee_config_delay_bypassed-new-1055) |
 | `progress_contract_updated` | event_name, admin (Address) | progress_contract (Address) | Progress contract re-wired |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Current admin proposes a replacement |
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |

@@ -6,6 +6,34 @@ functions in [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md).
 
 ---
 
+## Attestation
+
+An independent vote by one validator toward a **k-of-n threshold** milestone
+claim, cast via `attest_milestone`. This is the alternate, multi-validator
+commit path alongside the original single-validator `approve_milestone` path
+(see [Milestone](#milestone)): once the admin calls
+`set_milestone_threshold(n)` with `n >= 2`, `approve_milestone` (and the
+off-chain-signed relay `submit_attested_milestone`) stop working, and a
+milestone claim — identified by `(player_id, evidence_hash)`, not by its
+description — only commits once `threshold` distinct active validators have
+each independently attested to it within the current voting round. A vote
+arriving after `voting_window_secs` has elapsed since the round started
+starts a fresh round instead of counting toward the old tally. The default
+threshold is `1`, which reproduces `approve_milestone`'s original
+single-signature behaviour unchanged, so existing integrations keep working
+until an operator deliberately opts into k-of-n mode.
+
+- See [CONTRACT_REFERENCE.md — k-of-n threshold milestone
+  attestation](CONTRACT_REFERENCE.md#k-of-n-threshold-milestone-attestation)
+  for the full design rationale (claim identity, bounded storage, revoke-mid-vote
+  and window-expiry semantics).
+- Relevant functions: `attest_milestone`, `submit_attested_milestone`,
+  `set_milestone_threshold`, `get_milestone_threshold`, `get_pending_claim`,
+  `has_attested` — see
+  [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
+
+---
+
 ## CID (Content Identifier)
 
 A self-describing content hash produced by IPFS or Arweave. CIDs are stored
@@ -94,8 +122,16 @@ auditability.
 
 Examples: "Scored 5 goals in Local Cup", "Top speed clocked at 32 km/h".
 
-- Relevant functions: `approve_milestone`, `get_milestone`,
-  `get_milestone_count` — see
+A milestone commits through one of two paths: the original single-validator
+`approve_milestone` (one signature is enough), or, once the admin opts into
+k-of-n mode via `set_milestone_threshold(n >= 2)`, the multi-validator
+[Attestation](#attestation) path (`attest_milestone`), which requires several
+independent validators to corroborate the same claim before it commits. Only
+one path is active at a time — see [Attestation](#attestation) for the
+mechanics.
+
+- Relevant functions: `approve_milestone`, `attest_milestone`,
+  `get_milestone`, `get_milestone_count` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
 
 ---
@@ -245,6 +281,18 @@ cannot approve further milestones until re-activated. If a validator is revoked
 for cause (e.g. misconduct), their past milestones are flagged so they can be
 weighed appropriately by scouts and indexers.
 
+A validator may also carry **specialization tags** (e.g. `"physical-stats"`,
+`"identity-kyc"`, `"match-performance"`), set via
+`set_validator_specializations`. When `approve_milestone` is called with a
+non-`None` `milestone_category`, the contract requires the approving
+validator to hold a matching tag, rejecting the call with
+`SpecializationMismatch` (code 21) otherwise — preventing, for example, a
+pure identity-KYC agent from approving physical performance data. This is
+backward-compatible: a validator with no specializations (the default) is
+general-purpose, and an **omitted** `milestone_category` remains open to any
+active validator regardless of tags.
+
 - Relevant functions: `register_validator`, `revoke_validator`,
-  `get_validator_status`, `approve_milestone`, `get_milestone_with_validator_status` — see
+  `set_validator_specializations`, `get_validator_status`, `approve_milestone`,
+  `get_milestone_with_validator_status` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#verification).
