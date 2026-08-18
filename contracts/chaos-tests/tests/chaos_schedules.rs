@@ -8,19 +8,16 @@
 //! transactions within the test harness, not literal OS-level parallelism —
 //! Soroban's Env test harness runs single-threaded/deterministic by design.
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
-use scoutchain_chaos_tests::{
-    fixtures::Harness,
-    invariants::{
-        assert_fee_conservation, assert_level_monotonicity, assert_no_orphaned_storage,
-        assert_validator_consistency,
-    },
-    schedule::{Operation, ScheduleGenerator},
-};
-
 mod fixtures;
 mod invariants;
 mod schedule;
+
+use fixtures::Harness;
+use invariants::{
+    assert_fee_conservation, assert_level_monotonicity, assert_no_orphaned_storage,
+    assert_validator_consistency,
+};
+use schedule::ScheduleGenerator;
 
 /// Number of randomized schedules to run per CI invocation.
 /// Bounded to keep CI time predictable — see ci/cpu-cost-budget.md for the
@@ -40,13 +37,18 @@ fn chaos_random_schedules_preserve_global_invariants() {
         let ops = generator.generate(MAX_OPS);
         let mut schedule_log = Vec::new();
 
+        // Snapshot prior levels so assert_level_monotonicity can compare
+        // against the pre-schedule state, not just the in-schedule history.
+        harness.snapshot_levels();
+
         for (op_idx, op) in ops.iter().enumerate() {
             match harness.apply(op) {
                 Ok(_) => {}
                 Err(_) => {
-                    // Some operations are expected to fail (e.g. cap limits).
+                    // Some operations are expected to fail (e.g. cap limits,
+                    // already-contacted, invalid CID path, cooldown).
                     // Record but continue.
-                    schedule_log.push((op_idx, op, "failed"));
+                    schedule_log.push((op_idx, format!("{op:?}"), "failed"));
                 }
             }
         }
@@ -55,7 +57,10 @@ fn chaos_random_schedules_preserve_global_invariants() {
         let invariant_checks: Vec<(&str, Result<(), String>)> = vec![
             ("fee_conservation", assert_fee_conservation(&harness)),
             ("level_monotonicity", assert_level_monotonicity(&harness)),
-            ("validator_consistency", assert_validator_consistency(&harness)),
+            (
+                "validator_consistency",
+                assert_validator_consistency(&harness),
+            ),
             ("no_orphaned_storage", assert_no_orphaned_storage(&harness)),
         ];
 
