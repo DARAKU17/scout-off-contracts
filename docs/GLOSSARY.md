@@ -191,6 +191,38 @@ sequentially; skipping or reversing is blocked by the progress contract (admin
 
 ---
 
+## Region Quorum
+
+A region quorum is a geographic-diversity requirement for gated player progress
+milestones. It is controlled by `min_region_quorum`, which sets the minimum
+number of distinct validator regions that must be represented by the approving
+validators before a gated level advancement can commit.
+
+The default value is `0`, which disables the region-quorum requirement. When it
+is raised to `2` or more, Level 2 (**Performance Milestones**) requires
+approving validators to span at least that many distinct geographic regions,
+and the same requirement applies to Level 3 (**Elite Tier**). In other words,
+several approvals from validators in the same region do not satisfy a quorum
+that requires multiple regions.
+
+The intended purpose is to reduce the risk of validator collusion: a single
+validator, or several colluding wallets from the same organization or
+a geography, should not be able to push a player through every gated level by
+themselves. Requiring geographically distributed validator participation raises
+the coordination cost for an attacker and provides a stronger independence
+signal for milestone approvals.
+
+> **Design note:** This glossary entry describes the intended design. The
+> implementation status of region quorum should be verified against the live
+> contract rather than assumed, as the current implementation status is tracked
+> separately in the repository issue tracker.
+
+- See [VALIDATOR_COLLUSION_THREAT_MODEL.md](VALIDATOR_COLLUSION_THREAT_MODEL.md)
+  for the threat-model rationale.
+- Configure the requirement with [`set_min_region_quorum`](CONTRACT_REFERENCE.md#set_min_region_quorum) and inspect it with [`get_min_region_quorum`](CONTRACT_REFERENCE.md#get_min_region_quorum) in [CONTRACT_REFERENCE.md — verification](CONTRACT_REFERENCE.md#verification).
+
+---
+
 ## Scout
 
 A talent-discovery professional registered on-chain with a Stellar wallet.

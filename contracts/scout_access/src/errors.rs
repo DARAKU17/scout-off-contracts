@@ -97,6 +97,12 @@ pub enum ScoutAccessError {
     /// archival grace period has fully elapsed (evicted, not merely archived)
     /// and is unrecoverable. (Codes 13 and 18 are reserved by tests.)
     SubscriptionRecordEvicted = 29,
+
+    // ── Function-scoped pausing ──
+    /// The `pay_to_contact` function is paused independently of the
+    /// whole-contract pause (issue #1056). Mirrors `verification`'s
+    /// `ApproveMilestonePaused`.
+    PayToContactPaused = 30,
 }
 
 impl AdminError for ScoutAccessError {

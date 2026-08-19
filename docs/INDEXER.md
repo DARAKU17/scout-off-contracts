@@ -7,23 +7,27 @@ into PostgreSQL for fast querying.  It runs as a separate process from the API.
 
 ## What it checks
 
-For each table, the reconciler walks the *authoritative on-chain enumeration*
-where one exists (a counter or a full-list getter) rather than only walking
-Postgres rows — that way a record the indexer never wrote at all is caught
-too, not only value-level drift on rows both sides already agree exist.
+| Table | Source | Description |
+|-------|--------|-------------|
+| `players` | `registration.get_player` / `filter_players` | Player profiles, vitals, IPFS hashes |
+| `scouts` | `registration.get_scout` | Scout profiles, region, **verified** flag |
+| `contact_records` | `scout_access.player_contacted` events | Contact audit trail |
+| `trial_offers` | `scout_access.log_trial_offer` events | Trial offer records |
+| `subscriptions` | `scout_access.scout_subscribed` events | Active subscriptions |
+| `fee_withdrawals` | `scout_access.fees_withdrawn` events | Fee withdrawal audit log |
+| `milestone_flags` | `verification.milestone_flagged` / `milestone_flag_cleared` events | Milestones pending re-review due to for-cause validator revocations |
+| `revocation_records` | `verification.validator_revoked_for_cause` / `revocation_cascade_complete` events | Revoked-validator severity + cascade status |
 
-| Table | Description | On-chain source | Compared fields |
-|-------|-------------|-----------------|------------------|
-| `players` | Player profiles, vitals, IPFS hashes | `registration.get_player_count` + `get_player`, `progress.get_level` | age, position, region, nationality, ipfs_hashes, level, registered_at, updated_at |
-| `scouts` | Scout profiles, region, **verified** flag | `registration.get_scout_count` + `get_scout` | wallet, region, registered_at, verified |
-| `validators` | Validator credentials and active status | DB-driven `verification.get_validator`, cross-checked against `get_validators` (active list) | credentials, active, registered_at, existence |
-| `milestones` | Milestone records | `verification.get_milestone_count` + `get_milestone`, per player | validator, description, evidence_hash, approved_at |
-| `milestone_disputes` | Dispute records | `verification.has_dispute` / `get_dispute`, tied to the milestone loop | reason, disputed_at, resolved, upheld |
-| `scout_subscriptions` | Active subscriptions | `scout_access.get_subscribers_by_tier` (all three tiers) + `get_subscription` | tier, subscribed_at, expires_at |
-| `trial_offers` | Trial offer records | `scout_access.get_trial_count` + `get_trial_offer`, per player | scout, details_hash, logged_at |
-| `contact_records` | Contact audit trail | `scout_access.player_contacted` events; `scout_access.get_player_contacts`, per player | existence only (the contract's `contacted_at` is a ledger timestamp; the DB column records indexer insert time, so it isn't a comparable field — see "Known gaps" below) |
-| `fee_withdrawals` | Fee withdrawal audit log | `scout_access.fees_withdrawn` events | off-chain only — no on-chain getter to diff against |
-| `indexer_cursor` | Indexer ledger position | Soroban RPC `getLatestLedger` (only if `--rpc-url` is passed) | reports ledger lag when it exceeds 100 ledgers; informational, not a hard mismatch |
+## Reconciliation
+
+Run `node scripts/reconcile-indexer.js` to compare on-chain state against the
+local database.  The script reports:
+
+- Players/scouts present on-chain but missing in the database
+- Players/scouts present in the database but missing on-chain
+- Field-level mismatches for `players.deactivated` and `scouts.verified`
+- Milestone flags: milestones that are flagged on-chain (`is_milestone_flagged` returns `true`) but absent from the `milestone_flags` table, and vice-versa
+- Revocation records: validators with a `RevocationRecord` on-chain but no matching row in `revocation_records`
 
 `player_level_history`, `validator_history`, `fee_config_history`, and
 `admin_transfers` are pure event logs with no single "current state" getter
@@ -33,7 +37,10 @@ explicitly (it prints them under "Skipped" rather than silently omitting
 them) and, for `player_level_history`, cross-checks the per-player row count
 against `progress.get_history_count` as a cheap drift signal.
 
-## Reconciliation
+- ~~`scouts.verified`~~ — column added in migration `001_initial_schema.sql`
+- ~~Player deactivation status~~ — column added in migration `001_initial_schema.sql`
+- ~~Milestone pending-re-review flags~~ — `milestone_flags` and `revocation_records` tables added in migration `005_milestone_flags.sql` (issue #1039)
+# Indexer Reconciliation
 
 `migrations/001_initial_schema.sql` defines the PostgreSQL schema the backend
 event indexer mirrors on-chain state into (see
