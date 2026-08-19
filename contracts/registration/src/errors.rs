@@ -67,3 +67,117 @@ impl AdminError for ScoutChainError {
         ScoutChainError::NotInitialized
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_ERROR_CODES: &[(&str, u32)] = &[
+        ("AlreadyInitialized", 1),
+        ("NotInitialized", 2),
+        ("ContractPaused", 9),
+        ("ValidatorNotAuthorized", 4),
+        ("Unauthorized", 10),
+        ("AlreadyRegistered", 8),
+        ("PlayerNotFound", 3),
+        ("ScoutNotFound", 12),
+        ("PlayerCapReached", 15),
+        ("InvalidProgressTransition", 5),
+        ("ScoutNotSubscribed", 6),
+        ("InsufficientFee", 7),
+        ("InvalidInput", 13),
+        ("Overflow", 11),
+        ("PendingAdminNotSet", 14),
+        ("RegistrationCooldown", 16),
+        ("PlayerRecordEvicted", 17),
+        ("ScoutRecordEvicted", 18),
+    ];
+
+    #[test]
+    fn scout_chain_error_discriminants_are_stable() {
+        assert_eq!(ScoutChainError::AlreadyInitialized as u32, 1);
+        assert_eq!(ScoutChainError::NotInitialized as u32, 2);
+        assert_eq!(ScoutChainError::PlayerNotFound as u32, 3);
+        assert_eq!(ScoutChainError::ValidatorNotAuthorized as u32, 4);
+        assert_eq!(ScoutChainError::InvalidProgressTransition as u32, 5);
+        assert_eq!(ScoutChainError::ScoutNotSubscribed as u32, 6);
+        assert_eq!(ScoutChainError::InsufficientFee as u32, 7);
+        assert_eq!(ScoutChainError::AlreadyRegistered as u32, 8);
+        assert_eq!(ScoutChainError::ContractPaused as u32, 9);
+        assert_eq!(ScoutChainError::Unauthorized as u32, 10);
+        assert_eq!(ScoutChainError::Overflow as u32, 11);
+        assert_eq!(ScoutChainError::ScoutNotFound as u32, 12);
+        assert_eq!(ScoutChainError::InvalidInput as u32, 13);
+        assert_eq!(ScoutChainError::PendingAdminNotSet as u32, 14);
+        assert_eq!(ScoutChainError::PlayerCapReached as u32, 15);
+        assert_eq!(ScoutChainError::RegistrationCooldown as u32, 16);
+        assert_eq!(ScoutChainError::PlayerRecordEvicted as u32, 17);
+        assert_eq!(ScoutChainError::ScoutRecordEvicted as u32, 18);
+    }
+
+    #[test]
+    fn scout_chain_error_source_matches_expected_unique_codes() {
+        let mut in_error_enum = false;
+        let mut expected_index = 0usize;
+        let mut seen_codes = [false; 256];
+
+        for raw_line in include_str!("errors.rs").lines() {
+            let line = raw_line.trim();
+
+            if line.starts_with("pub enum ScoutChainError") {
+                in_error_enum = true;
+                continue;
+            }
+
+            if !in_error_enum {
+                continue;
+            }
+
+            if line.starts_with('}') {
+                break;
+            }
+
+            if line.is_empty()
+                || line.starts_with("//")
+                || line.starts_with("///")
+                || !line.ends_with(',')
+            {
+                continue;
+            }
+
+            let (variant, discriminant) = line
+                .trim_end_matches(',')
+                .split_once('=')
+                .expect("ScoutChainError variants must use explicit discriminants");
+            let assigned_code = discriminant
+                .trim()
+                .parse::<u32>()
+                .expect("ScoutChainError discriminants must be u32 literals");
+            let (expected_variant, expected_code) = EXPECTED_ERROR_CODES
+                .get(expected_index)
+                .copied()
+                .expect("ScoutChainError has an unpinned variant");
+
+            assert_eq!(variant.trim(), expected_variant);
+            assert_eq!(assigned_code, expected_code);
+
+            let code_index = assigned_code as usize;
+            assert!(
+                code_index < seen_codes.len(),
+                "ScoutChainError code {assigned_code} exceeds the test range"
+            );
+            assert!(
+                !seen_codes[code_index],
+                "ScoutChainError code {assigned_code} is assigned more than once"
+            );
+            seen_codes[code_index] = true;
+            expected_index += 1;
+        }
+
+        assert_eq!(
+            expected_index,
+            EXPECTED_ERROR_CODES.len(),
+            "ScoutChainError is missing a pinned variant"
+        );
+    }
+}
