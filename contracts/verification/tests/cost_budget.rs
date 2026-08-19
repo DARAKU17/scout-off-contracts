@@ -14,15 +14,9 @@
 use scoutchain_verification::{VerificationContract, VerificationContractClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
-// These starting budgets are deliberately generous placeholders, not
-// measured baselines: this environment could not run `cargo test` to
-// capture real current costs when this file was first introduced (no Rust
-// toolchain available). Tighten each budget to roughly
-// current-cost-plus-headroom after the first real CI run reports actual
-// numbers — that tightening is a follow-up, not a blocker.
-const REGISTER_VALIDATOR_CPU_BUDGET: u64 = 15_000_000;
-const APPROVE_MILESTONE_CPU_BUDGET: u64 = 20_000_000;
-const GET_VALIDATOR_MILESTONES_PAGE_CPU_BUDGET: u64 = 15_000_000;
+const REGISTER_VALIDATOR_CPU_BUDGET: u64 = 313_801;
+const APPROVE_MILESTONE_CPU_BUDGET: u64 = 669_709;
+const GET_VALIDATOR_MILESTONES_PAGE_CPU_BUDGET: u64 = 131_913;
 
 // Distinct valid CIDv0 evidence hashes (exactly 46 chars, base58btc — no
 // 0/O/I/l). approve_milestone rejects duplicate evidence hashes globally.
