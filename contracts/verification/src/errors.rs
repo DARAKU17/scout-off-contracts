@@ -108,6 +108,16 @@ pub enum VerificationError {
     /// `restore_milestone_record` targeted a milestone entry that has been
     /// fully evicted and is unrecoverable.
     MilestoneRecordEvicted = 31,
+
+    // ── Revocation cascade re-review (issue #1039) ──
+    /// `rereview_milestone` called by a wallet that is not a currently-active
+    /// validator.  Only active (non-revoked) validators may clear a pending
+    /// re-review flag.
+    NotEligibleToReReview = 32,
+    /// `rereview_milestone` called on a milestone that is not currently flagged
+    /// as pending re-review.  The flag either never existed or was already
+    /// cleared by a prior `rereview_milestone` call.
+    MilestoneNotFlagged = 33,
 }
 
 impl AdminError for VerificationError {

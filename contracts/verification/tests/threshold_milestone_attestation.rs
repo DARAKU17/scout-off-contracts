@@ -16,7 +16,7 @@
 //! 6. CPU-instruction cost of the threshold-reaching call does not scale with vote count
 
 use scoutchain_verification::{
-    AttestationStatus, VerificationContract, VerificationContractClient, VerificationError,
+    AttestationStatus, RevocationSeverity, VerificationContract, VerificationContractClient, VerificationError,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -197,7 +197,7 @@ fn revoke_validator_retroactively_invalidates_a_pending_vote() {
     // v1 turns out to be compromised — admin revokes for cause. Re-arm
     // blanket auth since the previous call narrowed authorization to v1.
     env.mock_all_auths();
-    client.revoke_validator(&v1, &Some(String::from_str(&env, "Key compromise suspected")));
+    client.revoke_validator(&v1, &RevocationSeverity::ForCause, &Some(String::from_str(&env, "Key compromise suspected")));
 
     let claim = client
         .get_pending_claim(&player_id, &evidence)

@@ -283,3 +283,75 @@ pub fn milestone_record_restored(env: &Env, admin: &Address, player_id: u64, ind
         (player_id, index),
     );
 }
+
+/// Emitted for each milestone flagged during a for-cause revocation cascade
+/// (issue #1039).
+///
+/// topics: (event_name, validator)  data: (player_id, milestone_index)
+pub fn milestone_flagged_for_rereview(
+    env: &Env,
+    validator: &Address,
+    player_id: u64,
+    milestone_index: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "milestone_flagged"),
+            validator.clone(),
+        ),
+        (player_id, milestone_index),
+    );
+}
+
+/// Emitted when an active validator clears a pending re-review flag via
+/// `rereview_milestone` (issue #1039).
+///
+/// topics: (event_name, reviewer)  data: (player_id, milestone_index)
+pub fn milestone_flag_cleared(
+    env: &Env,
+    reviewer: &Address,
+    player_id: u64,
+    milestone_index: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "milestone_flag_cleared"),
+            reviewer.clone(),
+        ),
+        (player_id, milestone_index),
+    );
+}
+
+/// Emitted when a for-cause cascade sweep completes (all milestones flagged)
+/// or when `continue_revocation_cascade` exhausts the remaining milestones
+/// in a single call.
+///
+/// topics: (event_name, validator)  data: total_flagged_so_far
+pub fn revocation_cascade_complete(env: &Env, validator: &Address, total_flagged: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, "revocation_cascade_complete"),
+            validator.clone(),
+        ),
+        total_flagged,
+    );
+}
+
+/// Emitted when a for-cause cascade sweep call reaches its per-call limit and
+/// a continuation cursor is stored so the sweep can be resumed.
+///
+/// topics: (event_name, validator)  data: (next_cursor, flagged_this_call)
+pub fn revocation_cascade_continued(
+    env: &Env,
+    validator: &Address,
+    next_cursor: u32,
+    flagged_this_call: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "revocation_cascade_continued"),
+            validator.clone(),
+        ),
+        (next_cursor, flagged_this_call),
+    );
+}
