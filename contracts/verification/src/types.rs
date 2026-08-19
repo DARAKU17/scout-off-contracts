@@ -125,6 +125,43 @@ pub struct MilestoneDispute {
     pub resolved: bool,
     /// Whether the dispute was upheld when resolved.
     pub upheld: bool,
+    /// Impact score supplied when the dispute was filed.
+    pub impact_score: u32,
+    /// Whether this dispute requires a jury vote (impact_score >= jury threshold at filing time).
+    pub jury_required: bool,
+    /// Minimum votes required for a jury outcome (snapshotted at filing time).
+    pub quorum: u32,
+    /// Unix timestamp when the voting window closes (snapshotted at filing time).
+    pub voting_deadline: u64,
+    /// Number of votes cast in favour of upholding the dispute.
+    pub votes_for: u32,
+    /// Number of votes cast against upholding the dispute.
+    pub votes_against: u32,
+}
+
+/// Admin-configurable jury parameters for high-impact milestone disputes.
+/// Defaults: impact_threshold = 100, quorum = 3, voting_window_secs = 604800 (7 days).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct JuryConfig {
+    /// Minimum impact score for a dispute to require jury resolution.
+    pub impact_threshold: u32,
+    /// Minimum number of distinct validator votes required for a jury outcome.
+    pub quorum: u32,
+    /// Duration in seconds from filing during which validators may vote.
+    pub voting_window_secs: u64,
+}
+
+/// A single validator vote on a jury-required dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeVote {
+    /// Validator wallet that cast this vote.
+    pub validator: Address,
+    /// Whether the validator voted to uphold the dispute.
+    pub for_upheld: bool,
+    /// Unix timestamp when the vote was cast.
+    pub voted_at: u64,
 }
 
 /// A lightweight reference to a milestone (player + index).
@@ -333,6 +370,14 @@ pub enum DataKey {
     /// Re-wiring epoch for `DataKey::RegistrationContract`, bumped by every
     /// `set_registration_contract` / `update_registration_contract` call.
     RegistrationContractEpoch,
+
+    // ── Dispute jury system (issue #1036) ──
+    /// Instance-level jury configuration (impact_threshold, quorum, voting_window_secs).
+    JuryConfig,
+    /// Individual validator vote on a jury dispute, keyed by (player_id, milestone_index, validator).
+    DisputeVote(u64, u32, Address),
+    /// Total vote count for a jury dispute, keyed by (player_id, milestone_index).
+    DisputeVoteCount(u64, u32),
 }
 
 /// Snapshot of both cross-contract peer address pointers held by the

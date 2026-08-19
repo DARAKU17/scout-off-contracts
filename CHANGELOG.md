@@ -28,6 +28,16 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+---
+
+- Version: `v0.4.0`
+- Release date: `2026-08-19`
+- Contracts affected: `verification`
+- Summary: Implemented the dispute jury escalation system (issue #1036). `dispute_milestone` gains a required `impact_score: u32` parameter; disputes at or above the configurable `impact_threshold` (default 100) are jury-routed rather than admin-resolved. Four new entrypoints: `set_jury_config` (admin-only, sets threshold/quorum/voting_window_secs), `get_jury_config`, `cast_dispute_vote` (validator-auth, enforces 4 eligibility rules including conflict-of-interest check), and `tally_dispute` (permissionless, O(1), supports early-close and deadline paths with tie-break → not upheld). `resolve_dispute` returns `DisputeRequiresJury` (32) for jury-routed disputes. `MilestoneDispute` struct gains 6 fields (impact_score, jury_required, quorum, voting_deadline, votes_for, votes_against); 7 new error codes appended (32–38); 2 new events (dispute_vote_cast, dispute_tallied). Jury config is snapshotted at filing — later `set_jury_config` calls cannot alter in-progress disputes. SQL migration 005 adds new columns to `milestone_disputes` and a new `dispute_votes` table.
+- Classification: `Breaking (MAJOR)`
+
+> **Migration guide:** `dispute_milestone` now requires an `impact_score: u32` argument. All existing callers must be updated to pass `0` (routes to admin path, preserving existing behavior) or an appropriate score. The `MilestoneDispute` struct returned by `get_dispute` gains 6 new fields; deserializers must handle unknown/new fields gracefully. Run `migrations/005_dispute_jury.sql` against the indexer database before deploying the new contract WASM. See `docs/VERSIONING.md` for the full upgrade checklist.
+
 - Version: `v0.3.0`
 - Release date: `2026-08-18`
 - Contracts affected: `progress`, `registration`, `scout_access`, `verification`

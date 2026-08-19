@@ -109,7 +109,8 @@ too, not only value-level drift on rows both sides already agree exist.
 | `scouts` | `registration.get_scout_count` + `get_scout` | wallet, region, registered_at, verified |
 | `validators` | DB-driven `verification.get_validator`, cross-checked against `get_validators` (active list) | credentials, active, registered_at, existence |
 | `milestones` | `verification.get_milestone_count` + `get_milestone`, per player | validator, description, evidence_hash, approved_at |
-| `milestone_disputes` | `verification.has_dispute` / `get_dispute`, tied to the milestone loop | reason, disputed_at, resolved, upheld |
+| `milestone_disputes` | `verification.has_dispute` / `get_dispute`, tied to the milestone loop | reason, disputed_at, resolved, upheld, impact_score, jury_required, quorum, voting_deadline, votes_for, votes_against |
+| `dispute_votes` | `verification.get_dispute` (aggregate counters), per jury dispute | vote count cross-check: DB row count vs. `votes_for + votes_against` on-chain |
 | `scout_subscriptions` | `scout_access.get_subscribers_by_tier` (all three tiers) + `get_subscription` | tier, subscribed_at, expires_at |
 | `trial_offers` | `scout_access.get_trial_count` + `get_trial_offer`, per player | scout, details_hash, logged_at |
 | `contact_records` | `scout_access.get_player_contacts`, per player | existence only (the contract's `contacted_at` is a ledger timestamp; the DB column records indexer insert time, so it isn't a comparable field — see "Known gaps" below) |

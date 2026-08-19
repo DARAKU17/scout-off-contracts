@@ -109,3 +109,54 @@ fn cost_get_validator_milestones_page() {
         GET_VALIDATOR_MILESTONES_PAGE_CPU_BUDGET,
     );
 }
+
+// Distinct valid CIDv0 evidence hashes for dispute cost test
+const CID_4: &str = "QmVx9E6j1TGHM6ZiNXb5DLPi39H5wKEMBdEPBDrpF4LTZM";
+
+/// Budget for `tally_dispute` — represents a jury dispute with quorum=3
+/// votes already cast. The operation is O(1) in vote count (it reads only
+/// the pre-accumulated votes_for / votes_against counters on the dispute
+/// record, not the individual DisputeVote entries), bounded by the log-n
+/// storage access overhead of removing the dispute from the open-dispute index.
+const TALLY_DISPUTE_CPU_BUDGET: u64 = 20_000_000;
+
+#[test]
+fn cost_tally_dispute() {
+    let (env, client) = setup();
+
+    // Set quorum=3 to reflect a realistic pre-vote state
+    client.set_jury_config(&100u32, &3u32, &604_800u64);
+
+    // Register approver and voters
+    let approver = Address::generate(&env);
+    client.register_validator(&approver, &String::from_str(&env, "UEFA-A-License-2026"), &Vec::new(&env));
+    client.approve_milestone(
+        &approver,
+        &1u64,
+        &String::from_str(&env, "scored a hat-trick"),
+        &String::from_str(&env, CID_4),
+        &None,
+    );
+
+    // File a jury-required dispute
+    let player = Address::generate(&env);
+    client.dispute_milestone(
+        &player,
+        &1u64,
+        &1u32,
+        &String::from_str(&env, "milestone approved in error"),
+        &100u32,
+    );
+
+    // Cast 3 votes (quorum reached, clear majority for)
+    for i in 0..3u32 {
+        let creds = format!("Voter-Cred-{i:04}-UEFA-B");
+        let voter = Address::generate(&env);
+        client.register_validator(&voter, &String::from_str(&env, &creds), &Vec::new(&env));
+        client.cast_dispute_vote(&voter, &1u64, &1u32, &true);
+    }
+
+    env.cost_estimate().budget().reset_default();
+    client.tally_dispute(&1u64, &1u32);
+    assert_cpu_budget(&env, "tally_dispute", TALLY_DISPUTE_CPU_BUDGET);
+}

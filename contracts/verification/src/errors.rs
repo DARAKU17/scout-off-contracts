@@ -108,6 +108,26 @@ pub enum VerificationError {
     /// `restore_milestone_record` targeted a milestone entry that has been
     /// fully evicted and is unrecoverable.
     MilestoneRecordEvicted = 31,
+
+    // ── Dispute jury system (issue #1036) ──
+    /// Admin tried to resolve a jury-required dispute via `resolve_dispute`.
+    /// Jury disputes must be finalized via `tally_dispute`.
+    DisputeRequiresJury = 32,
+    /// Validator tried to vote after the dispute's voting window has closed.
+    VotingWindowClosed = 33,
+    /// Validator has already cast a vote on this dispute.
+    AlreadyVoted = 34,
+    /// Validator is the original approver of the disputed milestone and
+    /// cannot vote due to conflict of interest.
+    ConflictOfInterest = 35,
+    /// Operation requires the dispute to be jury-routed, but it is not.
+    NotJuryDispute = 36,
+    /// `tally_dispute` called while the voting window is still open and
+    /// an early-close condition (quorum reached with a clear majority) has not been met.
+    VotingWindowOpen = 37,
+    /// `tally_dispute` called but quorum has not been reached and the
+    /// voting deadline has not yet passed.
+    QuorumNotReached = 38,
 }
 
 impl AdminError for VerificationError {

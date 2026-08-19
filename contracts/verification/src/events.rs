@@ -18,6 +18,8 @@ pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
 pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
 pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
 pub const WIRING_UPDATED: &str = "wiring_updated";
+pub const DISPUTE_VOTE_CAST: &str = "dispute_vote_cast";
+pub const DISPUTE_TALLIED: &str = "dispute_tallied";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -281,5 +283,44 @@ pub fn milestone_record_restored(env: &Env, admin: &Address, player_id: u64, ind
     env.events().publish(
         (Symbol::new(env, "milestone_record_restored"), admin.clone()),
         (player_id, index),
+    );
+}
+
+/// Emitted when a validator casts a jury vote on a high-impact dispute.
+/// topics: (event_name, player_id, milestone_index)  data: (validator, for_upheld)
+pub fn dispute_vote_cast(
+    env: &Env,
+    player_id: u64,
+    milestone_index: u32,
+    validator: &Address,
+    for_upheld: bool,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, DISPUTE_VOTE_CAST),
+            player_id,
+            milestone_index,
+        ),
+        (validator.clone(), for_upheld),
+    );
+}
+
+/// Emitted when a jury dispute is finalized via `tally_dispute`.
+/// topics: (event_name, player_id, milestone_index)  data: (upheld, votes_for, votes_against)
+pub fn dispute_tallied(
+    env: &Env,
+    player_id: u64,
+    milestone_index: u32,
+    upheld: bool,
+    votes_for: u32,
+    votes_against: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, DISPUTE_TALLIED),
+            player_id,
+            milestone_index,
+        ),
+        (upheld, votes_for, votes_against),
     );
 }

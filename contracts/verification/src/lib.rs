@@ -17,8 +17,8 @@ mod types;
 
 pub use errors::VerificationError;
 pub use types::{
-    AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
-    Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
+    AttestationStatus, ContractHealth, DataKey, DisputeVote, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
+    JuryConfig, Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
     PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
     VerificationWiringState,
 };
@@ -2168,14 +2168,19 @@ impl VerificationContract {
 
     /// Allow a player to dispute a milestone they believe was wrongly attributed.
     /// Only the player associated with `player_id` can submit a dispute.
+    /// `impact_score` routes the dispute: if it meets or exceeds the jury threshold
+    /// (from `JuryConfig`), the dispute requires a validator jury vote. Otherwise
+    /// it follows the existing admin-only resolution path.
+    /// The jury config (quorum, voting_deadline) is snapshotted at filing time —
+    /// later `set_jury_config` calls cannot alter an in-progress dispute's rules.
     /// Stores the dispute with reason and timestamp, and emits a `milestone_disputed` event.
-    /// Admin can later query disputes and resolve them.
     pub fn dispute_milestone(
         env: Env,
         player_wallet: Address,
         player_id: u64,
         milestone_index: u32,
         reason: String,
+        impact_score: u32,
     ) -> Result<(), VerificationError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
@@ -2218,14 +2223,36 @@ impl VerificationContract {
             return Err(VerificationError::InvalidInput);
         }
 
+        // Snapshot the jury configuration at filing time so later admin
+        // changes to JuryConfig cannot alter this dispute's rules mid-vote.
+        let jury_config = Self::get_jury_config_internal(&env);
+        let jury_required = impact_score >= jury_config.impact_threshold;
+        let now = env.ledger().timestamp();
+        let voting_deadline = if jury_required {
+            safe_add_u64(now, jury_config.voting_window_secs)
+                .map_err(|_| VerificationError::Overflow)?
+        } else {
+            0u64
+        };
+
         let dispute = MilestoneDispute {
             player_id,
             milestone_index,
             reason: reason.clone(),
-            disputed_at: env.ledger().timestamp(),
+            disputed_at: now,
             resolved: false,
             upheld: false,
+            impact_score,
+            jury_required,
+            quorum: jury_config.quorum,
+            voting_deadline,
+            votes_for: 0,
+            votes_against: 0,
         };
+
+        // Keep the approver address from the milestone for conflict-of-interest checks.
+        // This is read during cast_dispute_vote via the Milestone storage record directly.
+        let _ = milestone; // milestone fetched above for validation; approver accessible via Milestone storage
 
         env.storage().persistent().set(&dispute_key, &dispute);
 
@@ -2284,6 +2311,10 @@ impl VerificationContract {
     /// This marks the dispute as resolved and records whether the admin upheld
     /// it. It does not roll back player progress; that corrective workflow is
     /// intentionally handled separately.
+    ///
+    /// Returns `DisputeRequiresJury` for disputes that were routed to the jury
+    /// path at filing time (`jury_required == true`) — those must be finalized
+    /// via `tally_dispute`.
     pub fn resolve_dispute(
         env: Env,
         player_id: u64,
@@ -2304,6 +2335,11 @@ impl VerificationContract {
 
         if dispute.resolved {
             return Err(VerificationError::DisputeAlreadyResolved);
+        }
+
+        // Jury-required disputes must be finalized via tally_dispute, not by admin.
+        if dispute.jury_required {
+            return Err(VerificationError::DisputeRequiresJury);
         }
 
         dispute.resolved = true;
@@ -2347,6 +2383,302 @@ impl VerificationContract {
         }
 
         events::dispute_resolved(&env, &admin, player_id, milestone_index, upheld);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Jury escalation system (issue #1036)
+    // -------------------------------------------------------------------------
+
+    /// Internal helper: read JuryConfig from instance storage, returning
+    /// defaults (threshold=100, quorum=3, voting_window_secs=604800) if unset.
+    fn get_jury_config_internal(env: &Env) -> JuryConfig {
+        env.storage()
+            .instance()
+            .get::<DataKey, JuryConfig>(&DataKey::JuryConfig)
+            .unwrap_or(JuryConfig {
+                impact_threshold: 100,
+                quorum: 3,
+                voting_window_secs: 604800,
+            })
+    }
+
+    /// Configure the jury escalation parameters (admin only).
+    ///
+    /// - `impact_threshold`: disputes with `impact_score >= threshold` are jury-routed.
+    ///   Default: 100.
+    /// - `quorum`: minimum distinct validator votes required for a jury outcome.
+    ///   Default: 3.
+    /// - `voting_window_secs`: seconds after filing before the voting window closes.
+    ///   Default: 604800 (7 days).
+    ///
+    /// This only affects disputes filed *after* this call — in-flight disputes
+    /// snapshot the parameters at filing time.
+    pub fn set_jury_config(
+        env: Env,
+        impact_threshold: u32,
+        quorum: u32,
+        voting_window_secs: u64,
+    ) -> Result<(), VerificationError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        let config = JuryConfig {
+            impact_threshold,
+            quorum,
+            voting_window_secs,
+        };
+        env.storage().instance().set(&DataKey::JuryConfig, &config);
+        Ok(())
+    }
+
+    /// Return the current `JuryConfig` (impact_threshold, quorum, voting_window_secs).
+    /// If never set by admin, returns the defaults (100 / 3 / 604800).
+    pub fn get_jury_config(env: Env) -> JuryConfig {
+        Self::get_jury_config_internal(&env)
+    }
+
+    /// Cast a validator vote on a jury-required milestone dispute.
+    ///
+    /// Eligibility rules (all four must hold):
+    /// 1. Validator is registered and active.
+    /// 2. Validator is not the original approver of the disputed milestone
+    ///    (conflict of interest).
+    /// 3. Validator has not already voted on this dispute.
+    /// 4. Dispute is jury-required, unresolved, and the voting window is still open.
+    ///
+    /// Emits `dispute_vote_cast` on success.
+    pub fn cast_dispute_vote(
+        env: Env,
+        validator: Address,
+        player_id: u64,
+        milestone_index: u32,
+        for_upheld: bool,
+    ) -> Result<(), VerificationError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        validator.require_auth();
+
+        // Rule 1: validator must be registered and active.
+        let val_record: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(validator.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+        if !val_record.active {
+            return Err(VerificationError::ValidatorInactive);
+        }
+
+        // Load the dispute.
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::MilestoneNotFound)?;
+
+        // Rule 4a: must be jury-required.
+        if !dispute.jury_required {
+            return Err(VerificationError::NotJuryDispute);
+        }
+
+        // Rule 4b: must be unresolved.
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+
+        // Rule 4c: voting window must still be open.
+        let now = env.ledger().timestamp();
+        if now >= dispute.voting_deadline {
+            return Err(VerificationError::VotingWindowClosed);
+        }
+
+        // Rule 2: validator must not be the original milestone approver.
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+            .ok_or(VerificationError::MilestoneNotFound)?;
+        if milestone.validator == validator {
+            return Err(VerificationError::ConflictOfInterest);
+        }
+
+        // Rule 3: validator must not have already voted.
+        let vote_key = DataKey::DisputeVote(player_id, milestone_index, validator.clone());
+        if env.storage().persistent().has(&vote_key) {
+            return Err(VerificationError::AlreadyVoted);
+        }
+
+        // Record the individual vote for audit trail.
+        let vote = DisputeVote {
+            validator: validator.clone(),
+            for_upheld,
+            voted_at: now,
+        };
+        env.storage().persistent().set(&vote_key, &vote);
+        env.storage().persistent().extend_ttl(
+            &vote_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        // Update running vote tallies on the dispute record.
+        if for_upheld {
+            dispute.votes_for = safe_add_u32(dispute.votes_for, 1)
+                .map_err(|_| VerificationError::Overflow)?;
+        } else {
+            dispute.votes_against = safe_add_u32(dispute.votes_against, 1)
+                .map_err(|_| VerificationError::Overflow)?;
+        }
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        // Update the per-dispute vote count index.
+        let count_key = DataKey::DisputeVoteCount(player_id, milestone_index);
+        let vote_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+        let new_count = safe_add_u32(vote_count, 1)
+            .map_err(|_| VerificationError::Overflow)?;
+        env.storage().persistent().set(&count_key, &new_count);
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        events::dispute_vote_cast(&env, player_id, milestone_index, &validator, for_upheld);
+        Ok(())
+    }
+
+    /// Finalize a jury-required milestone dispute.
+    ///
+    /// `tally_dispute` succeeds when the dispute is jury-required, unresolved,
+    /// and either:
+    /// - **Early close**: total votes >= quorum AND votes_for ≠ votes_against (clear majority), or
+    /// - **Deadline passed**: current time >= voting_deadline (majority rules).
+    ///   If below quorum at deadline, resolves upheld=false.
+    ///
+    /// Tie-break: if votes_for == votes_against, dispute is rejected (upheld=false).
+    ///
+    /// This function is callable by anyone — there is no admin requirement.
+    /// Emits `dispute_tallied` and removes the dispute from the open index.
+    pub fn tally_dispute(
+        env: Env,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+
+        let dispute_key = DataKey::MilestoneDispute(player_id, milestone_index);
+        let mut dispute: MilestoneDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(VerificationError::MilestoneNotFound)?;
+
+        // Must be jury-required.
+        if !dispute.jury_required {
+            return Err(VerificationError::NotJuryDispute);
+        }
+
+        // Must be unresolved.
+        if dispute.resolved {
+            return Err(VerificationError::DisputeAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+        let total_votes = safe_add_u32(dispute.votes_for, dispute.votes_against)
+            .map_err(|_| VerificationError::Overflow)?;
+        let deadline_passed = now >= dispute.voting_deadline;
+
+        // Determine whether tally is allowed right now.
+        let early_close = total_votes >= dispute.quorum && dispute.votes_for != dispute.votes_against;
+
+        if deadline_passed {
+            // Deadline path: tally regardless of vote count.
+            // If below quorum, resolve not-upheld.
+        } else if early_close {
+            // Clear majority reached quorum — finalize early.
+        } else if total_votes >= dispute.quorum && dispute.votes_for == dispute.votes_against {
+            // Tied at quorum — can only resolve after deadline.
+            return Err(VerificationError::VotingWindowOpen);
+        } else {
+            // Window still open and quorum not yet reached.
+            return Err(VerificationError::QuorumNotReached);
+        }
+
+        // Determine outcome.
+        let upheld = if total_votes < dispute.quorum {
+            // Below quorum at deadline: reject.
+            false
+        } else if dispute.votes_for > dispute.votes_against {
+            true
+        } else {
+            // Includes tie case (votes_for == votes_against) → reject.
+            false
+        };
+
+        dispute.resolved = true;
+        dispute.upheld = upheld;
+        env.storage().persistent().set(&dispute_key, &dispute);
+
+        // Decrement active disputes counter.
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveDisputesCount)
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::ActiveDisputesCount,
+            &safe_sub_u32(count, 1).map_err(|_| VerificationError::Overflow)?,
+        );
+
+        // Remove from the global open-dispute index.
+        let open_index_key = DataKey::OpenDisputeIndex;
+        let open_index: Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&open_index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_index: Vec<(u64, u32)> = Vec::new(&env);
+        for i in 0..open_index.len() {
+            let entry = open_index.get(i).unwrap();
+            if entry != (player_id, milestone_index) {
+                new_index.push_back(entry);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&open_index_key, &new_index);
+        if !new_index.is_empty() {
+            env.storage().persistent().extend_ttl(
+                &open_index_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+        }
+
+        events::dispute_tallied(
+            &env,
+            player_id,
+            milestone_index,
+            upheld,
+            dispute.votes_for,
+            dispute.votes_against,
+        );
         Ok(())
     }
 

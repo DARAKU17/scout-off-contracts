@@ -1860,26 +1860,30 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `dispute_milestone(player_wallet: Address, player_id: u64, milestone_index: u32, reason: String) -> Result<(), VerificationError>`
+#### `dispute_milestone(player_wallet: Address, player_id: u64, milestone_index: u32, reason: String, impact_score: u32) -> Result<(), VerificationError>`
 
 Allow a player to dispute a milestone they believe was wrongly attributed.
-Only the player associated with `player_id` may submit a dispute. A new dispute
-is stored as `resolved: false` and `upheld: false`. Only one dispute record may
-exist per `(player_id, milestone_index)` pair. Emits a `milestone_disputed` event.
+Only the player associated with `player_id` may submit a dispute. The
+`impact_score` parameter routes the dispute: if `impact_score >= jury_config.impact_threshold`
+the dispute is jury-required and must be finalized via `tally_dispute`; otherwise
+the existing admin-only `resolve_dispute` path applies.
+
+The current `JuryConfig` (quorum and voting window) is **snapshotted** at
+filing time — later calls to `set_jury_config` cannot alter an in-progress dispute's
+rules. A new dispute is stored as `resolved: false`, `upheld: false`, with
+`votes_for: 0` and `votes_against: 0`. Only one dispute record may exist per
+`(player_id, milestone_index)` pair. Emits a `milestone_disputed` event.
 
 Authorization works in two steps:
 1. `player_wallet.require_auth()` proves the caller controls the claimed wallet.
 2. A cross-contract call to the **registration contract** (`get_player(player_id)`)
    verifies that `profile.wallet == player_wallet`, binding the wallet to the
-   player ID. This prevents wallet A from disputing milestones for player B.
-
-The registration contract address must be set via `set_registration_contract`
-before any disputes can be filed.
+   player ID.
 
 | | |
 |---|---|
 | **Auth** | `player_wallet` must sign, and must match the wallet on record for `player_id` in the registration contract |
-| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) · `RegistrationCallFailed` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) · `RegistrationCallFailed` · `Overflow` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -1887,7 +1891,114 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   --player_wallet $PLAYER_ADDRESS \
   --player_id 1 \
   --milestone_index 1 \
-  --reason '"Milestone not actually completed"'
+  --reason '"Milestone not actually completed"' \
+  --impact_score 120
+```
+
+---
+
+#### `set_jury_config(impact_threshold: u32, quorum: u32, voting_window_secs: u64) -> Result<(), VerificationError>`
+
+Admin-only. Configure the jury escalation parameters. Changes only affect
+disputes filed **after** this call — in-flight disputes keep their snapshotted
+values.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `impact_threshold` | 100 | Disputes with `impact_score >= threshold` are jury-routed |
+| `quorum` | 3 | Minimum distinct validator votes required for a jury outcome |
+| `voting_window_secs` | 604800 | Seconds after filing when the voting window closes (7 days) |
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_jury_config \
+  --impact_threshold 100 \
+  --quorum 3 \
+  --voting_window_secs 604800
+```
+
+---
+
+#### `get_jury_config() -> JuryConfig`
+
+Return the current `JuryConfig` (`impact_threshold`, `quorum`, `voting_window_secs`).
+Returns defaults (100 / 3 / 604800) if `set_jury_config` has never been called.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_jury_config
+```
+
+---
+
+#### `cast_dispute_vote(validator: Address, player_id: u64, milestone_index: u32, for_upheld: bool) -> Result<(), VerificationError>`
+
+Cast a validator vote on a jury-required milestone dispute. All four eligibility
+rules must hold:
+
+1. Wallet is a registered **active** validator.
+2. Validator is **not** the original approver of the disputed milestone (conflict of interest).
+3. Validator has **not** already voted on this dispute.
+4. Dispute is jury-required, unresolved, and the voting window is still open.
+
+Vote tallies (`votes_for` / `votes_against`) are updated atomically on the
+dispute record. An individual `DisputeVote` record (with `voted_at` timestamp)
+is written for audit trail. Emits `dispute_vote_cast`.
+
+| | |
+|---|---|
+| **Auth** | `validator` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `ValidatorNotFound` · `ValidatorInactive` · `MilestoneNotFound` · `NotJuryDispute` · `DisputeAlreadyResolved` · `VotingWindowClosed` · `ConflictOfInterest` · `AlreadyVoted` · `Overflow` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- cast_dispute_vote \
+  --validator $VALIDATOR_ADDRESS \
+  --player_id 1 \
+  --milestone_index 1 \
+  --for_upheld true
+```
+
+---
+
+#### `tally_dispute(player_id: u64, milestone_index: u32) -> Result<(), VerificationError>`
+
+Finalize a jury-required milestone dispute. Callable by anyone (no admin required).
+Succeeds when the dispute is jury-required, unresolved, and either:
+
+- **Early close**: total votes ≥ quorum **and** `votes_for ≠ votes_against` (clear majority), or
+- **Deadline passed**: current ledger timestamp ≥ `voting_deadline`.
+
+**Outcome rules:**
+
+| Condition | `upheld` |
+|-----------|---------|
+| Below quorum at deadline | `false` |
+| `votes_for > votes_against` | `true` |
+| `votes_against > votes_for` | `false` |
+| Tie (`votes_for == votes_against`) | `false` (tie-break: reject) |
+
+Marks the dispute resolved, decrements the active-disputes counter, removes
+the dispute from the open-dispute index, and emits `dispute_tallied`.
+Does **not** roll back player progress (same semantics as `resolve_dispute`).
+
+| | |
+|---|---|
+| **Auth** | None (callable by anyone) |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `NotJuryDispute` · `DisputeAlreadyResolved` · `VotingWindowOpen` (tied at quorum, window open) · `QuorumNotReached` (below quorum, window open) · `Overflow` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- tally_dispute --player_id 1 --milestone_index 1
 ```
 
 ---
@@ -1900,10 +2011,13 @@ decrements `get_active_disputes_count()`, and emits a `dispute_resolved` event.
 This function deliberately does not roll back player progress when `upheld` is
 true; that corrective workflow is tracked separately.
 
+**Returns `DisputeRequiresJury`** for disputes with `jury_required == true` —
+those must be finalized via `tally_dispute`, not by admin.
+
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` · `MilestoneNotFound` (no dispute recorded) · `DisputeAlreadyResolved` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` · `MilestoneNotFound` (no dispute recorded) · `DisputeAlreadyResolved` · `DisputeRequiresJury` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -1916,7 +2030,9 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 Read a milestone dispute by `(player_id, milestone_index)`. `MilestoneDispute`
 has `player_id: u64`, `milestone_index: u32`, `reason: String`,
-`disputed_at: u64`, `resolved: bool`, and `upheld: bool`.
+`disputed_at: u64`, `resolved: bool`, `upheld: bool`, `impact_score: u32`,
+`jury_required: bool`, `quorum: u32`, `voting_deadline: u64`,
+`votes_for: u32`, and `votes_against: u32`.
 
 | | |
 |---|---|

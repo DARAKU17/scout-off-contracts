@@ -34,6 +34,7 @@ category into one place so a migration operator has a single checklist.
 | 11 | **Fee configuration history** | `scout_access` | ⚠️ Partially replayable | The last 5 `FeeConfig` snapshots are on-chain via `get_fee_config_history`. The current config is re-applied by `initialize.sh` on the new contract; the bounded history is not replayed. | Open — cosmetic gap only |
 | 12 | **Player deactivation state** | `registration` | ❌ Not tracked in indexer | `registration.deactivate_player` / `reactivate_player` have no `active` column in the PostgreSQL `players` table. A deactivated player appears indistinguishable from an active one in the off-chain index. | Open — indexer schema gap, see [INDEXER.md](INDEXER.md#known-gaps-between-the-contracts-and-this-schema) |
 | 13 | **Auto-renewal flags** | `scout_access` | ⚠️ Partially replayable | `get_auto_renew` exposes per-scout opt-in state, but there is no admin-seed path. Scouts would need to re-opt-in after a contract migration. | Open — no tracking issue yet |
+| 14 | **In-flight jury votes** | `verification` | ❌ Not replayable | `cast_dispute_vote` requires validator auth; there is no admin-seed path for individual vote records (`DisputeVote` storage). An active jury dispute with votes accumulated on the old contract has no vote-replay path on the new contract after migration. Operators must let active jury votes expire (wait for `voting_deadline` and call `tally_dispute` on the old contract) or acknowledge the loss before migrating. This mirrors the existing "in-flight milestone disputes" gap (row 7). | Open — issue #1036 |
 
 ---
 
@@ -55,7 +56,14 @@ Before running `scripts/migrate-contract.sh`, verify the following:
    old contract and confirm all open disputes are resolved or explicitly
    acknowledged as lost. There is currently no replay path (row 7).
 
-2. **Trial escrows** — run `scout_access.get_trial_count` per active player and
+2. **In-flight jury votes** — for any jury-required dispute still in its voting
+   window, either wait for the deadline and call `tally_dispute` on the old
+   contract before migrating, or acknowledge that accumulated votes will be lost
+   (row 14). The dispute record itself (with its snapshotted quorum and deadline)
+   carries over via the normal dispute replay once an admin-seed path is added,
+   but individual vote records do not.
+
+3. **Trial escrows** — run `scout_access.get_trial_count` per active player and
    check for unconfirmed, non-expired `TrialEscrow` entries. Consider calling
    `expire_trial_offers` to clean up stale escrows before migrating (row 10).
 
