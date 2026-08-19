@@ -17,9 +17,9 @@ mod types;
 
 pub use errors::VerificationError;
 pub use types::{
-    AttestationStatus, ContractHealth, DataKey, DiversityConfig, GlobalMilestoneEntry,
-    GlobalMilestoneIndexPage, Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef,
-    MilestoneWithValidatorStatus, PendingMilestoneClaim, PendingVoteRef, Validator,
+    AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
+    Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
+    PendingMilestoneClaim, PendingVoteRef, RevocationRecord, RevocationSeverity, Validator,
     ValidatorActivityReport, ValidatorStatus, VerificationWiringState,
 };
 
@@ -46,6 +46,16 @@ const MAX_VALIDATORS: u32 = 100;
 
 /// Maximum milestones a single validator may approve for one player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 5;
+
+/// Maximum number of milestones flagged per call in a for-cause revocation
+/// cascade sweep.  Keeps per-call CPU cost proportional to this limit rather
+/// than to the validator's total historical approval count.  A validator with
+/// more than this many prior approvals requires one or more follow-up calls to
+/// `continue_revocation_cascade` to complete the sweep.
+///
+/// 50 matches the pagination cap used throughout the codebase (e.g.
+/// `get_validator_milestones_page`, `expire_trial_offers`).
+const CASCADE_LIMIT: u32 = 50;
 
 // Core identity TTL: 30 days at ~5s/ledger ≈ 518_400 ledgers.
 // Milestone records, validator registrations, and evidence uniqueness data are
@@ -611,10 +621,22 @@ impl VerificationContract {
     }
 
     /// Deactivate a validator (admin only).
-    /// Optionally accepts a reason (max 128 bytes) that is included in the event.
+    ///
+    /// Accepts an explicit `severity` parameter:
+    /// - `RevocationSeverity::Routine` — deactivates the validator, no cascade.
+    /// - `RevocationSeverity::ForCause` — deactivates the validator and starts a
+    ///   bounded cascade sweep that flags every milestone the validator previously
+    ///   approved as `MilestonePendingReReview`.  If the validator has more than
+    ///   `CASCADE_LIMIT` (50) prior approvals, the sweep stops after flagging the
+    ///   first batch and stores a cursor; call `continue_revocation_cascade` to
+    ///   finish.
+    ///
+    /// Optionally accepts a reason (max 128 bytes) included in the event and
+    /// stored in the `RevocationRecord`.
     pub fn revoke_validator(
         env: Env,
         wallet: Address,
+        severity: RevocationSeverity,
         reason: Option<String>,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -665,31 +687,167 @@ impl VerificationContract {
             .set(&DataKey::ValidatorVector, &new_vector);
 
         // Retroactively invalidate this validator's contribution to every
-        // still-open (sub-threshold) pending attestation claim — a revoked
-        // validator's vote must never count toward a future threshold-cross.
+        // still-open (sub-threshold) pending attestation claim.
         let invalidated = Self::invalidate_pending_votes_for_validator(&env, &wallet);
         if invalidated > 0 {
             events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
         }
 
         let reason_str = reason.unwrap_or(String::from_str(&env, ""));
-        events::validator_revoked(&env, &admin, &wallet, &reason_str);
 
-        let routine_str = String::from_str(&env, "Routine");
-        if reason_str != routine_str {
-            env.storage().persistent().set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
-            events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+        // Persist a RevocationRecord for audit purposes.
+        let record = RevocationRecord {
+            severity: severity.clone(),
+            reason: reason_str.clone(),
+            revoked_at: env.ledger().timestamp(),
+            admin: admin.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RevocationRecord(wallet.clone()), &record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RevocationRecord(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        // Emit the appropriate revocation event.
+        match severity {
+            RevocationSeverity::Routine => {
+                events::validator_revoked(&env, &admin, &wallet, &reason_str);
+            }
+            RevocationSeverity::ForCause => {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
+                events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+                // Start (or complete) the bounded cascade sweep.
+                Self::run_cascade_sweep(&env, &wallet, 0)?;
+            }
         }
+
         Ok(())
     }
 
+    /// Continue a for-cause revocation cascade sweep that was interrupted
+    /// because the validator had more than `CASCADE_LIMIT` prior approvals.
+    ///
+    /// Call this repeatedly (admin only) until it stops emitting
+    /// `revocation_cascade_continued` events and instead emits
+    /// `revocation_cascade_complete`.
+    ///
+    /// Returns `ValidatorNotFound` if the wallet is not registered, or
+    /// `Unauthorized` if the caller is not the admin.  If no cascade is in
+    /// progress (cursor absent) this is a no-op (all milestones already
+    /// flagged) and emits `revocation_cascade_complete` with the total count.
+    pub fn continue_revocation_cascade(
+        env: Env,
+        wallet: Address,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        // Verify the validator exists.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Validator(wallet.clone()))
+        {
+            return Err(VerificationError::ValidatorNotFound);
+        }
+
+        let cursor: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RevocationCascadeCursor(wallet.clone()))
+            .unwrap_or(0);
+
+        Self::run_cascade_sweep(&env, &wallet, cursor)?;
+        Ok(())
+    }
+
+    /// Internal bounded cascade sweep helper.
+    ///
+    /// Starting from `start_index` (0-based position in `ValidatorMilestones`),
+    /// flags up to `CASCADE_LIMIT` milestones as `MilestonePendingReReview`,
+    /// emitting `milestone_flagged_for_rereview` for each.
+    ///
+    /// If the sweep is completed (fewer remaining milestones than the limit),
+    /// removes the cursor and emits `revocation_cascade_complete`.
+    ///
+    /// If the limit is hit before the list is exhausted, persists the next
+    /// cursor and emits `revocation_cascade_continued`.
+    fn run_cascade_sweep(
+        env: &Env,
+        wallet: &Address,
+        start_index: u32,
+    ) -> Result<(), VerificationError> {
+        let milestones_key = DataKey::ValidatorMilestones(wallet.clone());
+        let milestones: Vec<MilestoneRef> = env
+            .storage()
+            .persistent()
+            .get(&milestones_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let total = milestones.len();
+        let mut flagged_this_call: u32 = 0;
+        let mut i = start_index;
+
+        while i < total && flagged_this_call < CASCADE_LIMIT {
+            let m_ref = milestones.get(i).unwrap();
+            let flag_key =
+                DataKey::MilestonePendingReReview(m_ref.player_id, m_ref.milestone_index);
+            // Only flag if not already flagged (idempotent — supports re-runs).
+            if !env.storage().persistent().has(&flag_key) {
+                env.storage().persistent().set(&flag_key, &true);
+                env.storage().persistent().extend_ttl(
+                    &flag_key,
+                    PERSISTENT_TTL_MIN,
+                    PERSISTENT_TTL_MAX,
+                );
+                events::milestone_flagged_for_rereview(
+                    env,
+                    wallet,
+                    m_ref.player_id,
+                    m_ref.milestone_index,
+                );
+            }
+            flagged_this_call = safe_add_u32(flagged_this_call, 1)
+                .map_err(|_| VerificationError::Overflow)?;
+            i = safe_add_u32(i, 1).map_err(|_| VerificationError::Overflow)?;
+        }
+
+        let cursor_key = DataKey::RevocationCascadeCursor(wallet.clone());
+        if i >= total {
+            // Sweep complete — remove the cursor.
+            env.storage().persistent().remove(&cursor_key);
+            events::revocation_cascade_complete(env, wallet, i);
+        } else {
+            // More to do — persist cursor and signal continuation.
+            env.storage().persistent().set(&cursor_key, &i);
+            env.storage().persistent().extend_ttl(
+                &cursor_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+            events::revocation_cascade_continued(env, wallet, i, flagged_this_call);
+        }
+
+        Ok(())
+    }
     /// Revoke multiple validators in a single atomic transaction (admin only).
     /// Iterates the wallet list and applies the same revoke logic for each,
     /// emitting one `validator_revoked` event per revocation.
     /// If a wallet is not found, the entire batch fails (atomicity).
+    ///
+    /// All wallets in the batch receive the same `severity` and `reason`.
+    /// For `RevocationSeverity::ForCause`, each validator's cascade sweep is
+    /// started inline; use `continue_revocation_cascade` for any validator
+    /// whose prior approval history exceeds `CASCADE_LIMIT`.
     pub fn batch_revoke_validators(
         env: Env,
         wallets: Vec<Address>,
+        severity: RevocationSeverity,
         reason: Option<String>,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -736,12 +894,34 @@ impl VerificationContract {
                 events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
             }
 
-            events::validator_revoked(&env, &admin, &wallet, &reason_str);
+            // Persist a RevocationRecord for each wallet.
+            let record = RevocationRecord {
+                severity: severity.clone(),
+                reason: reason_str.clone(),
+                revoked_at: env.ledger().timestamp(),
+                admin: admin.clone(),
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::RevocationRecord(wallet.clone()), &record);
+            env.storage().persistent().extend_ttl(
+                &DataKey::RevocationRecord(wallet.clone()),
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
 
-            let routine_str = String::from_str(&env, "Routine");
-            if reason_str != routine_str {
-                env.storage().persistent().set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
-                events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+            match severity {
+                RevocationSeverity::Routine => {
+                    events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                }
+                RevocationSeverity::ForCause => {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
+                    events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                    events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+                    Self::run_cascade_sweep(&env, &wallet, 0)?;
+                }
             }
         }
 
@@ -2375,6 +2555,82 @@ impl VerificationContract {
             .has(&DataKey::MilestoneDispute(player_id, milestone_index))
     }
 
+    // -------------------------------------------------------------------------
+    // Revocation cascade re-review (issue #1039)
+    // -------------------------------------------------------------------------
+
+    /// Returns `true` if the milestone at `(player_id, milestone_index)` is
+    /// currently flagged as pending re-review due to a for-cause validator
+    /// revocation cascade.  Returns `false` if it has never been flagged or
+    /// has already been cleared by `rereview_milestone`.
+    pub fn is_milestone_flagged(env: Env, player_id: u64, milestone_index: u32) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::MilestonePendingReReview(player_id, milestone_index))
+    }
+
+    /// Clear a pending re-review flag on a milestone after independently
+    /// confirming the underlying achievement.
+    ///
+    /// Caller (`reviewer`) must be a currently-active validator (not
+    /// necessarily the original approver of the milestone).  Emits
+    /// `milestone_flag_cleared` on success.
+    ///
+    /// Returns:
+    /// - `MilestoneNotFound` if the milestone does not exist.
+    /// - `NotEligibleToReReview` if the caller is not a currently-active
+    ///   validator.
+    /// - `MilestoneNotFlagged` if the milestone is not currently flagged.
+    pub fn rereview_milestone(
+        env: Env,
+        reviewer: Address,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        reviewer.require_auth();
+
+        // Milestone must exist.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Milestone(player_id, milestone_index))
+        {
+            return Err(VerificationError::MilestoneNotFound);
+        }
+
+        // Reviewer must be a currently-active validator.
+        let validator_status = Self::get_validator_status(env.clone(), reviewer.clone());
+        if validator_status != ValidatorStatus::Active {
+            return Err(VerificationError::NotEligibleToReReview);
+        }
+
+        // The milestone must be flagged.
+        let flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
+        if !env.storage().persistent().has(&flag_key) {
+            return Err(VerificationError::MilestoneNotFlagged);
+        }
+
+        // Clear the flag.
+        env.storage().persistent().remove(&flag_key);
+
+        events::milestone_flag_cleared(&env, &reviewer, player_id, milestone_index);
+        Ok(())
+    }
+
+    /// Return the stored `RevocationRecord` for a validator wallet, if any.
+    ///
+    /// Returns `None` if the validator has never been revoked via the new
+    /// severity-aware `revoke_validator` path (i.e. old routine revocations
+    /// performed before this feature shipped will not have a record).
+    pub fn get_revocation_record(
+        env: Env,
+        wallet: Address,
+    ) -> Option<RevocationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RevocationRecord(wallet))
+    }
+
     /// Returns the total number of disputes filed for a given `player_id`.
     pub fn get_player_dispute_count(env: Env, player_id: u64) -> u32 {
         let disputes_key = DataKey::PlayerDisputes(player_id);
@@ -3810,7 +4066,7 @@ mod tests {
         client.upgrade(&new_wasm_hash);
 
         // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator, &None);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &None);
         assert!(!client.is_active_validator(&validator));
     }
 
@@ -4947,10 +5203,10 @@ mod tests {
         client.approve_milestone(&wallet_routine, &2u64, &String::from_str(&env, "M2"), &String::from_str(&env, "QmRoutine"), &None);
 
         // Revoke with cause
-        client.revoke_validator(&wallet_cause, &Some(String::from_str(&env, "Misconduct")));
+        client.revoke_validator(&wallet_cause, &RevocationSeverity::ForCause, &Some(String::from_str(&env, "Misconduct")));
         
         // Revoke for routine
-        client.revoke_validator(&wallet_routine, &Some(String::from_str(&env, "Routine")));
+        client.revoke_validator(&wallet_routine, &RevocationSeverity::Routine, &Some(String::from_str(&env, "Routine")));
 
         // Check validator status
         assert_eq!(client.get_validator_status(&wallet_cause), types::ValidatorStatus::RevokedForCause);

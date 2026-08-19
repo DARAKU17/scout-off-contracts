@@ -15,6 +15,8 @@ into PostgreSQL for fast querying.  It runs as a separate process from the API.
 | `trial_offers` | `scout_access.log_trial_offer` events | Trial offer records |
 | `subscriptions` | `scout_access.scout_subscribed` events | Active subscriptions |
 | `fee_withdrawals` | `scout_access.fees_withdrawn` events | Fee withdrawal audit log |
+| `milestone_flags` | `verification.milestone_flagged` / `milestone_flag_cleared` events | Milestones pending re-review due to for-cause validator revocations |
+| `revocation_records` | `verification.validator_revoked_for_cause` / `revocation_cascade_complete` events | Revoked-validator severity + cascade status |
 
 ## Reconciliation
 
@@ -24,11 +26,14 @@ local database.  The script reports:
 - Players/scouts present on-chain but missing in the database
 - Players/scouts present in the database but missing on-chain
 - Field-level mismatches for `players.deactivated` and `scouts.verified`
+- Milestone flags: milestones that are flagged on-chain (`is_milestone_flagged` returns `true`) but absent from the `milestone_flags` table, and vice-versa
+- Revocation records: validators with a `RevocationRecord` on-chain but no matching row in `revocation_records`
 
 ## Known gaps (resolved)
 
 - ~~`scouts.verified`~~ — column added in migration `001_initial_schema.sql`
 - ~~Player deactivation status~~ — column added in migration `001_initial_schema.sql`
+- ~~Milestone pending-re-review flags~~ — `milestone_flags` and `revocation_records` tables added in migration `005_milestone_flags.sql` (issue #1039)
 # Indexer Reconciliation
 
 `migrations/001_initial_schema.sql` defines the PostgreSQL schema the backend

@@ -26,20 +26,21 @@ measured-cost trends can be tracked across commits.
 
 | Contract       | Operation                       | Budget (CPU instructions) |
 |----------------|----------------------------------|---------------------------|
-| registration   | `register_player`                | 452,787                   |
-| registration   | `update_profile`                 | 193,686                   |
-| registration   | `filter_players`                 | 1,714,870                 |
-| verification   | `register_validator`             | 313,801                   |
-| verification   | `approve_milestone`              | 669,709                   |
-| verification   | `get_validator_milestones_page`  | 131,913                   |
-| progress       | `advance_level`                  | 484,502                   |
-| progress       | `reset_player_level`             | 639,231                   |
-| progress       | `get_progress_history_page`      | 195,802                   |
-| progress       | `verify_history_proof`           | 139,669                   |
-| scout_access   | `subscribe`                      | 597,410                   |
-| scout_access   | `pay_to_contact`                 | 777,109                   |
-| scout_access   | `batch_contact_players` (5 ids)  | 1,545,146                 |
-| scout_access   | `expire_trial_offers` (limit=20) | 8,614,029                 |
+| registration   | `register_player`                | 20,000,000                |
+| registration   | `update_profile`                 | 10,000,000                |
+| registration   | `filter_players`                 | 15,000,000                |
+| verification   | `register_validator`             | 15,000,000                |
+| verification   | `approve_milestone`              | 20,000,000                |
+| verification   | `get_validator_milestones_page`  | 15,000,000                |
+| verification   | `revoke_validator(ForCause, limit=50, total=500)` | 50,000,000 |
+| progress       | `advance_level`                  | 15,000,000                |
+| progress       | `reset_player_level`             | 12,000,000                |
+| progress       | `get_progress_history_page`      | 10,000,000                |
+| progress       | `verify_history_proof`           | 8,000,000                 |
+| scout_access   | `subscribe`                      | 20,000,000                |
+| scout_access   | `pay_to_contact`                 | 20,000,000                |
+| scout_access   | `batch_contact_players` (5 ids)  | 25,000,000                |
+| scout_access   | `expire_trial_offers` (limit=20) | 25,000,000                |
 
 All budgets above were calibrated from real `cargo test --test cost_budget
 -- --nocapture` measurements (see `cpu-cost-budget-report.txt`) with 20%

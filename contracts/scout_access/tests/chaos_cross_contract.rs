@@ -46,7 +46,7 @@ use scoutchain_scout_access::{
     FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier,
 };
 use scoutchain_shared_types::ProgressLevel;
-use scoutchain_verification::{VerificationContract, VerificationContractClient};
+use scoutchain_verification::{RevocationSeverity, VerificationContract, VerificationContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
@@ -239,7 +239,7 @@ fn op_confirm_trial_offer(
 fn op_revoke_validator(h: &mut ChaosHarness, v_idx: usize) {
     let v = h.pool.validators[v_idx].clone();
     let _ = h.scout_access.try_withdraw_fees; // just to keep the borrow happy
-    let _ = h.verification.try_revoke_validator(&v, &None);
+    let _ = h.verification.try_revoke_validator(&v, &RevocationSeverity::Routine, &None);
 }
 
 // ---------------------------------------------------------------------------
