@@ -32,6 +32,7 @@ measured-cost trends can be tracked across commits.
 | verification   | `register_validator`             | 15,000,000                |
 | verification   | `approve_milestone`              | 20,000,000                |
 | verification   | `get_validator_milestones_page`  | 15,000,000                |
+| verification   | `revoke_validator(ForCause, limit=50, total=500)` | 50,000,000 |
 | progress       | `advance_level`                  | 15,000,000                |
 | progress       | `reset_player_level`             | 12,000,000                |
 | progress       | `get_progress_history_page`      | 10,000,000                |
