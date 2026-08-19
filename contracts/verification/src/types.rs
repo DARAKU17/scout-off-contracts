@@ -11,7 +11,7 @@ use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 ///
 /// This is a pure read-only aggregate — no new storage or business logic.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ValidatorActivityReport {
     /// Validator wallet address.
     pub wallet: Address,
@@ -109,7 +109,7 @@ pub struct GlobalMilestoneIndexPage {
 
 /// A player-initiated dispute for a milestone.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MilestoneDispute {
     /// Unique player identifier for the disputed milestone.
     pub player_id: u64,
@@ -310,4 +310,10 @@ pub enum DataKey {
     RegistrationContract,
     /// Whether `RegistrationContract` has been set at least once.
     RegistrationContractSet,
+
+    /// Boolean flag (`true`) written by `open_migration_window`; absent or
+    /// `false` means the migration window is closed. All `admin_seed_*`
+    /// functions on this contract check this flag before writing any state.
+    /// Cleared by `close_migration_window`. Stored in instance storage.
+    MigrationActive,
 }

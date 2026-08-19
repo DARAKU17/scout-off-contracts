@@ -38,7 +38,11 @@ fn setup() -> Harness {
     client.initialize(&admin);
     let caller = Address::generate(&env);
     client.set_verification_contract(&caller);
-    Harness { env, client, caller }
+    Harness {
+        env,
+        client,
+        caller,
+    }
 }
 
 // ── genuine proofs verify ───────────────────────────────────────────────────
@@ -109,21 +113,26 @@ fn test_proof_against_stale_root_rejected_after_new_append() {
 
     let entry = h.client.get_history_entry(&player_id, &1u32);
     let stale_proof = h.client.get_history_proof(&player_id, &1u32);
-    assert!(h.client.verify_history_proof(&player_id, &entry, &stale_proof));
+    assert!(h
+        .client
+        .verify_history_proof(&player_id, &entry, &stale_proof));
 
     // Appending a second entry changes the root (the tree shape itself
     // changes, n=1 -> n=2), even though entry 1's own data is untouched.
     h.client.advance_level(&h.caller, &player_id, &2u32);
 
     assert!(
-        !h.client.verify_history_proof(&player_id, &entry, &stale_proof),
+        !h.client
+            .verify_history_proof(&player_id, &entry, &stale_proof),
         "a proof computed against the pre-append root must not verify against \
          the post-append root"
     );
 
     // A freshly generated proof against the new root verifies correctly.
     let fresh_proof = h.client.get_history_proof(&player_id, &1u32);
-    assert!(h.client.verify_history_proof(&player_id, &entry, &fresh_proof));
+    assert!(h
+        .client
+        .verify_history_proof(&player_id, &entry, &fresh_proof));
 }
 
 // ── malformed proofs rejected without panicking ─────────────────────────────
@@ -157,7 +166,9 @@ fn test_wrong_length_proof_rejected_without_panicking() {
     let shallow_player = 6u64;
     h.client.advance_level(&h.caller, &shallow_player, &1u32);
     let too_short = h.client.get_history_proof(&shallow_player, &1u32);
-    assert!(!h.client.verify_history_proof(&player_id, &entry, &too_short));
+    assert!(!h
+        .client
+        .verify_history_proof(&player_id, &entry, &too_short));
 
     // An oversized proof, built by repeatedly appending a valid proof to
     // itself, must also be rejected — proving an adversarial caller cannot
@@ -211,10 +222,7 @@ fn test_get_history_proof_errors_for_out_of_range_index() {
 
     assert!(h.client.try_get_history_proof(&player_id, &0u32).is_err());
     assert!(h.client.try_get_history_proof(&player_id, &2u32).is_err());
-    assert!(h
-        .client
-        .try_get_history_proof(&999u64, &1u32)
-        .is_err());
+    assert!(h.client.try_get_history_proof(&999u64, &1u32).is_err());
 }
 
 // ── beyond the 3-entry tier cap (admin resets keep appending) ──────────────
@@ -228,7 +236,8 @@ fn test_history_proof_correct_beyond_three_entries_via_resets() {
     h.client.advance_level(&h.caller, &player_id, &3u32);
     // Dispute-resolution resets keep appending to history beyond the
     // three-tier cap — the commitment scheme must not assume n <= 3.
-    h.client.reset_player_level(&player_id, &ProgressLevel::Unverified);
+    h.client
+        .reset_player_level(&player_id, &ProgressLevel::Unverified);
     h.client
         .reset_player_level(&player_id, &ProgressLevel::PerformanceMilestones);
 

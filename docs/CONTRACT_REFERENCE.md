@@ -3228,8 +3228,9 @@ player to Level 3 (Elite Tier).
 If called after the escrow's `expires_at`, no level advancement is
 attempted: the escrowed fee is refunded to the originating scout, the
 `TrialEscrow` record is removed, `trial_offer_expired` is emitted, and the
-call returns `TrialOfferExpired`. The scout must call `log_trial_offer`
-again to create a new offer/escrow.
+call returns `Ok(())`. Returning an error would roll back the refund and
+cleanup under Soroban transaction semantics. The scout must call
+`log_trial_offer` again to create a new offer/escrow.
 
 `idempotency_nonce` is optional. If supplied and that nonce was already
 recorded by a prior successful confirmation, the call returns `Ok(())`
@@ -3240,7 +3241,7 @@ double-spending the escrow or re-advancing the level.
 | | |
 |---|---|
 | **Auth** | `player_wallet` must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `TrialOfferAlreadyConfirmed` · `TrialOfferNotFound` · `TrialOfferExpired` · `InvalidInput` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `TrialOfferAlreadyConfirmed` · `TrialOfferNotFound` · `InvalidInput` · `ProgressCallFailed` |
 
 **Check precedence order** (when multiple error conditions are simultaneously
 true, the first matching check in this list wins):
@@ -3250,15 +3251,15 @@ true, the first matching check in this list wins):
 | 1 | Contract is paused | `ContractPaused` (3) |
 | 2 | Contract is not initialized | `NotInitialized` (2) |
 | 3 | Player auth (`player_wallet`) | panic / host auth error |
-| 4 | No `TrialEscrow` record exists for `(player_id, index)` — never created, or already consumed by a prior confirmation/expiry sweep | `TrialOfferAlreadyConfirmed` (22) |
-| 5 | No `TrialOffer` record exists for `(player_id, index)` | `TrialOfferNotFound` (11) |
-| 6 | `now > escrow.expires_at` — escrow is refunded to the scout and the `TrialEscrow` record removed | `TrialOfferExpired` (23) |
-| 7 | `idempotency_nonce` supplied and already recorded from a prior confirmation | *(none — returns `Ok(())`)* |
+| 4 | `idempotency_nonce` supplied and already recorded from a prior confirmation | *(none — returns `Ok(())`)* |
+| 5 | No `TrialEscrow` record exists for `(player_id, index)` — never created, or already consumed by a prior confirmation/expiry sweep | `TrialOfferAlreadyConfirmed` (22) |
+| 6 | No `TrialOffer` record exists for `(player_id, index)` | `TrialOfferNotFound` (11) |
+| 7 | `now > escrow.expires_at` — escrow is refunded, the `TrialEscrow` record removed, and `trial_offer_expired` emitted | `Ok(())` |
 | 8 | Progress contract not registered | `InvalidInput` (15) |
 | 9 | Cross-contract `advance_level` fails | `ProgressCallFailed` (14) |
 
 > **Design note — `TrialOfferAlreadyConfirmed` also covers "never existed"
-> and "already expired" (Priority 4)**: the `TrialEscrow` record is removed
+> and "already expired" (Priority 5)**: the `TrialEscrow` record is removed
 > both by a successful confirmation and by the expiry-refund branch (and by
 > `expire_trial_offers`), so a missing escrow is ambiguous between "already
 > confirmed," "already expired and refunded," and "no such offer was ever
@@ -3266,11 +3267,15 @@ true, the first matching check in this list wins):
 > callers should treat it as "nothing left to confirm" rather than
 > distinguishing the sub-cases.
 
-> **Design note — expiry check runs before the idempotency short-circuit
-> (Priority 6 before 7)**: a retried call carrying a previously-used nonce
-> still returns `TrialOfferExpired` if the offer has since expired — the
-> nonce only short-circuits a replay of a *successful* confirmation, not an
-> expired one.
+> **Design note — idempotency short-circuit runs before the escrow load
+> (Priority 4)**: a nonce is only recorded by a *successful* confirmation
+> (it is persisted after `advance_level` succeeds, in the same transaction
+> that consumes the escrow), so a recorded nonce implies the escrow is
+> already gone. Checking the nonce first lets a client safely retry a
+> timed-out confirmation and receive `Ok(())` instead of a misleading
+> `TrialOfferAlreadyConfirmed`. There is no scenario where a recorded nonce
+> coexists with an unexpired escrow, so the expiry check (Priority 7) can
+> never be shadowed by this short-circuit.
 
 > **Design note — escrow release is gated on the cross-contract call
 > (Priority 9)**: the `TrialEscrow` record and its `OutstandingTrialEscrows`
@@ -4078,7 +4083,7 @@ pub struct TrialOffer {
 | 20 | `ProContactLimitReached` | Pro-tier scout has reached the `pro_contact_limit` contacts for the current subscription period (Elite scouts are exempt from this limit) |
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed via `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same trial offer |
-| 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's confirmation window elapsed |
+| 23 | `TrialOfferExpired` | Legacy compatibility code; expiry confirmation now commits the refund and returns success |
 | 24 | `NoPendingFeeConfig` | `activate_fee_config` called with no pending proposal to activate |
 | 25 | `FeeConfigProposalNotReady` | `activate_fee_config` called before the pending proposal's activation delay elapsed |
 | 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |

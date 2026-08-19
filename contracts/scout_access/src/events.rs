@@ -94,18 +94,14 @@ pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Addre
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"), admin.clone()), ());
 }
 
 /// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
@@ -155,7 +151,10 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
 /// topics: (event_name, admin)  data: registration_contract
 pub fn registration_contract_updated(env: &Env, admin: &Address, registration_contract: &Address) {
     env.events().publish(
-        (Symbol::new(env, "registration_contract_updated"), admin.clone()),
+        (
+            Symbol::new(env, "registration_contract_updated"),
+            admin.clone(),
+        ),
         registration_contract.clone(),
     );
 }
@@ -235,10 +234,8 @@ pub const SUBSCRIPTION_AUTO_RENEWED: &str = "subscription_auto_renewed";
 
 /// topics: (event_name, scout)  data: enabled
 pub fn auto_renew_set(env: &Env, scout: &Address, enabled: bool) {
-    env.events().publish(
-        (Symbol::new(env, AUTO_RENEW_SET), scout.clone()),
-        enabled,
-    );
+    env.events()
+        .publish((Symbol::new(env, AUTO_RENEW_SET), scout.clone()), enabled);
 }
 
 /// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
@@ -252,10 +249,7 @@ pub fn subscription_auto_renewed(
     expires_at: u64,
 ) {
     env.events().publish(
-        (
-            Symbol::new(env, SUBSCRIPTION_AUTO_RENEWED),
-            scout.clone(),
-        ),
+        (Symbol::new(env, SUBSCRIPTION_AUTO_RENEWED), scout.clone()),
         (tier.clone(), subscribed_at, expires_at),
     );
 }

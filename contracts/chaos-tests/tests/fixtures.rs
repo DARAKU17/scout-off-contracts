@@ -7,11 +7,7 @@ use scoutchain_scout_access::{
 };
 use scoutchain_shared_types::ProgressLevel;
 use scoutchain_verification::{VerificationContract, VerificationContractClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, String, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, String, Vec};
 
 /// Contact / subscription fees used by the harness (stroops).
 pub const CONTACT_FEE: i128 = 100_000;
@@ -36,7 +32,6 @@ fn default_fees() -> FeeConfig {
 /// Shared entity pool + running totals the invariant checkers consult.
 pub struct Harness {
     pub env: Env,
-    pub admin: Address,
     pub xlm: Address,
     pub players: Vec<Address>,
     pub player_ids: std::vec::Vec<u64>,
@@ -148,7 +143,6 @@ impl Harness {
 
         Self {
             env,
-            admin,
             xlm,
             players,
             player_ids,
@@ -173,9 +167,8 @@ impl Harness {
     pub fn record_fee_delta(&mut self, delta: i128) {
         self.expected_fees = self.expected_fees.saturating_add(delta);
         if delta < 0 {
-            self.fees_withdrawn_or_refunded = self
-                .fees_withdrawn_or_refunded
-                .saturating_add(delta.abs());
+            self.fees_withdrawn_or_refunded =
+                self.fees_withdrawn_or_refunded.saturating_add(delta.abs());
         }
         let actual = self.scout_access.get_accumulated_fees();
         if actual < self.last_observed_fees && delta >= 0 {

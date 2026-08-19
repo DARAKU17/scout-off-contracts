@@ -1,5 +1,7 @@
-use soroban_sdk::{contracttype, Address, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
+/// Bound on tracked migration nonces per wallet (documented design limit).
+#[allow(dead_code)]
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
 pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
@@ -21,7 +23,7 @@ pub struct MigrationAuthorization {
     /// Role being migrated (player or scout).
     pub role: MigrationRole,
     /// Hash of the serialized profile data being authorized for migration.
-    pub profile_data_hash: Vec<u8>,
+    pub profile_data_hash: Bytes,
     /// Expected address of the new contract that will redeem this authorization.
     pub new_contract_hint: Address,
     /// Unique nonce to prevent replay. The signer should increment this for
@@ -31,7 +33,7 @@ pub struct MigrationAuthorization {
     pub expires_at: u64,
     /// ed25519 signature over the canonical message:
     /// `wallet || role || profile_data_hash || new_contract_hint || nonce || expires_at`
-    pub signature: Vec<u8>,
+    pub signature: BytesN<64>,
 }
 
 /// Basic player vitals stored on-chain
@@ -120,6 +122,15 @@ pub struct FilterResult {
 pub enum PlayerStatus {
     Active,
     Deactivated,
+}
+
+/// Direct status for a registered scout.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScoutStatus {
+    Active,
+    Deactivated,
+    NotRegistered,
 }
 
 /// Structured verification record for a scout profile. Replaces/augments the
@@ -219,4 +230,16 @@ pub enum DataKey {
     /// Cooldown in seconds between repeated registration attempts from the
     /// same wallet. 0 means no cooldown. Configurable by admin.
     RegCooldownSecs(u64),
+
+    // ── Migration ticket replay prevention ──
+    /// Nonce tracking for migration authorizations. A wallet+nonce pair is
+    /// stored as `true` after a migration authorization is redeemed, preventing
+    /// the same authorization from being replayed.
+    MigrationNonce(Address, u64),
+
+    // ── Scout deactivation ──
+    /// Deactivation flag for a scout. When present and `true`, the scout is
+    /// hidden from scout discovery results. Set by `deactivate_scout`,
+    /// cleared by `reactivate_scout`.
+    ScoutDeactivated(u64),
 }

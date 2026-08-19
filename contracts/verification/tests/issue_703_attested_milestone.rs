@@ -7,15 +7,11 @@
 //! 4. Milestone attribution follows the verified payload, not the relayer
 //! 5. CPU cost of submit_attested_milestone vs approve_milestone
 
+use ed25519_dalek::{Signer, SigningKey};
 use scoutchain_verification::{
     MilestoneAttestation, VerificationContract, VerificationContractClient, VerificationError,
 };
-use soroban_sdk::{
-    testutils::Address as _,
-    xdr::ToXdr,
-    Address, Bytes, BytesN, Env, String,
-};
-use ed25519_dalek::{Signer, SigningKey};
+use soroban_sdk::{testutils::Address as _, xdr::ToXdr, Address, Bytes, BytesN, Env, String};
 
 const CREDENTIALS: &str = "UEFA-B-License-2026";
 const ATTESTATION_DOMAIN: &str = "ScoutChain-MilestoneAttestation-v1";
@@ -59,17 +55,16 @@ fn attestation_message(env: &Env, attestation: &MilestoneAttestation) -> Bytes {
     message
 }
 
-fn sign_attestation(
-    env: &Env,
-    sk: &SigningKey,
-    attestation: &MilestoneAttestation,
-) -> BytesN<64> {
+fn sign_attestation(env: &Env, sk: &SigningKey, attestation: &MilestoneAttestation) -> BytesN<64> {
     let message = attestation_message(env, attestation);
     let mut msg_buf = [0u8; 1024];
     let len = message.len() as usize;
-    assert!(len <= msg_buf.len(), "attestation message too large for test buffer");
-    for i in 0..len {
-        msg_buf[i] = message.get(i as u32).unwrap();
+    assert!(
+        len <= msg_buf.len(),
+        "attestation message too large for test buffer"
+    );
+    for (i, b) in message.iter().enumerate() {
+        msg_buf[i] = b;
     }
     let sig = sk.sign(&msg_buf[..len]);
     BytesN::from_array(env, &sig.to_bytes())
@@ -195,15 +190,7 @@ fn cross_contract_attestation_rejected() {
     register_validator_with_key(&env, &client_b, &validator, &sk);
 
     // Signed for instance A
-    let attestation = make_attestation(
-        &env,
-        &id_a,
-        &validator,
-        1,
-        "cross-context claim",
-        CID_C,
-        1,
-    );
+    let attestation = make_attestation(&env, &id_a, &validator, 1, "cross-context claim", CID_C, 1);
     let signature = sign_attestation(&env, &sk, &attestation);
 
     assert!(
@@ -340,15 +327,7 @@ fn exact_pair_replay_also_rejected_by_nonce() {
     let sk = signing_key(8);
     register_validator_with_key(&env, &client, &validator, &sk);
 
-    let attestation = make_attestation(
-        &env,
-        &contract_id,
-        &validator,
-        1,
-        "exact pair",
-        CID_A,
-        1,
-    );
+    let attestation = make_attestation(&env, &contract_id, &validator, 1, "exact pair", CID_A, 1);
     let signature = sign_attestation(&env, &sk, &attestation);
     client.submit_attested_milestone(&relayer, &attestation, &signature);
 

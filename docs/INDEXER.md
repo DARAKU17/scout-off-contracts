@@ -173,17 +173,16 @@ The following correctness fixes shipped on `fix/1015-indexer-correctness`:
 
 ## Known gaps between the contracts and this schema
 
-> **For a consolidated list of all migration gaps — including data categories that
-> cannot be automatically replayed onto a new contract — see
+> **For the consolidated migration replay checklist and category status, see
 > [`docs/MIGRATION_GAPS.md`](MIGRATION_GAPS.md).**
 
-These aren't reconciliation failures — they're places the migration doesn't
-track a field the contract exposes, discovered while building this tool.
-Worth fixing in a future migration if this class of on-chain state is used
-by any actual query:
+These aren't reconciliation failures — they are fields that require an
+explicit getter or schema column to compare rather than relying on the primary
+profile payload. The current schema and reconciler cover the known fields:
 
 - Player deactivation (`registration.deactivate_player` /
-  `reactivate_player`) has no column in `players`.
+  `reactivate_player`) is compared through `is_player_deactivated` against
+  `players.deactivated`.
 
 ## What to do when drift is found
 

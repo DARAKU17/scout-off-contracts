@@ -10,7 +10,9 @@
 //! generate the full combinatorial space, which is equivalent for finite
 //! boolean/enum domains.
 
-use scoutchain_scout_access::{FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier};
+use scoutchain_scout_access::{
+    FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
@@ -35,6 +37,8 @@ fn default_fees() -> FeeConfig {
         elite_sub_stroops: ELITE_FEE,
         sub_duration_secs: SUB_DURATION,
         pro_contact_limit: PRO_LIMIT,
+        trial_offer_escrow_stroops: 500_000,
+        trial_offer_expiry_secs: 7 * 24 * 3600,
     }
 }
 
@@ -43,7 +47,6 @@ fn default_fees() -> FeeConfig {
 struct Harness {
     env: Env,
     xlm: Address,
-    admin: Address,
     contract: ScoutAccessContractClient<'static>,
 }
 
@@ -62,7 +65,7 @@ fn setup_initialized() -> Harness {
     let contract = ScoutAccessContractClient::new(&env, &id);
     contract.initialize(&admin, &xlm, &default_fees());
 
-    Harness { env, xlm, admin, contract }
+    Harness { env, xlm, contract }
 }
 
 /// Build a harness where initialize has NOT been called.
@@ -80,7 +83,7 @@ fn setup_uninitialized() -> Harness {
     let contract = ScoutAccessContractClient::new(&env, &id);
     // deliberately skip initialize
 
-    Harness { env, xlm, admin, contract }
+    Harness { env, xlm, contract }
 }
 
 /// Pause an already-initialized harness.
@@ -92,7 +95,7 @@ fn pause(h: &Harness) {
 fn subscribe(h: &Harness, scout: &Address, tier: &SubscriptionTier) {
     let fee = match tier {
         SubscriptionTier::Basic => BASIC_FEE,
-        SubscriptionTier::Pro   => PRO_FEE,
+        SubscriptionTier::Pro => PRO_FEE,
         SubscriptionTier::Elite => ELITE_FEE,
     };
     StellarAssetClient::new(&h.env, &h.xlm).mint(scout, &(fee * 2));
@@ -135,8 +138,8 @@ fn test_subscribe_check_precedence_exhaustive() {
     //   too_soon=true   → UpgradeTooSoon
     //   neither        → success (same tier re-subscribe after expiry or upgrade after interval)
     let sub_scenarios: &[(bool, bool, &str)] = &[
-        (true,  false, "downgrade"),
-        (false, true,  "too_soon"),
+        (true, false, "downgrade"),
+        (false, true, "too_soon"),
         (false, false, "ok_upgrade"),
     ];
 
@@ -234,8 +237,8 @@ fn test_subscribe_check_precedence_exhaustive() {
 // Priority 2: not initialized     → NotInitialized
 // Priority 3: no subscription     → ScoutNotSubscribed
 // Priority 4: subscription expired→ SubscriptionExpired
-// Priority 5: pro quota exceeded  → ContactQuotaExceeded
-// Priority 6: already contacted   → AlreadyContacted
+// Priority 5: already contacted   → AlreadyContacted
+// Priority 6: pro quota exceeded  → ProContactLimitReached
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -244,7 +247,12 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
 
     // Tier options: None (no sub), Basic, Pro, Elite
     #[derive(Clone, Copy, Debug)]
-    enum TierOpt { None, Basic, Pro, Elite }
+    enum TierOpt {
+        None,
+        Basic,
+        Pro,
+        Elite,
+    }
 
     let tiers = [TierOpt::None, TierOpt::Basic, TierOpt::Pro, TierOpt::Elite];
 
@@ -272,23 +280,27 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                             } else if is_expired {
                                 Some(ScoutAccessError::SubscriptionExpired)
                             } else if quota_exceeded {
-                                Some(ScoutAccessError::ContactQuotaExceeded)
+                                Some(ScoutAccessError::ProContactLimitReached)
                             } else if already_contacted {
                                 Some(ScoutAccessError::AlreadyContacted)
                             } else {
                                 None
                             };
 
-                            let h = if is_initialized { setup_initialized() } else { setup_uninitialized() };
+                            let h = if is_initialized {
+                                setup_initialized()
+                            } else {
+                                setup_uninitialized()
+                            };
                             let scout = Address::generate(&h.env);
                             let player_id: u64 = 1;
 
                             if is_initialized {
                                 // Set up subscription
                                 let sub_tier = match tier {
-                                    TierOpt::None  => None,
+                                    TierOpt::None => None,
                                     TierOpt::Basic => Some(SubscriptionTier::Basic),
-                                    TierOpt::Pro   => Some(SubscriptionTier::Pro),
+                                    TierOpt::Pro => Some(SubscriptionTier::Pro),
                                     TierOpt::Elite => Some(SubscriptionTier::Elite),
                                 };
                                 if let Some(t) = sub_tier {
@@ -307,7 +319,11 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                                     }
                                 }
 
-                                if already_contacted && !quota_exceeded && !is_expired && !matches!(tier, TierOpt::None) {
+                                if already_contacted
+                                    && !quota_exceeded
+                                    && !is_expired
+                                    && !matches!(tier, TierOpt::None)
+                                {
                                     fund(&h, &scout);
                                     let _ = h.contract.try_pay_to_contact(&scout, &player_id);
                                 }
@@ -360,7 +376,12 @@ fn test_batch_contact_players_check_precedence_exhaustive() {
     use scoutchain_scout_access::ScoutAccessError;
 
     #[derive(Clone, Copy, Debug)]
-    enum TierOpt { None, Basic, Pro, Elite }
+    enum TierOpt {
+        None,
+        Basic,
+        Pro,
+        Elite,
+    }
     let tiers = [TierOpt::None, TierOpt::Basic, TierOpt::Pro, TierOpt::Elite];
 
     for &is_paused in &[true, false] {
@@ -383,14 +404,18 @@ fn test_batch_contact_players_check_precedence_exhaustive() {
                         None
                     };
 
-                    let h = if is_initialized { setup_initialized() } else { setup_uninitialized() };
+                    let h = if is_initialized {
+                        setup_initialized()
+                    } else {
+                        setup_uninitialized()
+                    };
                     let scout = Address::generate(&h.env);
 
                     if is_initialized {
                         let sub_tier = match tier {
-                            TierOpt::None  => None,
+                            TierOpt::None => None,
                             TierOpt::Basic => Some(SubscriptionTier::Basic),
-                            TierOpt::Pro   => Some(SubscriptionTier::Pro),
+                            TierOpt::Pro => Some(SubscriptionTier::Pro),
                             TierOpt::Elite => Some(SubscriptionTier::Elite),
                         };
                         if let Some(t) = sub_tier {
@@ -448,7 +473,12 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
     use scoutchain_scout_access::ScoutAccessError;
 
     #[derive(Clone, Copy, Debug)]
-    enum TierOpt { None, Basic, Pro, Elite }
+    enum TierOpt {
+        None,
+        Basic,
+        Pro,
+        Elite,
+    }
     let tiers = [TierOpt::None, TierOpt::Basic, TierOpt::Pro, TierOpt::Elite];
 
     for &is_paused in &[true, false] {
@@ -483,9 +513,9 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
                     let player_id: u64 = 42;
 
                     let sub_tier = match tier {
-                        TierOpt::None  => None,
+                        TierOpt::None => None,
                         TierOpt::Basic => Some(SubscriptionTier::Basic),
-                        TierOpt::Pro   => Some(SubscriptionTier::Pro),
+                        TierOpt::Pro => Some(SubscriptionTier::Pro),
                         TierOpt::Elite => Some(SubscriptionTier::Elite),
                     };
                     if let Some(t) = sub_tier {
@@ -496,12 +526,19 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
                         expire_subscription(&h);
                     }
 
+                    // log_trial_offer requires a prior contact record; create it
+                    // while the subscription is still active.
+                    if matches!(tier, TierOpt::Elite) && !is_expired {
+                        fund(&h, &scout);
+                        let _ = h.contract.try_pay_to_contact(&scout, &player_id);
+                    }
+
                     // To trigger rate limit: send one offer first, stay within 24h window
                     if is_rate_limited {
                         fund(&h, &scout);
-                        let _ = h.contract.try_log_trial_offer(
-                            &scout, &player_id, &valid_cid(&h.env)
-                        );
+                        let _ =
+                            h.contract
+                                .try_log_trial_offer(&scout, &player_id, &valid_cid(&h.env));
                         // do NOT advance time — next call within 24h should be rate-limited
                     }
 
@@ -510,9 +547,9 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
                     }
 
                     fund(&h, &scout);
-                    let result = h.contract.try_log_trial_offer(
-                        &scout, &player_id, &valid_cid(&h.env)
-                    );
+                    let result =
+                        h.contract
+                            .try_log_trial_offer(&scout, &player_id, &valid_cid(&h.env));
 
                     match expected {
                         None => assert!(
@@ -521,7 +558,8 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
                              expired={is_expired} rate_limited={is_rate_limited}, got {result:?}"
                         ),
                         Some(exp) => {
-                            let actual = result.expect_err("expected error").expect("contract error");
+                            let actual =
+                                result.expect_err("expected error").expect("contract error");
                             assert_eq!(
                                 actual, exp,
                                 "log_trial_offer precedence wrong: paused={is_paused} tier={tier:?} \
@@ -554,20 +592,34 @@ fn test_paused_beats_subscription_checks() {
 
     // subscribe
     let r = h.contract.try_subscribe(&scout, &SubscriptionTier::Elite);
-    assert_eq!(r.expect_err("err").expect("contract err"), ScoutAccessError::ContractPaused);
+    assert_eq!(
+        r.expect_err("err").expect("contract err"),
+        ScoutAccessError::ContractPaused
+    );
 
     // pay_to_contact
     let r = h.contract.try_pay_to_contact(&scout, &1u64);
-    assert_eq!(r.expect_err("err").expect("contract err"), ScoutAccessError::ContractPaused);
+    assert_eq!(
+        r.expect_err("err").expect("contract err"),
+        ScoutAccessError::ContractPaused
+    );
 
     // batch_contact_players
     let ids = soroban_sdk::vec![&h.env, 1u64];
     let r = h.contract.try_batch_contact_players(&scout, &ids);
-    assert_eq!(r.expect_err("err").expect("contract err"), ScoutAccessError::ContractPaused);
+    assert_eq!(
+        r.expect_err("err").expect("contract err"),
+        ScoutAccessError::ContractPaused
+    );
 
     // log_trial_offer
-    let r = h.contract.try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
-    assert_eq!(r.expect_err("err").expect("contract err"), ScoutAccessError::ContractPaused);
+    let r = h
+        .contract
+        .try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
+    assert_eq!(
+        r.expect_err("err").expect("contract err"),
+        ScoutAccessError::ContractPaused
+    );
 }
 
 /// SubscriptionExpired beats AlreadyContacted — an expired scout who
@@ -607,7 +659,9 @@ fn test_non_elite_beats_rate_limit() {
     subscribe(&h, &scout, &SubscriptionTier::Pro);
     fund(&h, &scout);
 
-    let r = h.contract.try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
+    let r = h
+        .contract
+        .try_log_trial_offer(&scout, &1u64, &valid_cid(&h.env));
     assert_eq!(
         r.expect_err("err").expect("contract err"),
         ScoutAccessError::Unauthorized,

@@ -291,8 +291,8 @@ pub mod safe_math {
 
         #[test]
         fn i128_sub_overflow_returns_err() {
-            // MIN - (-1) would overflow positively
-            assert_eq!(safe_sub_i128(i128::MIN, -1), Err(ArithmeticError));
+            // MAX - (-1) would overflow positively
+            assert_eq!(safe_sub_i128(i128::MAX, -1), Err(ArithmeticError));
         }
 
         #[test]
@@ -348,9 +348,7 @@ pub mod safe_math {
 
         #[test]
         fn i128_all_ops_exhaustive_no_panic() {
-            let values: &[i128] = &[
-                i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX,
-            ];
+            let values: &[i128] = &[i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX];
             for &a in values {
                 for &b in values {
                     let _ = safe_add_i128(a, b);
@@ -394,7 +392,6 @@ pub mod safe_math {
         }
     }
 }
-
 
 ///
 /// Rules:

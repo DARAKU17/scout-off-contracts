@@ -63,7 +63,9 @@ pub enum ScoutAccessError {
     ProContactLimitReached = 20,
     /// The trial offer has already been confirmed.
     TrialOfferAlreadyConfirmed = 22,
-    /// The trial offer has expired without confirmation.
+    /// Legacy compatibility code for an expired offer. The current expiry
+    /// path commits the refund and returns `Ok(())` because returning this
+    /// error would roll back the refund under Soroban transaction semantics.
     TrialOfferExpired = 23,
 
     // ── Cross-contract & arithmetic ──
@@ -91,6 +93,25 @@ pub enum ScoutAccessError {
     // ── Auto-renewal ──
     /// `renew_if_due` was called but auto-renewal is not enabled for this scout.
     AutoRenewNotEnabled = 28,
+
+    // ── Migration ──
+    /// Migration window is not currently active on this contract.
+    /// Call `open_migration_window` (admin-only) before seeding state.
+    MigrationNotActive = 29,
+    /// A `Subscription` already exists for this scout address with different
+    /// content. Identical replays are no-ops; conflicting replays are rejected.
+    SubscriptionAlreadyExists = 30,
+    /// A `ContactRecord` already exists for `(player_id, scout)` with different
+    /// content. Identical replays are no-ops.
+    ContactAlreadyExists = 31,
+    /// A `TrialOffer` already exists at `(player_id, trial_index)` with
+    /// different content. Identical replays are no-ops.
+    TrialOfferAlreadyExists = 32,
+    /// An `AutoRenew` flag already exists for this scout with a different value.
+    /// Identical replays are no-ops.
+    AutoRenewAlreadyExists = 33,
+    /// A fee-config history replay conflicts with history already stored.
+    FeeConfigHistoryAlreadyExists = 34,
 }
 
 impl AdminError for ScoutAccessError {

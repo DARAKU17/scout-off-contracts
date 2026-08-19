@@ -234,7 +234,7 @@ sequenceDiagram
             Contract-->>Player: progress updated to Level 3 (trial_offer_confirmed event)
         else now > escrow.expires_at
             Contract->>Scout: refund escrowed fee
-            Contract-->>Player: TrialOfferExpired (trial_offer_expired event)
+            Contract-->>Player: refund committed (trial_offer_expired event)
         end
     end
 ```
@@ -268,7 +268,7 @@ sequenceDiagram
 |------|----|---------|
 | Level 0 | Level 1 | Validator calls `approve_milestone` — identity confirmed |
 | Level 1 | Level 2 | Validator calls `approve_milestone` — performance stats verified |
-| Level 2 | Level 3 | Scout calls `log_trial_offer` (escrows a fee), then the **player** calls `confirm_trial_offer` before the escrow expires — trial or feedback recorded. A confirmation logged after expiry refunds the scout instead (`TrialOfferExpired`); the level does not advance until confirmation succeeds. |
+| Level 2 | Level 3 | Scout calls `log_trial_offer` (escrows a fee), then the **player** calls `confirm_trial_offer` before the escrow expires — trial or feedback recorded. A confirmation after expiry commits a refund to the scout and emits `trial_offer_expired`; the level does not advance. |
 
 ## Security Features
 
@@ -662,7 +662,7 @@ Each contract defines its own error enum. The same numeric code can mean differe
 | 20 | `ProContactLimitReached` | Pro-tier scout has reached the `pro_contact_limit` contacts for the current subscription period | Upgrade to Elite (no limit applies) or wait for subscription to renew |
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed | Call `propose_admin` first, then have the proposed address call `accept_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same offer | No action; the offer was already confirmed |
-| 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's expiry window | Log a new trial offer |
+| 23 | `TrialOfferExpired` | Legacy error code retained for compatibility; expiry confirmation now commits the refund and returns success | Log a new trial offer after the refund event |
 | 24 | `AutoRenewNotEnabled` | `renew_if_due` called but the scout has not opted in to auto-renewal | Call `set_auto_renew` with `enabled = true` first |
 
 ## Events

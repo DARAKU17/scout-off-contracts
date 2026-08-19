@@ -33,7 +33,11 @@ fn test_validator_cap_enforced_at_100() {
 
     for _ in 0..100 {
         let v = Address::generate(&env);
-        client.register_validator(&v, &String::from_str(&env, "UEFA-B-License-2026"), &Vec::new(&env));
+        client.register_validator(
+            &v,
+            &String::from_str(&env, "UEFA-B-License-2026"),
+            &soroban_sdk::Vec::new(&env),
+        );
     }
 
     // Active validator count must be exactly 100.
@@ -48,11 +52,14 @@ fn test_validator_cap_enforced_at_100() {
     let result = client.try_register_validator(
         &extra,
         &String::from_str(&env, "UEFA-A-License-2026"),
+        &soroban_sdk::Vec::new(&env),
     );
     assert!(
         matches!(
             result,
-            Err(Ok(scoutchain_verification::VerificationError::ValidatorCapReached))
+            Err(Ok(
+                scoutchain_verification::VerificationError::ValidatorCapReached
+            ))
         ),
         "101st validator registration must return ValidatorCapReached: {result:?}"
     );
@@ -77,7 +84,11 @@ fn test_get_validators_with_revoked_entries_bounded() {
     let mut validators: Vec<Address> = Vec::new();
     for _ in 0..10 {
         let v = Address::generate(&env);
-        client.register_validator(&v, &String::from_str(&env, "UEFA-B-License-2026"), &Vec::new(&env));
+        client.register_validator(
+            &v,
+            &String::from_str(&env, "UEFA-B-License-2026"),
+            &soroban_sdk::Vec::new(&env),
+        );
         validators.push(v);
     }
 
@@ -126,7 +137,11 @@ fn test_get_validators_cpu_cost_at_cap() {
 
     for _ in 0..100 {
         let v = Address::generate(&env);
-        client.register_validator(&v, &String::from_str(&env, "UEFA-B-License-2026"), &Vec::new(&env));
+        client.register_validator(
+            &v,
+            &String::from_str(&env, "UEFA-B-License-2026"),
+            &soroban_sdk::Vec::new(&env),
+        );
     }
 
     env.cost_estimate().budget().reset_default();

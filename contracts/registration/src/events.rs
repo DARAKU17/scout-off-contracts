@@ -1,6 +1,8 @@
 #![allow(deprecated, dead_code)]
 use soroban_sdk::{Address, Env, Symbol};
 
+use crate::types::MigrationRole;
+
 pub const PLAYER_REGISTERED: &str = "player_registered";
 pub const SCOUT_REGISTERED: &str = "scout_registered";
 pub const PROFILE_UPDATED: &str = "profile_updated";
@@ -18,10 +20,7 @@ pub const MIGRATION_REDEEMED: &str = "migration_redeemed";
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, ADMIN_TRANSFER_PROPOSED),
-            old_admin.clone(),
-        ),
+        (Symbol::new(env, ADMIN_TRANSFER_PROPOSED), old_admin.clone()),
         new_admin.clone(),
     );
 }
@@ -112,5 +111,19 @@ pub fn scout_reactivated(env: &Env, scout_id: u64, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, SCOUT_REACTIVATED), admin.clone()),
         scout_id,
+    );
+}
+
+/// topics: (event_name, wallet)  data: (role, profile_id, new_contract_hint)
+pub fn migration_redeemed(
+    env: &Env,
+    wallet: &Address,
+    role: &MigrationRole,
+    profile_id: u64,
+    new_contract_hint: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, MIGRATION_REDEEMED), wallet.clone()),
+        (*role, profile_id, new_contract_hint.clone()),
     );
 }

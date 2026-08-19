@@ -416,20 +416,26 @@ Migration procedure:
 7. **Redeploy the backend and frontend** (manual) with the new contract IDs.
 8. **Announce the migration** (manual) in release notes with the old and new contract IDs.
 
-#### Step 4 in detail — what can and cannot be replayed
+#### Step 4 in detail — automated replay scope
 
-`scripts/replay-state.sh` reads state from the old contracts and writes what it
-legitimately can to the new ones. **It is not a full automatic migration**, because
-of an authorization asymmetry between the two data categories:
+`scripts/replay-state.sh` reads the old contract set and replays the supported
+state categories onto the new set using the admin key. It opens the migration
+windows on `progress`, `verification`, and `scout_access` only for the replay
+and closes them before returning, including after a failed invocation.
 
-- **Validators — replayed automatically.** `verification.register_validator(wallet, credentials)` is **admin-only** (`require_admin`, no wallet self-auth). The operator holds the admin key, so the script reads every active validator via `get_validators()` + `get_validator()` on the old contract and re-registers each one on the new contract, signed by `DEPLOYER_SECRET`. No user action required.
-- **Players and scouts — replayed via admin-only seeding entrypoints OR pre-authorized migration tickets.** The replay script exports player and scout payloads to timestamped JSON files under `migration-export/` and calls `registration.admin_seed_player(...)` / `registration.admin_seed_scout(...)` on the new contract, signed by `DEPLOYER_SECRET`. This avoids the wallet-auth requirement of `register_player` / `register_scout` while preserving the full profile state.
+The automated replay covers validators, player/scout profiles, resolved player
+levels, full progress history plus its Merkle root, milestones, disputes,
+subscriptions, contacts, trial offers including in-flight escrow records,
+auto-renew flags, and the current fee configuration plus its bounded history.
+Each category is exported to timestamped JSON under `migration-export/` for
+post-migration auditing and reconciliation. All seeders are idempotent and
+reject conflicting records.
 
-  **Pre-authorized migration tickets (recommended for future migrations):** Players and scouts can sign an off-chain `MigrationAuthorization` ahead of any migration. A relayer holding no private keys can later redeem this authorization by calling `registration.redeem_migration_player(...)` or `registration.redeem_migration_scout(...)` on the new contract. The signature serves as proof of consent, and a nonce prevents replay. See `docs/CONTRACT_REFERENCE.md` for the `MigrationAuthorization` schema and redemption flow. This path is self-service and does not require the operator to hold the player/scout private key or to pre-export their data.
-
-  > Note on levels: the registration contract does **not** store a player's level — the progress contract is the source of truth (`resolve_level` / `set_player_level`). The exported `PlayerProfile` already carries the `level` field resolved from the old progress contract, so it is captured in the export and re-seeded through `admin_seed_player`.
-
-- **In-flight milestone disputes — not replayed today.** `scripts/replay-state.sh` currently exports and replays validators, players, scouts, and player level data only. Milestone disputes filed on the old verification contract but not yet resolved are not part of the replay export, so operators must treat open disputes as a known migration gap and handle them manually during cutover.
+**Pre-authorized migration tickets** remain available for operators that do not
+want to use the admin replay path: players and scouts can sign an off-chain
+`MigrationAuthorization` ahead of a migration, and a relayer can redeem it via
+`registration.redeem_migration_player(...)` or
+`registration.redeem_migration_scout(...)`. See `docs/CONTRACT_REFERENCE.md`.
 
 #### Testing a migration against the local sandbox
 

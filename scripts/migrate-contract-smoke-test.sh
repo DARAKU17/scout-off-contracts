@@ -8,7 +8,7 @@
 # exercises the migration path this issue adds:
 #
 #   deploy OLD set -> seed a validator + a player -> migrate (deploy NEW set,
-#   pause OLD, replay validators + export players) -> compare OLD vs NEW state.
+#   pause OLD, replay full supported state) -> compare OLD vs NEW state.
 #
 # It is intended as a MANUAL / optional command (it needs docker + the stellar
 # CLI and pulls a container image), not a mandatory CI gate. Run it with:
@@ -131,7 +131,7 @@ stellar contract invoke --id "$OLD_REG_ID" --source smoke-player --network "$NET
   -- register_player \
   --wallet "$PLAYER_ADDRESS" \
   --vitals '{"age":21,"position":"ST","region":"EU","nationality":"NG"}' \
-  --ipfs_hashes '["QmSmokeTestHash0001"]'
+  --ipfs_hashes '["QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"]'
 
 # ---------------------------------------------------------------------------
 # 5. BEFORE snapshot of OLD state.
@@ -176,22 +176,20 @@ else
   FAIL=1
 fi
 
-# Players must NOT be auto-replayed (documented gap): new contract starts empty.
-if [ "${AFTER_PLAYER_COUNT:-0}" -eq 0 ]; then
-  echo "  PASS: new registration contract has 0 players — confirms the documented"
-  echo "        player replay gap (players are export-only, cannot be auto-seeded)."
+# Players must be replayed with their stable IDs and payloads.
+if [ "${AFTER_PLAYER_COUNT:-0}" -eq "${BEFORE_PLAYER_COUNT:-0}" ]; then
+  echo "  PASS: player count preserved across migration."
 else
-  echo "  FAIL: new contract unexpectedly has ${AFTER_PLAYER_COUNT} players — the"
-  echo "        replay tool must NOT be able to auto-register players."
+  echo "  FAIL: player count changed (before=${BEFORE_PLAYER_COUNT:-0}, after=${AFTER_PLAYER_COUNT:-0})."
   FAIL=1
 fi
 
-# The player must still have been EXPORTED so no data is lost.
+# The player must still be exported so the replay is auditable.
 LATEST_PLAYER_EXPORT="$(find migration-export -name 'players-*.json' -type f 2>/dev/null | sort | tail -1 || true)"
 if [ -n "$LATEST_PLAYER_EXPORT" ]; then
   EXPORTED_COUNT="$(jq 'length' "$LATEST_PLAYER_EXPORT" 2>/dev/null || echo 0)"
   if [ "${EXPORTED_COUNT:-0}" -ge 1 ]; then
-    echo "  PASS: $EXPORTED_COUNT player(s) exported to $LATEST_PLAYER_EXPORT (no data lost)."
+    echo "  PASS: $EXPORTED_COUNT player(s) exported to $LATEST_PLAYER_EXPORT."
   else
     echo "  FAIL: player export $LATEST_PLAYER_EXPORT is empty."
     FAIL=1
