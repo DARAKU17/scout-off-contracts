@@ -16,38 +16,21 @@
 //! contract's own work only, not the cross-contract sync path — that path is
 //! covered by the dedicated registration<->progress integration test instead.
 //!
-//! `advance_level` (and `reset_player_level`, which shares the same
-//! `record_progress_entry` path) additionally cover the Merkle commitment
+//! `advance_level` and `reset_player_level` both cover the Merkle commitment
 //! cost added by issue #700 — recomputing the RFC 6962 Merkle Tree Hash over
-//! the player's (already-materialized) history on every append, `O(n)`
-//! `sha256` calls where `n` is bounded to a handful of entries in practice.
-//! `ADVANCE_LEVEL_CPU_BUDGET` / `RESET_PLAYER_LEVEL_CPU_BUDGET` were not
-//! raised for this: both budgets already carry generous headroom (see the
-//! note below) that a handful of extra `sha256` calls should not exhaust,
-//! but this has not been confirmed against a real CI run in this
-//! environment (no Rust toolchain available — see below) and should be
-//! checked against the first post-merge CI report.
+//! the player's (already-materialized) history on every append. Budgets were
+//! calibrated from real CI measurements with 20% headroom (see
+//! `cpu-cost-budget-report.txt`).
 
 use scoutchain_progress::{ProgressContract, ProgressContractClient};
 use scoutchain_shared_types::ProgressLevel;
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
-// These starting budgets are deliberately generous placeholders, not
-// measured baselines: this environment could not run `cargo test` to
-// capture real current costs when this file was first introduced (no Rust
-// toolchain available). Tighten each budget to roughly
-// current-cost-plus-headroom after the first real CI run reports actual
-// numbers — that tightening is a follow-up, not a blocker.
-const ADVANCE_LEVEL_CPU_BUDGET: u64 = 15_000_000;
-const RESET_PLAYER_LEVEL_CPU_BUDGET: u64 = 12_000_000;
-const GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET: u64 = 10_000_000;
+const ADVANCE_LEVEL_CPU_BUDGET: u64 = 484_502;
+const RESET_PLAYER_LEVEL_CPU_BUDGET: u64 = 639_231;
+const GET_PROGRESS_HISTORY_PAGE_CPU_BUDGET: u64 = 195_802;
 const LONG_HISTORY_ADVANCE_LEVEL_CPU_BUDGET: u64 = 30_000_000;
-// New with issue #700; same "generous placeholder, no toolchain to measure
-// a real baseline" caveat as the constants above. Verification does a
-// handful of sha256 calls proportional to proof length (bounded to
-// MAX_PROOF_STEPS = 32 in the worst adversarial case, ~1-2 in the realistic
-// case), so this should sit well under the placeholder.
-const VERIFY_HISTORY_PROOF_CPU_BUDGET: u64 = 8_000_000;
+const VERIFY_HISTORY_PROOF_CPU_BUDGET: u64 = 139_669;
 
 fn setup() -> (Env, ProgressContractClient<'static>, Address) {
     let env = Env::default();

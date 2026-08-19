@@ -897,41 +897,115 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `revoke_validator(wallet: Address, reason: Option<String>) -> Result<(), VerificationError>`
+#### `revoke_validator(wallet: Address, severity: RevocationSeverity, reason: Option<String>) -> Result<(), VerificationError>`
 
 Deactivate a validator. Revoked validators cannot approve milestones.
-`reason` is optional and capped at 128 bytes. If the reason is not exactly `"Routine"`, the validator is considered revoked for cause. This emits an additional `validator_revoked_for_cause` event and updates their status to `RevokedForCause` so off-chain indexers and `get_milestone_with_validator_status` can flag their historical milestones.
+
+`severity` must be one of:
+
+- `RevocationSeverity::Routine` — deactivates the validator only; no milestone flags are changed.
+- `RevocationSeverity::ForCause` — deactivates the validator **and** starts a bounded cascade sweep that flags every milestone the validator previously approved as `MilestonePendingReReview` (see below). If the validator has more than 50 prior approvals, `continue_revocation_cascade` must be called to finish the sweep.
+
+`reason` is optional and capped at 128 bytes. A `RevocationRecord` (severity, reason, timestamp, admin) is persisted under `DataKey::RevocationRecord(wallet)`.
+
+**Breaking change (v1.0.0):** The old `reason: Option<String>` signature is replaced. The old string-equality-to-`"Routine"` severity inference is removed. All call sites must supply an explicit `severity`.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason >128 bytes) · `Unauthorized` |
+| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason > 128 bytes) · `Unauthorized` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- revoke_validator \
   --wallet $VALIDATOR_ADDRESS \
-  --reason '"Misconduct"'
+  --severity '{"ForCause": null}' \
+  --reason '"Fabricated credentials"'
 ```
 
 ---
 
-#### `batch_revoke_validators(wallets: Vec<Address>, reason: Option<String>) -> Result<(), VerificationError>`
+#### `continue_revocation_cascade(wallet: Address) -> Result<(), VerificationError>`
 
-Revoke multiple validators in a single atomic transaction. Applies the same
-revoke logic as `revoke_validator` to each wallet in `wallets`, emitting one
-`validator_revoked` event per revocation (and `validator_revoked_for_cause` if the reason is not `"Routine"`). If any wallet is not registered the
-entire batch fails and no revocations are applied.
+Resume an in-progress for-cause revocation cascade sweep. Call repeatedly (admin only) until the `revocation_cascade_complete` event is emitted. If no cascade is in progress (all milestones already flagged), this is a no-op.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason >128 bytes) · `Unauthorized` |
+| **Errors** | `ValidatorNotFound` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- continue_revocation_cascade \
+  --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `is_milestone_flagged(player_id: u64, milestone_index: u32) -> bool`
+
+Returns `true` if the milestone is currently flagged as pending re-review due to a for-cause validator revocation cascade. Returns `false` if never flagged or already cleared.
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- is_milestone_flagged \
+  --player_id 42 \
+  --milestone_index 1
+```
+
+---
+
+#### `rereview_milestone(reviewer: Address, player_id: u64, milestone_index: u32) -> Result<(), VerificationError>`
+
+Clear a `MilestonePendingReReview` flag after independently confirming the underlying achievement. The `reviewer` must be a currently-active validator (not necessarily the original approver). Emits `milestone_flag_cleared`.
+
+| | |
+|---|---|
+| **Auth** | `reviewer` must sign |
+| **Errors** | `MilestoneNotFound` · `NotEligibleToReReview` (reviewer not active) · `MilestoneNotFlagged` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- rereview_milestone \
+  --reviewer $REVIEWER_ADDRESS \
+  --player_id 42 \
+  --milestone_index 1
+```
+
+---
+
+#### `get_revocation_record(wallet: Address) -> Option<RevocationRecord>`
+
+Return the stored `RevocationRecord` for a revoked validator, if any. Returns `None` if the validator has never been revoked via the severity-aware path.
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_revocation_record \
+  --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `batch_revoke_validators(wallets: Vec<Address>, severity: RevocationSeverity, reason: Option<String>) -> Result<(), VerificationError>`
+
+Revoke multiple validators in a single atomic transaction. Applies the same
+revoke logic as `revoke_validator` to each wallet in `wallets`, emitting one
+`validator_revoked` event per revocation (and `validator_revoked_for_cause` for ForCause). If any wallet is not registered, the entire batch fails and no revocations are applied.
+
+For `ForCause`, each validator's cascade sweep is started inline. Use `continue_revocation_cascade` for any validator whose prior approval history exceeds the 50-entry per-call limit.
+
+**Breaking change (v1.0.0):** `reason: Option<String>` is replaced by `severity: RevocationSeverity` + `reason: Option<String>`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason > 128 bytes) · `Unauthorized` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- batch_revoke_validators \
   --wallets '["'$VALIDATOR_ADDRESS_1'","'$VALIDATOR_ADDRESS_2'"]' \
+  --severity '{"Routine": null}' \
   --reason '"Season review"'
 ```
 

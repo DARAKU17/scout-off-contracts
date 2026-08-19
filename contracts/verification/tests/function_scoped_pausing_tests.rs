@@ -6,7 +6,7 @@
 //! - Interaction between whole-contract pause and function-scoped pause
 //! - Admin controls for pause/unpause
 
-use scoutchain_verification::{VerificationContract, VerificationContractClient};
+use scoutchain_verification::{RevocationSeverity, VerificationContract, VerificationContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, String,
@@ -269,7 +269,7 @@ fn test_revoke_validator_works_when_approve_milestone_paused() {
 
     // revoke_validator should still work
     h.client
-        .revoke_validator(&h.validator, &None)
+        .revoke_validator(&h.validator, &RevocationSeverity::Routine, &None)
         .expect("revoke_validator should work while approve_milestone is paused");
 }
 
