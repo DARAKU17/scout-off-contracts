@@ -35,6 +35,8 @@ fn default_fees() -> FeeConfig {
         elite_sub_stroops: ELITE_FEE,
         sub_duration_secs: SUB_DURATION,
         pro_contact_limit: PRO_LIMIT,
+        trial_offer_escrow_stroops: 500_000,
+        trial_offer_expiry_secs: 3_600,
     }
 }
 
@@ -232,10 +234,11 @@ fn test_subscribe_check_precedence_exhaustive() {
 //
 // Priority 1: paused              → ContractPaused
 // Priority 2: not initialized     → NotInitialized
+// Priority 2.5: pay_to_contact paused (function-scoped) → PayToContactPaused
 // Priority 3: no subscription     → ScoutNotSubscribed
 // Priority 4: subscription expired→ SubscriptionExpired
-// Priority 5: pro quota exceeded  → ContactQuotaExceeded
-// Priority 6: already contacted   → AlreadyContacted
+// Priority 5: already contacted   → AlreadyContacted
+// Priority 6: pro quota exceeded  → ProContactLimitReached
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -249,6 +252,7 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
     let tiers = [TierOpt::None, TierOpt::Basic, TierOpt::Pro, TierOpt::Elite];
 
     for &is_paused in &[true, false] {
+        for &is_function_paused in &[true, false] {
         for &is_initialized in &[true, false] {
             for &tier in &tiers {
                 for &is_expired in &[true, false] {
@@ -262,19 +266,32 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                             if !matches!(tier, TierOpt::Pro) && quota_exceeded {
                                 continue;
                             }
+                            // Function-scoped pause only reachable when initialized
+                            if is_function_paused && !is_initialized {
+                                continue;
+                            }
 
                             let expected: Option<ScoutAccessError> = if is_paused {
                                 Some(ScoutAccessError::ContractPaused)
                             } else if !is_initialized {
                                 Some(ScoutAccessError::NotInitialized)
+                            } else if is_function_paused {
+                                Some(ScoutAccessError::PayToContactPaused)
                             } else if matches!(tier, TierOpt::None) {
                                 Some(ScoutAccessError::ScoutNotSubscribed)
                             } else if is_expired {
                                 Some(ScoutAccessError::SubscriptionExpired)
-                            } else if quota_exceeded {
-                                Some(ScoutAccessError::ContactQuotaExceeded)
-                            } else if already_contacted {
+                            } else if already_contacted && !quota_exceeded {
+                                // Reachable only when the quota-exhaustion setup
+                                // did not run: player 1 was actually contacted.
                                 Some(ScoutAccessError::AlreadyContacted)
+                            } else if quota_exceeded {
+                                // Quota setup contacts players 100..109, so player 1
+                                // is fresh here; the contact check passes and the
+                                // renewal-aware Pro quota guard fires. The contract
+                                // enforces it with `ProContactLimitReached` and
+                                // checks it *after* the already-contacted guard.
+                                Some(ScoutAccessError::ProContactLimitReached)
                             } else {
                                 None
                             };
@@ -319,13 +336,17 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                                 continue; // unreachable state
                             }
 
+                            if is_function_paused {
+                                h.contract.pause_pay_to_contact();
+                            }
+
                             fund(&h, &scout);
                             let result = h.contract.try_pay_to_contact(&scout, &player_id);
 
                             match expected {
                                 None => assert!(
                                     result.is_ok(),
-                                    "pay_to_contact should succeed: paused={is_paused} init={is_initialized} \
+                                    "pay_to_contact should succeed: paused={is_paused} fn_paused={is_function_paused} init={is_initialized} \
                                      tier={tier:?} expired={is_expired} quota={quota_exceeded} contacted={already_contacted}, \
                                      got {result:?}"
                                 ),
@@ -333,7 +354,7 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                                     let actual = result.expect_err("expected error").expect("contract error");
                                     assert_eq!(
                                         actual, exp,
-                                        "pay_to_contact precedence wrong: paused={is_paused} init={is_initialized} \
+                                        "pay_to_contact precedence wrong: paused={is_paused} fn_paused={is_function_paused} init={is_initialized} \
                                          tier={tier:?} expired={is_expired} quota={quota_exceeded} contacted={already_contacted}"
                                     );
                                 }
@@ -342,6 +363,7 @@ fn test_pay_to_contact_check_precedence_exhaustive() {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -490,6 +512,14 @@ fn test_log_trial_offer_check_precedence_exhaustive() {
                     };
                     if let Some(t) = sub_tier {
                         subscribe(&h, &scout, &t);
+                    }
+
+                    // log_trial_offer requires the scout to have previously
+                    // contacted the player (see `ContactRecord` check), so an
+                    // Elite scout must make a contact before any offer is logged.
+                    if matches!(tier, TierOpt::Elite) {
+                        fund(&h, &scout);
+                        let _ = h.contract.try_pay_to_contact(&scout, &player_id);
                     }
 
                     if is_expired {

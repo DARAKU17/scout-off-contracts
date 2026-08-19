@@ -3248,7 +3248,7 @@ scouts are **exempt** from this limit.
 | | |
 |---|---|
 | **Auth** | `scout` must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `ScoutNotSubscribed` · `SubscriptionExpired` · `AlreadyContacted` · `ProContactLimitReached` · `Overflow` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `PayToContactPaused` · `ScoutNotSubscribed` · `SubscriptionExpired` · `AlreadyContacted` · `ProContactLimitReached` · `Overflow` |
 
 **Check precedence order** (when multiple error conditions are simultaneously
 true, the first matching check in this list wins):
@@ -3257,21 +3257,29 @@ true, the first matching check in this list wins):
 |----------|-------------------|---------------|
 | 1 | Contract is paused | `ContractPaused` (3) |
 | 2 | Contract is not initialized | `NotInitialized` (2) |
-| 3 | Scout auth | panic / host auth error |
-| 4 | No `Subscription` record exists for the scout | `ScoutNotSubscribed` (6) |
-| 5 | `Subscription` record exists but `expires_at < now` | `SubscriptionExpired` (7) |
-| 6 | `ContactRecord` already exists for `(player_id, scout)` | `AlreadyContacted` (8) |
-| 7 | Scout is Pro tier AND `current_count >= pro_contact_limit` | `ProContactLimitReached` (20) |
-| 8 | Fee accumulation arithmetic overflows | `Overflow` (10) |
+| 3 | `pay_to_contact` is paused (function-scoped, issue #1056) | `PayToContactPaused` (30) |
+| 4 | Scout auth | panic / host auth error |
+| 5 | No `Subscription` record exists for the scout | `ScoutNotSubscribed` (6) |
+| 6 | `Subscription` record exists but `expires_at < now` | `SubscriptionExpired` (7) |
+| 7 | `ContactRecord` already exists for `(player_id, scout)` | `AlreadyContacted` (8) |
+| 8 | Scout is Pro tier AND `current_count >= pro_contact_limit` | `ProContactLimitReached` (20) |
+| 9 | Fee accumulation arithmetic overflows | `Overflow` (10) |
 
-> **Design note — paused vs unsubscribed (Priority 1 vs 4)**: when the
+> **Design note — paused vs unsubscribed (Priority 1 vs 5)**: when the
 > contract is paused *and* the scout has no subscription, the caller sees
 > `ContractPaused`, not `ScoutNotSubscribed`. A frontend can safely treat
 > `ContractPaused` as "service unavailable, try again later" without
 > needing to check subscription state. This ordering is intentional and
 > consistent with every other state-changing function in this contract.
 
-> **Design note — expired vs already-contacted (Priority 5 vs 6)**: an
+> **Design note — function-scoped vs whole-contract pause (Priority 3 vs 1)**:
+> `pause_pay_to_contact` halts only `pay_to_contact`, while the whole-contract
+> pause (Priority 1) still takes precedence. When only the function-scoped
+> pause is active, scouts can still `subscribe` / renew / read state; only
+> fee-charging contact is blocked. This mirrors `verification`'s
+> `pause_approve_milestone` pattern (issue #809).
+
+> **Design note — expired vs already-contacted (Priority 6 vs 7)**: an
 > expired subscription takes precedence over a duplicate-contact guard.
 > This is the more actionable error for the user ("renew your subscription")
 > and prevents leaking whether a contact record exists to an unsubscribed
@@ -3659,6 +3667,45 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `pause_pay_to_contact() -> Result<(), ScoutAccessError>`
+
+Pause only the `pay_to_contact` function (function-scoped circuit breaker,
+mirroring `verification.pause_approve_milestone` from issue #809; implemented
+for scout_access in issue #1056).
+
+This halts fee-charging contact while leaving every other function operational:
+scouts can still `subscribe`, renew, read state, and use `batch_contact_players`
+/ `log_trial_offer`. The whole-contract pause (if active) still takes precedence
+over the function-scoped flag — un-pausing the whole contract does not clear
+`pay_to_contact`'s flag. The flag is stored in instance storage under
+`DataKey::PausedPayToContact` and defaults to `false`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- pause_pay_to_contact
+```
+
+---
+
+#### `unpause_pay_to_contact() -> Result<(), ScoutAccessError>`
+
+Resume `pay_to_contact` after a function-scoped pause.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_pay_to_contact
+```
+
+---
+
 #### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
 
 Upgrade the contract WASM. Admin auth required. Persistent storage survives.
@@ -3711,7 +3758,9 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 #### `health() -> ContractHealth`
 
-Return the contract's initialization and pause status.
+Return the contract's initialization and pause status. `pay_to_contact_paused`
+reflects the function-scoped pause (see `pause_pay_to_contact`); it is
+independent of the whole-contract `paused` flag.
 
 | | |
 |---|---|
@@ -3764,6 +3813,97 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 # Player -> scouts that contacted this player.
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- get_player_contacts --player_id 1
+```
+
+---
+
+#### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
+
+Retrieve the full `ContactRecord` for a `(player_id, scout)` pair. Returns
+`None` if the scout has not contacted this player.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_contact_record --scout $SCOUT_ADDRESS --player_id 1
+```
+
+---
+
+#### `get_player_contacts(player_id: u64) -> Vec<Address>`
+
+Return all scout addresses that have contacted `player_id` as an O(1) index
+lookup. Players can audit their inbound contact history directly from
+on-chain state without replaying off-chain events.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_contacts --player_id 1
+```
+
+---
+
+#### `restore_subscription_record(scout: Address) -> Result<(), ScoutAccessError>`
+
+Re-extend the TTL of a `Subscription` record that is nearing archival so its
+history remains available on-chain. Admin-only. Returns
+`SubscriptionRecordEvicted` (code 29) if the entry has already been fully
+evicted (key absent) and is unrecoverable.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` · `SubscriptionRecordEvicted` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- restore_subscription_record --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_player_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers for a given player in ascending index order (1..=N).
+Returns an empty Vec for a player with no trial offers. Unbounded (unlike the
+20-entry cap on `get_all_trial_offers`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_trial_offers --player_id 1
+```
+
+---
+
+#### `get_scout_trial_offers(scout: Address) -> Vec<(u64, u32)>`
+
+Return all `(player_id, trial_index)` tuples for every trial offer logged by
+`scout`, in insertion order (oldest first). Returns an empty Vec for a scout
+who has not logged any trial offers. Each tuple can be passed to
+`get_trial_offer(player_id, index)` to fetch the full offer record.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_trial_offers --scout $SCOUT_ADDRESS
 ```
 
 ---
@@ -3907,6 +4047,10 @@ given tier.
 pub struct ContractHealth {
     pub initialized: bool,
     pub paused: bool,
+    /// Function-scoped pause flag for `pay_to_contact` (scout_access only).
+    /// Always `false` for contracts that have no `pay_to_contact` function
+    /// (`registration`, `verification`, `progress`).
+    pub pay_to_contact_paused: bool,
 }
 ```
 
@@ -4273,6 +4417,8 @@ pub struct TrialOffer {
 | 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |
 | 27 | `ScoutNotVerified` | Pro-tier `subscribe()` rejected an unverified (or not-found) scout — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md) |
 | 28 | `AutoRenewNotEnabled` | `renew_if_due` called for a scout without auto-renewal enabled |
+| 29 | `SubscriptionRecordEvicted` | `restore_subscription_record` targeted a subscription entry whose archival grace period has fully elapsed (evicted, not merely archived) and is unrecoverable |
+| 30 | `PayToContactPaused` | `pay_to_contact` called while the function-scoped pause is active (issue #1056) — the whole-contract `ContractPaused` (3) takes precedence when both are set |
 
 ---
 
@@ -4356,6 +4502,8 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `pay_to_contact_paused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` engaged (issue #1056) |
+| `pay_to_contact_unpaused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` released |
 | `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ---

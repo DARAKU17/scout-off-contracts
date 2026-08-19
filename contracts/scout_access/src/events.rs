@@ -109,6 +109,25 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
     );
 }
 
+pub const PAY_TO_CONTACT_PAUSED: &str = "pay_to_contact_paused";
+pub const PAY_TO_CONTACT_UNPAUSED: &str = "pay_to_contact_unpaused";
+
+/// topics: (event_name, admin)  data: ()
+pub fn pay_to_contact_paused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "pay_to_contact_paused"), admin.clone()),
+        (),
+    );
+}
+
+/// topics: (event_name, admin)  data: ()
+pub fn pay_to_contact_unpaused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "pay_to_contact_unpaused"), admin.clone()),
+        (),
+    );
+}
+
 /// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
 pub fn subscription_created(
     env: &Env,
@@ -168,6 +187,7 @@ pub fn registration_contract_updated(env: &Env, admin: &Address, registration_co
 /// `progress_contract_updated` / `registration_contract_updated`. `link`
 /// identifies which peer pointer changed (`"progress_contract"` or
 /// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub const WIRING_UPDATED: &str = "wiring_updated";
 pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
     env.events().publish(
         (

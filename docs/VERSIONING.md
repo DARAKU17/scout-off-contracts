@@ -10,7 +10,7 @@ ScoutChain contracts follow [Semantic Versioning 2.0.0](https://semver.org/) —
 | **MINOR** | Backward-compatible addition — new function, new event, new error code appended at end of enum |
 | **PATCH** | Backward-compatible fix — bug fix, gas optimisation, documentation update in source |
 
-The current version of all four contracts is **v0.1.0**.
+The current version of all four contracts is **v1.0.0**.
 
 > **Note:** `Cargo.toml` `[workspace.package].version` is the build-time source of truth; keep the Version History table below in sync with every Cargo version bump.
 
