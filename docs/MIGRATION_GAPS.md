@@ -32,7 +32,7 @@ category into one place so a migration operator has a single checklist.
 | 9 | **Contact records** | `scout_access` | ⚠️ Partially replayable | `get_player_contacts` / `ScoutContacts` index expose which scouts contacted which players, but there is no admin-seed path. Replaying would require re-invoking `pay_to_contact` or an admin seed entrypoint. | Open — no tracking issue yet |
 | 10 | **Trial offers** | `scout_access` | ⚠️ Partially replayable | `get_trial_count`/`get_trial_offer` expose offer records, but there is no admin-seed entrypoint. In-flight trial escrows (unconfirmed, un-expired) are at risk of loss. | Open — no tracking issue yet |
 | 11 | **Fee configuration history** | `scout_access` | ⚠️ Partially replayable | The last 5 `FeeConfig` snapshots are on-chain via `get_fee_config_history`. The current config is re-applied by `initialize.sh` on the new contract; the bounded history is not replayed. | Open — cosmetic gap only |
-| 12 | **Player deactivation state** | `registration` | ❌ Not tracked in indexer | `registration.deactivate_player` / `reactivate_player` have no `active` column in the PostgreSQL `players` table. A deactivated player appears indistinguishable from an active one in the off-chain index. | Open — indexer schema gap, see [INDEXER.md](INDEXER.md#known-gaps-between-the-contracts-and-this-schema) |
+| 12 | **Player deactivation state** | `registration` | ⚠️ Column exists, not diffed | The `deactivated` column exists in `migrations/001_initial_schema.sql`, but the indexer/reconciler does not currently diff it against on-chain state (`scripts/reconcile-indexer.js` checks `scouts.verified` but not `players.deactivated`). A deactivated player may still appear active in the off-chain index. | Open — indexer schema gap, see [INDEXER.md](INDEXER.md#known-gaps-between-the-contracts-and-this-schema) |
 | 13 | **Auto-renewal flags** | `scout_access` | ⚠️ Partially replayable | `get_auto_renew` exposes per-scout opt-in state, but there is no admin-seed path. Scouts would need to re-opt-in after a contract migration. | Open — no tracking issue yet |
 | 14 | **Milestone pending-re-review flags** | `verification` | ⚠️ Partially replayable | `is_milestone_flagged(player_id, milestone_index)` exposes per-milestone flag state on-chain. `migrations/005_milestone_flags.sql` adds the `milestone_flags` and `revocation_records` tables; the indexer must be updated to consume `milestone_flagged` / `milestone_flag_cleared` / `revocation_cascade_complete` events to keep these tables current. There is no admin-seed path to replay flags onto a new contract — flags are re-created naturally by re-running `continue_revocation_cascade` calls for any for-cause-revoked validators. | Closed via #1039 — `scripts/reconcile-indexer.js` extended (see INDEXER.md) |
 
@@ -62,7 +62,8 @@ Before running `scripts/migrate-contract.sh`, verify the following:
 
 3. **Player deactivations** — if `deactivate_player` has ever been called,
    cross-check the off-chain `players` table against on-chain state before
-   migrating, since the database has no `active` column (row 12).
+   migrating, since the indexer does not currently diff the `deactivated`
+   column (row 12).
 
 4. **Scout subscriptions** — note any subscriptions that expire soon; scouts
    will need to re-subscribe on the new contract (row 8).
