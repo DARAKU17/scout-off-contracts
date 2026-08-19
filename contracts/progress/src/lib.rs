@@ -5,7 +5,7 @@ mod events;
 mod types;
 
 pub use errors::ProgressError;
-use scoutchain_shared_types::{require_admin, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
+use scoutchain_shared_types::{require_admin, write_wiring_link, safe_math::safe_add_u32, ContractHealth, ProgressLevel};
 pub use types::{DataKey, HistoryProofStep, ProgressEntry, ProgressWiringState};
 
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};

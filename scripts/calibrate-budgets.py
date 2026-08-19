@@ -36,24 +36,33 @@ def load_json(path: Path):
 
 
 def parse_cpu_report(path: Path) -> dict[str, dict[str, int]]:
-    """Parse the --nocapture cost_budget.rs report into a nested map."""
+    """Parse the --nocapture cost_budget.rs report into a nested map.
+
+    Supports two output formats:
+    - New format (println! from assert_cpu_budget):
+        cost_budget: progress::advance_level = 403752 cpu instructions (budget 15000000)
+    - Legacy format (cargo test output):
+        scoutchain_scout_access::tests::cost_budget::test_subscribe_cost ... passed: 3_421_000
+    """
     if not path.exists():
         return {}
     text = path.read_text()
     results: dict[str, dict[str, int]] = {}
-    current_contract = ""
     for line in text.splitlines():
-        # Lines look like:
-        #   scoutchain_scout_access::tests::cost_budget::test_subscribe_cost ... passed: 3_421_000
+        # New format: cost_budget: <contract>::<op> = <cpu> cpu instructions (budget <budget>)
+        m = re.search(r"cost_budget:\s+(\w+)::(\w+)\s*=\s*(\d+)\s+cpu instructions", line)
+        if m:
+            contract, op, cost = m.group(1), m.group(2), int(m.group(3))
+            results.setdefault(contract, {})[op] = cost
+            continue
+        # Legacy format: scoutchain_<contract>::tests::cost_budget::test_<op>_cost ... passed: <cost>
         m = re.search(r"scoutchain_(\w+)::tests::cost_budget::test_(\w+)_cost", line)
         if m:
-            current_contract = m.group(1)
-            op = m.group(2)
-            # Extract measured cost
+            contract, op = m.group(1), m.group(2)
             cost_match = re.search(r"passed:\s*([\d_]+)", line)
             if cost_match:
                 cost = int(cost_match.group(1).replace("_", ""))
-                results.setdefault(current_contract, {})[op] = cost
+                results.setdefault(contract, {})[op] = cost
     return results
 
 
@@ -95,8 +104,8 @@ def update_cpu_budget_md(recommended: dict[str, dict[str, int]]) -> None:
         if in_table and line.startswith("|"):
             parts = [p.strip() for p in line.strip("|").split("|")]
             if len(parts) >= 3:
-                contract = parts[0]
-                op = parts[1]
+                contract = parts[0].strip()
+                op = parts[1].strip().strip("`")
                 if contract in recommended and op in recommended[contract]:
                     new_budget = recommended[contract][op]
                     new_line = f"| {contract:<13} | {op:<35} | {new_budget:>25} |"
@@ -112,7 +121,11 @@ def main() -> None:
     parser.add_argument("--headroom", type=float, default=0.20, help="Fractional headroom to add (default: 0.20)")
     args = parser.parse_args()
 
-    wasm_sizes = load_json(WASM_SIZES_PATH)
+    if WASM_SIZES_PATH.exists():
+        wasm_sizes = load_json(WASM_SIZES_PATH)
+    else:
+        wasm_sizes = {}
+        print(f"WARNING: {WASM_SIZES_PATH} not found, skipping WASM budgets.", file=sys.stderr)
     cpu_report = parse_cpu_report(CPU_REPORT_PATH)
 
     wasm_rec = recommend_wasm_budgets(wasm_sizes, args.headroom)
@@ -131,7 +144,8 @@ def main() -> None:
 
     # Optionally write back
     if os.environ.get("CALIBRATE_WRITE") == "1":
-        update_wasm_budget_file(wasm_rec)
+        if wasm_sizes:
+            update_wasm_budget_file(wasm_rec)
         update_cpu_budget_md(cpu_rec)
     else:
         print("\nSet CALIBRATE_WRITE=1 to update ci/wasm-size-budget.json and ci/cpu-cost-budget.md in-place.")

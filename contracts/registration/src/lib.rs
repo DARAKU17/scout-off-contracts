@@ -6,7 +6,8 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, ScoutStatus, StoredPlayerProfile, ScoutVerificationRecord,
+    ProgressLevel, RegistrationWiringState, ScoutProfile, ScoutStatus, StoredPlayerProfile,
+    ScoutVerificationRecord,
 };
 // `PlayerVitals` is an *input* type of the public `register_player` function, so
 // it must be nameable by external callers (integration tests, generated

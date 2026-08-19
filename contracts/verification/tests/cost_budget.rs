@@ -67,7 +67,7 @@ fn cost_register_validator() {
     let credentials = String::from_str(&env, "UEFA-A-License-2026");
 
     env.cost_estimate().budget().reset_default();
-    client.register_validator(&validator, &credentials, &Vec::new(&env));
+    client.register_validator(&validator, &credentials, &String::from_str(&env, ""), &Vec::new(&env));
     assert_cpu_budget(&env, "register_validator", REGISTER_VALIDATOR_CPU_BUDGET);
 }
 
@@ -75,7 +75,7 @@ fn cost_register_validator() {
 fn cost_approve_milestone() {
     let (env, client) = setup();
     let validator = Address::generate(&env);
-    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &Vec::new(&env));
+    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &String::from_str(&env, ""), &Vec::new(&env));
 
     env.cost_estimate().budget().reset_default();
     client.approve_milestone(
@@ -91,7 +91,7 @@ fn cost_approve_milestone() {
 fn cost_get_validator_milestones_page() {
     let (env, client) = setup();
     let validator = Address::generate(&env);
-    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &Vec::new(&env));
+    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &String::from_str(&env, ""), &Vec::new(&env));
     client.approve_milestone(
         &validator,
         &1u64,

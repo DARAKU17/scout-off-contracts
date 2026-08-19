@@ -20,18 +20,12 @@ use soroban_sdk::{
     vec, Address, Env, String,
 };
 
-// These starting budgets are deliberately generous placeholders, not
-// measured baselines: this environment could not run `cargo test` to
-// capture real current costs when this file was first introduced (no Rust
-// toolchain available). Tighten each budget to roughly
-// current-cost-plus-headroom after the first real CI run reports actual
-// numbers — that tightening is a follow-up, not a blocker.
-const SUBSCRIBE_CPU_BUDGET: u64 = 20_000_000;
-const PAY_TO_CONTACT_CPU_BUDGET: u64 = 20_000_000;
-const BATCH_CONTACT_PLAYERS_CPU_BUDGET: u64 = 25_000_000;
+const SUBSCRIBE_CPU_BUDGET: u64 = 597_410;
+const PAY_TO_CONTACT_CPU_BUDGET: u64 = 777_109;
+const BATCH_CONTACT_PLAYERS_CPU_BUDGET: u64 = 1_545_146;
 // #795: expire_trial_offers is capped at 20 escrows/call — see
 // EXPIRE_TRIAL_OFFERS_MAX_LIMIT in contracts/scout_access/src/lib.rs.
-const EXPIRE_TRIAL_OFFERS_CPU_BUDGET: u64 = 25_000_000;
+const EXPIRE_TRIAL_OFFERS_CPU_BUDGET: u64 = 8_614_029;
 
 fn default_fees() -> FeeConfig {
     FeeConfig {

@@ -197,6 +197,9 @@ pub enum DataKey {
     PlayerIndex,
     /// Address of the progress contract allowed to call set_player_level
     ProgressContract,
+    /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
+    /// `set_progress_contract` call.
+    ProgressContractEpoch,
     /// Explicit player level override used for admin-seeded players or
     /// progress updates that should be visible to reads even before a progress
     /// contract is wired.
@@ -232,4 +235,12 @@ pub enum DataKey {
     MigrationNonce(Address, u64),
     /// Deactivation flag for a scout profile
     ScoutDeactivated(u64),
+}
+
+/// Snapshot of the single cross-contract peer address pointer held by the
+/// registration contract (progress), with its address and re-wiring epoch.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistrationWiringState {
+    pub progress_contract: WiringLink,
 }
