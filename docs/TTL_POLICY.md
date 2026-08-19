@@ -122,7 +122,7 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 | `ProContactCount(scout)` | 518,400 | Pro-tier contact quota tracking. Extended on contact operations (`pay_to_contact`/`log_trial_offer`) and `get_pro_contact_count` read. |
 | `PlayerContacts(player_id)` | 518,400 | Inbound scout contact index for a player. Extended on `pay_to_contact`/`log_trial_offer` writes and `get_player_contacts` read. |
 | `ScoutTrialOffers(scout)` | 518,400 | Index of trial offers logged by a scout. Extended on `log_trial_offer` write and `get_scout_trial_offers` read. |
-| `TrialEscrow(player_id, index)` | Default (~4,096) | Escrow hold record. Written in `log_trial_offer` without `extend_ttl` (no TTL bump in code; flagged for separate fix). |
+| `TrialEscrow(player_id, index)` | 518,400 | Escrow hold record. Extended on `log_trial_offer` write (write-side fix) and on `expire_trial_offers` read for entries not yet past `expires_at` (read-side keep-alive). Must remain readable for at least as long as `trial_offer_expiry_secs` so that `confirm_trial_offer` and `expire_trial_offers` can resolve the escrowed XLM. |
 | `OutstandingTrialEscrows` | 518,400 | Sweep index of unconfirmed trial escrows. Extended on `log_trial_offer`, `expire_trial_offers`, and `get_outstanding_trial_escrows` read. |
 | `FeeConfigHistory` | 500 (Instance) | Bounded history of active fee configurations. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
 | `ConfirmationNonce(nonce)` | 518,400 | Idempotency marker for `confirm_trial_offer` retries. Extended on `confirm_trial_offer` write. |
@@ -132,8 +132,8 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 **Keep-Alive Mechanism:**
 - Instance keys (`Initialized`, `Paused`, `FeeConfig`, `AccumulatedFees`, `XlmToken`, `FeeConfigHistory`) are bumped on every state-modifying contract entry point via `bump_instance_ttl`.
 - Scout subscription, auto-renew, contact, and trial offer operations automatically extend related persistent TTLs.
-- `TrialOffer` and index reads extend their respective TTLs, preventing silent loss of opportunity and index state.
-- `TrialEscrow` and `ContactCount` currently lack code-level TTL extensions and receive Soroban default persistent TTL (~4,096 ledgers). These missing TTL call sites are flagged for resolution in a separate bug issue.
+- `TrialOffer` and `TrialEscrow` reads extend their respective TTLs, preventing silent loss of opportunity and index state.
+- `TrialEscrow` is extended on `log_trial_offer` write and on each `expire_trial_offers` sweep pass for non-expired entries, ensuring the record outlives its own `expires_at` window.
 
 ## Recovery Paths (Archived-but-Not-Evicted Data)
 
