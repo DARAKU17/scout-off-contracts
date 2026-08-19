@@ -17,10 +17,10 @@ mod types;
 
 pub use errors::VerificationError;
 pub use types::{
-    AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
-    Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
-    PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
-    VerificationWiringState,
+    AttestationStatus, ContractHealth, DataKey, DiversityConfig, GlobalMilestoneEntry,
+    GlobalMilestoneIndexPage, Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef,
+    MilestoneWithValidatorStatus, PendingMilestoneClaim, PendingVoteRef, Validator,
+    ValidatorActivityReport, ValidatorStatus, VerificationWiringState,
 };
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Val, Vec};

@@ -19,6 +19,7 @@ pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
 pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
 pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
 pub const FEE_CONFIG_DELAY_BYPASSED: &str = "fee_config_delay_bypassed";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 
 /// topics: (event_name, admin)  data: admin
 pub fn contract_initialized(env: &Env, admin: &Address) {
