@@ -23,6 +23,11 @@ pub struct ContractHealth {
     pub initialized: bool,
     /// Whether state-changing operations are currently paused.
     pub paused: bool,
+    /// Whether the `scout_access.pay_to_contact` function is paused independently
+    /// of the whole-contract pause (function-scoped circuit breaker).
+    /// Always `false` for contracts that do not implement a `pay_to_contact`
+    /// function (`registration`, `verification`, `progress`).
+    pub pay_to_contact_paused: bool,
 }
 
 impl ProgressLevel {

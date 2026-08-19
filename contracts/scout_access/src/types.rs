@@ -140,6 +140,10 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for `pay_to_contact` (independent of the
+    /// whole-contract `Paused` flag). Stored in instance storage, defaults to
+    /// `false` when absent. Mirrors `verification`'s `PausedApproveMilestone`.
+    PausedPayToContact,
     FeeConfig,
     /// Proposed fee configuration awaiting activation after a 7-day delay
     PendingFeeConfig,

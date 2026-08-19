@@ -2,12 +2,12 @@
 mod errors;
 mod events;
 mod types;
-use errors::ScoutAccessError;
 use types::{
     ContactRecord, DataKey, FeeConfigHistoryEntry, FeeConfigProposal, ProContactPeriod,
     ScoutAccessWiringState, Subscription, TrialEscrow, TrialOffer,
 };
 
+pub use errors::ScoutAccessError;
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
@@ -363,6 +363,45 @@ impl ScoutAccessContract {
             .ok_or(ScoutAccessError::NotInitialized)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         events::contract_unpaused(&env, &admin);
+        Ok(())
+    }
+
+    /// Pause the `pay_to_contact` function independently (function-scoped circuit
+    /// breaker), mirroring `verification.pause_approve_milestone`. The
+    /// whole-contract pause still takes precedence; this enables granular control
+    /// when only fee-charging contact needs to be halted (e.g. a suspected
+    /// fee-calculation bug or a griefing attack) without blocking scouts from
+    /// reading their subscription status or `subscribe`/trial-offer flows.
+    /// All other functions remain operational. Admin only. (issue #1056)
+    pub fn pause_pay_to_contact(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(ScoutAccessError::NotInitialized)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedPayToContact, &true);
+        events::pay_to_contact_paused(&env, &admin);
+        Ok(())
+    }
+
+    /// Unpause the `pay_to_contact` function (function-scoped circuit breaker).
+    /// Admin only. (issue #1056)
+    pub fn unpause_pay_to_contact(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(ScoutAccessError::NotInitialized)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedPayToContact, &false);
+        events::pay_to_contact_unpaused(&env, &admin);
         Ok(())
     }
 
@@ -856,6 +895,7 @@ impl ScoutAccessContract {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_pay_to_contact_not_paused(&env)?;
         scout.require_auth();
 
         let subscription: Subscription = env
@@ -1810,9 +1850,15 @@ impl ScoutAccessContract {
             .instance()
             .get::<DataKey, bool>(&DataKey::Paused)
             .unwrap_or(false);
+        let pay_to_contact_paused = env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedPayToContact)
+            .unwrap_or(false);
         ContractHealth {
             initialized,
             paused,
+            pay_to_contact_paused,
         }
     }
 
@@ -1946,6 +1992,22 @@ impl ScoutAccessContract {
             .unwrap_or(false)
         {
             return Err(ScoutAccessError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Check that `pay_to_contact` is not paused (function-scoped circuit
+    /// breaker). Independent of the whole-contract `Paused` flag; defaults to
+    /// `false` (not paused) when the flag has never been set. Mirrors
+    /// `verification::require_approve_milestone_not_paused`. (issue #1056)
+    fn require_pay_to_contact_not_paused(env: &Env) -> Result<(), ScoutAccessError> {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedPayToContact)
+            .unwrap_or(false)
+        {
+            return Err(ScoutAccessError::PayToContactPaused);
         }
         Ok(())
     }

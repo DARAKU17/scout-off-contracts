@@ -28,6 +28,14 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v1.0.0`
+- Release date: `2026-08-19`
+- Contracts affected: `scout_access`
+- Summary: Added a function-scoped circuit breaker for `pay_to_contact` (issue #1056), mirroring `verification`'s `pause_approve_milestone` pattern. New admin fns `pause_pay_to_contact`/`unpause_pay_to_contact` gate only `pay_to_contact` (fee-charging contact) while leaving subscriptions, contact reads, and trial offers fully operational; the whole-contract `ContractPaused` (3) still takes precedence when both are set. `health()` now reports the flag via a new `pay_to_contact_paused: bool` field on `ContractHealth`, `pay_to_contact` returns new error code `PayToContactPaused` (30), and the `pay_to_contact_paused`/`pay_to_contact_unpaused` events fire on the corresponding admin calls. Also fixed a pre-existing doc drift: `WIRING_UPDATED` event constant was referenced by `update_progress_contract` but never defined, and `ScoutAccessError` (29 `SubscriptionRecordEvicted`) was missing from the reference docs.
+- Classification: `Breaking (MAJOR)` — `ContractHealth` (the `health()` return type, defined in `scoutchain-shared-types` and shared by all four contracts) gains a field. `registration`/`verification`/`progress` construct the struct with `pay_to_contact_paused: false`, so their behavior is unchanged but SDK bindings must be regenerated. New error code and events are additive.
+
+> **Migration guide:** Clients deserializing `health()`'s `ContractHealth` return value must regenerate bindings to include the new `pay_to_contact_paused` field. Clients calling `pay_to_contact` may now receive `PayToContactPaused` (30) and should surface it as "contact service temporarily paused".
+
 - Version: `v0.3.0`
 - Release date: `2026-08-18`
 - Contracts affected: `progress`, `registration`, `scout_access`, `verification`

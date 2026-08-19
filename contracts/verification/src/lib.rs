@@ -2154,6 +2154,7 @@ impl VerificationContract {
         ContractHealth {
             initialized,
             paused,
+            pay_to_contact_paused: false,
         }
     }
 
