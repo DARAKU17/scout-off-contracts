@@ -131,6 +131,13 @@ pub enum DataKey {
     /// verifiable via `verify_history_proof` without trusting the RPC node
     /// that served the query — see `get_progress_root`.
     HistoryRoot(u64),
+
+    /// Boolean flag (`true`) written by `open_migration_window`; absent or
+    /// `false` means the migration window is closed. All `admin_seed_*`
+    /// functions on this contract check this flag before writing any state.
+    /// Cleared by `close_migration_window`. Stored in instance storage so it
+    /// is immediately visible and requires no TTL management.
+    MigrationActive,
     /// Re-wiring epoch for [`DataKey::RegistrationContract`], bumped by
     /// every `set_registration_contract` call. See
     /// `scoutchain_shared_types::WiringLink` and

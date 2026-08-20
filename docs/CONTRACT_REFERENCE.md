@@ -1934,26 +1934,30 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `dispute_milestone(player_wallet: Address, player_id: u64, milestone_index: u32, reason: String) -> Result<(), VerificationError>`
+#### `dispute_milestone(player_wallet: Address, player_id: u64, milestone_index: u32, reason: String, impact_score: u32) -> Result<(), VerificationError>`
 
 Allow a player to dispute a milestone they believe was wrongly attributed.
-Only the player associated with `player_id` may submit a dispute. A new dispute
-is stored as `resolved: false` and `upheld: false`. Only one dispute record may
-exist per `(player_id, milestone_index)` pair. Emits a `milestone_disputed` event.
+Only the player associated with `player_id` may submit a dispute. The
+`impact_score` parameter routes the dispute: if `impact_score >= jury_config.impact_threshold`
+the dispute is jury-required and must be finalized via `tally_dispute`; otherwise
+the existing admin-only `resolve_dispute` path applies.
+
+The current `JuryConfig` (quorum and voting window) is **snapshotted** at
+filing time — later calls to `set_jury_config` cannot alter an in-progress dispute's
+rules. A new dispute is stored as `resolved: false`, `upheld: false`, with
+`votes_for: 0` and `votes_against: 0`. Only one dispute record may exist per
+`(player_id, milestone_index)` pair. Emits a `milestone_disputed` event.
 
 Authorization works in two steps:
 1. `player_wallet.require_auth()` proves the caller controls the claimed wallet.
 2. A cross-contract call to the **registration contract** (`get_player(player_id)`)
    verifies that `profile.wallet == player_wallet`, binding the wallet to the
-   player ID. This prevents wallet A from disputing milestones for player B.
-
-The registration contract address must be set via `set_registration_contract`
-before any disputes can be filed.
+   player ID.
 
 | | |
 |---|---|
 | **Auth** | `player_wallet` must sign, and must match the wallet on record for `player_id` in the registration contract |
-| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) · `RegistrationCallFailed` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `Unauthorized` · `InvalidInput` (dispute already exists) · `RegistrationCallFailed` · `Overflow` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -1961,7 +1965,114 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   --player_wallet $PLAYER_ADDRESS \
   --player_id 1 \
   --milestone_index 1 \
-  --reason '"Milestone not actually completed"'
+  --reason '"Milestone not actually completed"' \
+  --impact_score 120
+```
+
+---
+
+#### `set_jury_config(impact_threshold: u32, quorum: u32, voting_window_secs: u64) -> Result<(), VerificationError>`
+
+Admin-only. Configure the jury escalation parameters. Changes only affect
+disputes filed **after** this call — in-flight disputes keep their snapshotted
+values.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `impact_threshold` | 100 | Disputes with `impact_score >= threshold` are jury-routed |
+| `quorum` | 3 | Minimum distinct validator votes required for a jury outcome |
+| `voting_window_secs` | 604800 | Seconds after filing when the voting window closes (7 days) |
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- set_jury_config \
+  --impact_threshold 100 \
+  --quorum 3 \
+  --voting_window_secs 604800
+```
+
+---
+
+#### `get_jury_config() -> JuryConfig`
+
+Return the current `JuryConfig` (`impact_threshold`, `quorum`, `voting_window_secs`).
+Returns defaults (100 / 3 / 604800) if `set_jury_config` has never been called.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID -- get_jury_config
+```
+
+---
+
+#### `cast_dispute_vote(validator: Address, player_id: u64, milestone_index: u32, for_upheld: bool) -> Result<(), VerificationError>`
+
+Cast a validator vote on a jury-required milestone dispute. All four eligibility
+rules must hold:
+
+1. Wallet is a registered **active** validator.
+2. Validator is **not** the original approver of the disputed milestone (conflict of interest).
+3. Validator has **not** already voted on this dispute.
+4. Dispute is jury-required, unresolved, and the voting window is still open.
+
+Vote tallies (`votes_for` / `votes_against`) are updated atomically on the
+dispute record. An individual `DisputeVote` record (with `voted_at` timestamp)
+is written for audit trail. Emits `dispute_vote_cast`.
+
+| | |
+|---|---|
+| **Auth** | `validator` must sign |
+| **Errors** | `ContractPaused` · `NotInitialized` · `ValidatorNotFound` · `ValidatorInactive` · `MilestoneNotFound` · `NotJuryDispute` · `DisputeAlreadyResolved` · `VotingWindowClosed` · `ConflictOfInterest` · `AlreadyVoted` · `Overflow` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- cast_dispute_vote \
+  --validator $VALIDATOR_ADDRESS \
+  --player_id 1 \
+  --milestone_index 1 \
+  --for_upheld true
+```
+
+---
+
+#### `tally_dispute(player_id: u64, milestone_index: u32) -> Result<(), VerificationError>`
+
+Finalize a jury-required milestone dispute. Callable by anyone (no admin required).
+Succeeds when the dispute is jury-required, unresolved, and either:
+
+- **Early close**: total votes ≥ quorum **and** `votes_for ≠ votes_against` (clear majority), or
+- **Deadline passed**: current ledger timestamp ≥ `voting_deadline`.
+
+**Outcome rules:**
+
+| Condition | `upheld` |
+|-----------|---------|
+| Below quorum at deadline | `false` |
+| `votes_for > votes_against` | `true` |
+| `votes_against > votes_for` | `false` |
+| Tie (`votes_for == votes_against`) | `false` (tie-break: reject) |
+
+Marks the dispute resolved, decrements the active-disputes counter, removes
+the dispute from the open-dispute index, and emits `dispute_tallied`.
+Does **not** roll back player progress (same semantics as `resolve_dispute`).
+
+| | |
+|---|---|
+| **Auth** | None (callable by anyone) |
+| **Errors** | `ContractPaused` · `NotInitialized` · `MilestoneNotFound` · `NotJuryDispute` · `DisputeAlreadyResolved` · `VotingWindowOpen` (tied at quorum, window open) · `QuorumNotReached` (below quorum, window open) · `Overflow` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- tally_dispute --player_id 1 --milestone_index 1
 ```
 
 ---
@@ -1974,10 +2085,13 @@ decrements `get_active_disputes_count()`, and emits a `dispute_resolved` event.
 This function deliberately does not roll back player progress when `upheld` is
 true; that corrective workflow is tracked separately.
 
+**Returns `DisputeRequiresJury`** for disputes with `jury_required == true` —
+those must be finalized via `tally_dispute`, not by admin.
+
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` · `MilestoneNotFound` (no dispute recorded) · `DisputeAlreadyResolved` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `Unauthorized` · `MilestoneNotFound` (no dispute recorded) · `DisputeAlreadyResolved` · `DisputeRequiresJury` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
@@ -1990,7 +2104,9 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 Read a milestone dispute by `(player_id, milestone_index)`. `MilestoneDispute`
 has `player_id: u64`, `milestone_index: u32`, `reason: String`,
-`disputed_at: u64`, `resolved: bool`, and `upheld: bool`.
+`disputed_at: u64`, `resolved: bool`, `upheld: bool`, `impact_score: u32`,
+`jury_required: bool`, `quorum: u32`, `voting_deadline: u64`,
+`votes_for: u32`, and `votes_against: u32`.
 
 | | |
 |---|---|
@@ -3455,8 +3571,9 @@ player to Level 3 (Elite Tier).
 If called after the escrow's `expires_at`, no level advancement is
 attempted: the escrowed fee is refunded to the originating scout, the
 `TrialEscrow` record is removed, `trial_offer_expired` is emitted, and the
-call returns `TrialOfferExpired`. The scout must call `log_trial_offer`
-again to create a new offer/escrow.
+call returns `Ok(())`. Returning an error would roll back the refund and
+cleanup under Soroban transaction semantics. The scout must call
+`log_trial_offer` again to create a new offer/escrow.
 
 `idempotency_nonce` is optional. If supplied and that nonce was already
 recorded by a prior successful confirmation, the call returns `Ok(())`
@@ -3467,7 +3584,7 @@ double-spending the escrow or re-advancing the level.
 | | |
 |---|---|
 | **Auth** | `player_wallet` must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `TrialOfferAlreadyConfirmed` · `TrialOfferNotFound` · `TrialOfferExpired` · `InvalidInput` · `ProgressCallFailed` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `TrialOfferAlreadyConfirmed` · `TrialOfferNotFound` · `InvalidInput` · `ProgressCallFailed` |
 
 **Check precedence order** (when multiple error conditions are simultaneously
 true, the first matching check in this list wins):
@@ -3477,15 +3594,15 @@ true, the first matching check in this list wins):
 | 1 | Contract is paused | `ContractPaused` (3) |
 | 2 | Contract is not initialized | `NotInitialized` (2) |
 | 3 | Player auth (`player_wallet`) | panic / host auth error |
-| 4 | No `TrialEscrow` record exists for `(player_id, index)` — never created, or already consumed by a prior confirmation/expiry sweep | `TrialOfferAlreadyConfirmed` (22) |
-| 5 | No `TrialOffer` record exists for `(player_id, index)` | `TrialOfferNotFound` (11) |
-| 6 | `now > escrow.expires_at` — escrow is refunded to the scout and the `TrialEscrow` record removed | `TrialOfferExpired` (23) |
-| 7 | `idempotency_nonce` supplied and already recorded from a prior confirmation | *(none — returns `Ok(())`)* |
+| 4 | `idempotency_nonce` supplied and already recorded from a prior confirmation | *(none — returns `Ok(())`)* |
+| 5 | No `TrialEscrow` record exists for `(player_id, index)` — never created, or already consumed by a prior confirmation/expiry sweep | `TrialOfferAlreadyConfirmed` (22) |
+| 6 | No `TrialOffer` record exists for `(player_id, index)` | `TrialOfferNotFound` (11) |
+| 7 | `now > escrow.expires_at` — escrow is refunded, the `TrialEscrow` record removed, and `trial_offer_expired` emitted | `Ok(())` |
 | 8 | Progress contract not registered | `InvalidInput` (15) |
 | 9 | Cross-contract `advance_level` fails | `ProgressCallFailed` (14) |
 
 > **Design note — `TrialOfferAlreadyConfirmed` also covers "never existed"
-> and "already expired" (Priority 4)**: the `TrialEscrow` record is removed
+> and "already expired" (Priority 5)**: the `TrialEscrow` record is removed
 > both by a successful confirmation and by the expiry-refund branch (and by
 > `expire_trial_offers`), so a missing escrow is ambiguous between "already
 > confirmed," "already expired and refunded," and "no such offer was ever
@@ -3493,11 +3610,15 @@ true, the first matching check in this list wins):
 > callers should treat it as "nothing left to confirm" rather than
 > distinguishing the sub-cases.
 
-> **Design note — expiry check runs before the idempotency short-circuit
-> (Priority 6 before 7)**: a retried call carrying a previously-used nonce
-> still returns `TrialOfferExpired` if the offer has since expired — the
-> nonce only short-circuits a replay of a *successful* confirmation, not an
-> expired one.
+> **Design note — idempotency short-circuit runs before the escrow load
+> (Priority 4)**: a nonce is only recorded by a *successful* confirmation
+> (it is persisted after `advance_level` succeeds, in the same transaction
+> that consumes the escrow), so a recorded nonce implies the escrow is
+> already gone. Checking the nonce first lets a client safely retry a
+> timed-out confirmation and receive `Ok(())` instead of a misleading
+> `TrialOfferAlreadyConfirmed`. There is no scenario where a recorded nonce
+> coexists with an unexpired escrow, so the expiry check (Priority 7) can
+> never be shadowed by this short-circuit.
 
 > **Design note — escrow release is gated on the cross-contract call
 > (Priority 9)**: the `TrialEscrow` record and its `OutstandingTrialEscrows`
@@ -4444,8 +4565,10 @@ pub struct TrialOffer {
 | 12 | `ScoutNotFound` | Invalid `scout_id` |
 | 13 | `InvalidInput` | Field too long, bad hash count, or empty value |
 | 14 | `PendingAdminNotSet` | `accept_admin` called without a pending proposal |
-| 15 | `InvalidMigrationAuthorization` | Migration authorization signature is invalid or expired |
-| 16 | `MigrationNonceAlreadyUsed` | Migration nonce has already been used (replay detected) |
+| 15 | `PlayerCapReached` | Player registration cap reached — a hard stop, not retryable |
+| 16 | `RegistrationCooldown` | Caller registered again before the cooldown elapsed — retryable |
+| 17 | `PlayerRecordEvicted` | `restore_player_record` targeted a fully evicted, unrecoverable player entry |
+| 18 | `ScoutRecordEvicted` | `restore_scout_record` targeted a fully evicted, unrecoverable scout entry |
 
 ### `VerificationError` (verification contract)
 
@@ -4524,7 +4647,7 @@ pub struct TrialOffer {
 | 20 | `ProContactLimitReached` | Pro-tier scout has reached the `pro_contact_limit` contacts for the current subscription period (Elite scouts are exempt from this limit) |
 | 21 | `PendingAdminNotSet` | `accept_admin` called before an admin transfer was proposed via `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for the same trial offer |
-| 23 | `TrialOfferExpired` | `confirm_trial_offer` called after the offer's confirmation window elapsed |
+| 23 | `TrialOfferExpired` | Legacy compatibility code; expiry confirmation now commits the refund and returns success |
 | 24 | `NoPendingFeeConfig` | `activate_fee_config` called with no pending proposal to activate |
 | 25 | `FeeConfigProposalNotReady` | `activate_fee_config` called before the pending proposal's activation delay elapsed |
 | 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |

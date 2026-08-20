@@ -28,6 +28,12 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v1.0.1`
+- Release date: `2026-08-20`
+- Contracts affected: `shared-tests` (removed — no deployed contract affected)
+- Summary: Removed the orphaned `contracts/shared-tests` phantom crate (issue #1117). The directory contained only a `src/lib.rs` with no `Cargo.toml`, was never registered as a workspace member, and its four `#[test]` functions had empty placeholder bodies that asserted nothing. Real, workspace-compiled coverage for the same admin-transfer properties already exists in `contracts/{registration,verification,progress,scout_access}/tests/admin_transfer_properties.rs` (documented in `docs/ADMIN_TRANSFER_VERIFICATION.md`). The dead crate was originally deleted in #1070 (PR #1074, commit `9feba1a`); this entry formally closes the tracking issue #1117 and confirms `cargo test --workspace` and `cargo build --workspace` remain unaffected (the crate was never part of the workspace).
+- Classification: `Non-breaking (PATCH)`
+
 - Version: `v1.0.0`
 - Release date: `2026-08-19`
 - Contracts affected: `verification`

@@ -8,15 +8,18 @@
 //! the Pro-tier contact-count increment all match the number of *distinct*
 //! player_ids in the batch, not the raw input length.
 
-use scoutchain_scout_access::{FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier};
+use scoutchain_scout_access::{
+    FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier,
+};
 use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env};
 
 const CONTACT_FEE: i128 = 100_000;
+const BASIC_FEE: i128 = 1_000_000;
 
 fn default_fees() -> FeeConfig {
     FeeConfig {
         contact_fee_stroops: CONTACT_FEE,
-        basic_sub_stroops: 1_000_000,
+        basic_sub_stroops: BASIC_FEE,
         pro_sub_stroops: 3_000_000,
         elite_sub_stroops: 10_000_000,
         sub_duration_secs: 2_592_000,
@@ -26,7 +29,13 @@ fn default_fees() -> FeeConfig {
     }
 }
 
-fn setup() -> (Env, ScoutAccessContractClient<'static>, Address, Address, Address) {
+fn setup() -> (
+    Env,
+    ScoutAccessContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -36,7 +45,9 @@ fn setup() -> (Env, ScoutAccessContractClient<'static>, Address, Address, Addres
     let admin = Address::generate(&env);
     let scout = Address::generate(&env);
 
-    let xlm = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let xlm = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     StellarAssetClient::new(&env, &xlm).mint(&scout, &10_000_000i128);
 
     client.initialize(&admin, &xlm, &default_fees());
@@ -47,14 +58,17 @@ fn setup() -> (Env, ScoutAccessContractClient<'static>, Address, Address, Addres
 
 /// Reads the Pro/Basic-tier monthly contact-count bucket directly from
 /// storage, mirroring how `increment_contact_count_by` writes it.
-fn read_contact_count(env: &Env, scout: &Address) -> u32 {
+fn read_contact_count(env: &Env, scout: &Address, contract_id: &Address) -> u32 {
     const SECONDS_PER_MONTH: u64 = 2_592_000;
     let month_bucket = env.ledger().timestamp() / SECONDS_PER_MONTH;
-    env.storage().persistent().get::<
-        scoutchain_scout_access::DataKey,
-        u32,
-    >(&scoutchain_scout_access::DataKey::ContactCount(scout.clone(), month_bucket))
-    .unwrap_or(0)
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<scoutchain_scout_access::DataKey, u32>(
+                &scoutchain_scout_access::DataKey::ContactCount(scout.clone(), month_bucket),
+            )
+            .unwrap_or(0)
+    })
 }
 
 #[test]
@@ -72,17 +86,18 @@ fn test_batch_contact_players_dedupes_exact_duplicate_ids() {
     // Exactly one ContactRecord was written for player 5.
     assert!(client.get_contact_record(&scout, &5u64).is_some());
 
-    // Exactly one contact_fee_stroops was charged, not two.
+    // Exactly one contact_fee_stroops was charged, not two (plus the Basic
+    // subscription fee paid during setup).
     let balance = soroban_sdk::token::Client::new(&env, &xlm).balance(&scout);
     assert_eq!(
         balance,
-        10_000_000i128 - CONTACT_FEE,
+        10_000_000i128 - BASIC_FEE - CONTACT_FEE,
         "scout should only be charged for one distinct contact"
     );
 
     // Quota/contact-count increment reflects the deduplicated count.
     assert_eq!(
-        read_contact_count(&env, &scout),
+        read_contact_count(&env, &scout, &client.address),
         1,
         "contact count should increment by the deduplicated count (1), not the raw input length (2)"
     );
@@ -106,12 +121,12 @@ fn test_batch_contact_players_dedupes_duplicate_among_distinct_ids() {
     let balance = soroban_sdk::token::Client::new(&env, &xlm).balance(&scout);
     assert_eq!(
         balance,
-        10_000_000i128 - (CONTACT_FEE * 2),
+        10_000_000i128 - BASIC_FEE - (CONTACT_FEE * 2),
         "scout should be charged for exactly 2 distinct contacts, not 3"
     );
 
     assert_eq!(
-        read_contact_count(&env, &scout),
+        read_contact_count(&env, &scout, &client.address),
         2,
         "contact count should increment by the deduplicated count (2), not the raw input length (3)"
     );
@@ -124,11 +139,15 @@ fn test_batch_contact_players_still_skips_already_contacted_players() {
     // Pre-existing contact from a prior call.
     client.batch_contact_players(&scout, &soroban_sdk::vec![&env, 5u64]);
     let balance_after_first = soroban_sdk::token::Client::new(&env, &xlm).balance(&scout);
-    assert_eq!(balance_after_first, 10_000_000i128 - CONTACT_FEE);
+    assert_eq!(
+        balance_after_first,
+        10_000_000i128 - BASIC_FEE - CONTACT_FEE
+    );
 
     // Second batch mixes an already-contacted id, a repeated new id, and a
     // fresh id: only the fresh id (7) should be charged for.
-    let new_contacts = client.batch_contact_players(&scout, &soroban_sdk::vec![&env, 5u64, 7u64, 7u64]);
+    let new_contacts =
+        client.batch_contact_players(&scout, &soroban_sdk::vec![&env, 5u64, 7u64, 7u64]);
     assert_eq!(
         new_contacts, 1,
         "already-contacted 5 is free, and duplicate 7 counts once"
@@ -142,7 +161,7 @@ fn test_batch_contact_players_still_skips_already_contacted_players() {
     );
 
     assert_eq!(
-        read_contact_count(&env, &scout),
+        read_contact_count(&env, &scout, &client.address),
         2,
         "total contact count across both calls should be 2 (player 5, then player 7)"
     );

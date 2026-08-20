@@ -61,6 +61,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -229,6 +232,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -401,6 +407,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -569,6 +578,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -741,6 +753,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -909,6 +924,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -1081,6 +1099,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -1249,6 +1270,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -1421,6 +1445,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -1589,6 +1616,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -1761,6 +1791,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -1929,6 +1962,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -2101,6 +2137,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -2269,6 +2308,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -2441,6 +2483,9 @@
                   "string": "Test License"
                 },
                 {
+                  "string": "Test Academy"
+                },
+                {
                   "vec": []
                 }
               ]
@@ -2609,6 +2654,9 @@
                 },
                 {
                   "string": "Test License"
+                },
+                {
+                  "string": "Test Academy"
                 },
                 {
                   "vec": []
@@ -2869,6 +2917,18 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "VerificationContractEpoch"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     }
                   ]
@@ -12210,6 +12270,254 @@
               "key": {
                 "vec": [
                   {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "1"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "2"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "5"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "7"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "10"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "20"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "42"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "PlayerAffiliations"
+                  },
+                  {
+                    "u64": "55"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "string": "Test Academy"
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "vec": [
+                  {
                     "symbol": "Validator"
                   },
                   {
@@ -12226,6 +12534,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12298,6 +12614,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -12362,6 +12686,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12434,6 +12766,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -12498,6 +12838,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12570,6 +12918,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -12634,6 +12990,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12706,6 +13070,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -12770,6 +13142,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12842,6 +13222,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -12906,6 +13294,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -12978,6 +13374,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -13042,6 +13446,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {
@@ -13114,6 +13526,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -13182,6 +13602,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "credentials"
                     },
                     "val": {
@@ -13246,6 +13674,14 @@
                     },
                     "val": {
                       "bool": true
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "affiliation"
+                    },
+                    "val": {
+                      "string": "Test Academy"
                     }
                   },
                   {

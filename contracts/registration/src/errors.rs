@@ -115,6 +115,31 @@ mod tests {
         assert_eq!(ScoutChainError::ScoutRecordEvicted as u32, 18);
     }
 
+    /// The two variants this file previously conflated.
+    ///
+    /// `PlayerCapReached` is a hard stop — the platform is full.
+    /// `RegistrationCooldown` means "try again later". A client switching on
+    /// the numeric code shows the wrong thing to the user if these two ever
+    /// swap or merge, so both are pinned here as well as in the table above,
+    /// with the reasoning attached.
+    ///
+    /// Note on what this does *not* need to guard: two variants sharing one
+    /// discriminant is rejected by rustc itself (E0081, "discriminant value
+    /// assigned more than once") even for a fieldless `#[repr(u32)]` enum, so
+    /// a collision cannot reach a green build. The failure mode that *can*
+    /// slip through is renumbering — moving an already-shipped code to a new
+    /// variant, which compiles cleanly and silently changes what every
+    /// existing client sees. That is what these assertions exist for.
+    #[test]
+    fn player_cap_and_cooldown_are_distinguishable() {
+        assert_eq!(ScoutChainError::PlayerCapReached as u32, 15);
+        assert_eq!(ScoutChainError::RegistrationCooldown as u32, 16);
+        assert_ne!(
+            ScoutChainError::PlayerCapReached as u32,
+            ScoutChainError::RegistrationCooldown as u32
+        );
+    }
+
     #[test]
     fn scout_chain_error_source_matches_expected_unique_codes() {
         let mut in_error_enum = false;

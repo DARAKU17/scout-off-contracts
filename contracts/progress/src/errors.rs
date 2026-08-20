@@ -36,11 +36,25 @@ pub enum ProgressError {
     /// `accept_admin` called before an admin transfer was proposed.
     PendingAdminNotSet = 10,
 
-    // ── Archival recovery ──
+    // ── Migration ──
+    /// Migration window is not currently active on this contract.
+    /// Call `open_migration_window` (admin-only) before seeding state.
+    MigrationNotActive = 11,
+    /// A `HistoryEntry` already exists at `(player_id, history_index)` with
+    /// different content. Identical replays are no-ops; conflicting replays
+    /// are rejected to prevent silent overwriting of committed history.
+    HistoryAlreadyExists = 12,
+    /// The Merkle root independently recomputed from the seeded history does
+    /// not match the `expected_root` supplied by the caller.
+    /// The transaction is atomically rolled back — no partial state escapes.
+    MerkleRootMismatch = 13,
+    /// The supplied `history_index` is either zero, non-contiguous (gap in
+    /// sequence), or would overwrite an existing entry at a different position.
+    InvalidHistoryIndex = 14,
     /// `restore_player_level_record` targeted a player-level entry whose
     /// archival grace period has fully elapsed (evicted, not merely archived)
     /// and is unrecoverable.
-    PlayerLevelRecordEvicted = 11,
+    PlayerLevelRecordEvicted = 15,
 }
 
 impl AdminError for ProgressError {

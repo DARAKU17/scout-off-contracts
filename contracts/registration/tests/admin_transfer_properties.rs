@@ -1,28 +1,67 @@
 //! Property-based tests for the admin propose/accept flow (#824).
 //!
-//! These tests verify the same invariant set across all four contracts:
-//! 1. `accept_admin` fails unless called by the exact proposed address.
+//! These tests verify the same invariant set:
+//! 1. `accept_admin` fails unless the pending (proposed) address authorizes it.
 //! 2. Double `propose_admin` replaces, never queues, the pending proposal.
 //! 3. Admin is immutable except via successful `accept_admin`.
 //! 4. A replaced proposal cannot be accepted by the old proposed address.
 
-use scoutchain_registration::{ScoutChainContract, ScoutChainContractClient};
-use soroban_sdk::{Address, Env};
+use scoutchain_registration::{RegistrationContract, RegistrationContractClient};
+use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::{vec, Address, Env, Val, Vec};
 
 struct Harness {
     env: Env,
     admin: Address,
-    client: ScoutChainContractClient<'static>,
+    client: RegistrationContractClient<'static>,
+    contract_id: Address,
+}
+
+/// Mock a single authorization entry for the given address + invocation.
+fn auth(env: &Env, address: &Address, contract_id: &Address, fn_name: &str, args: Vec<Val>) {
+    env.mock_auths(&[MockAuth {
+        address,
+        invoke: &MockAuthInvoke {
+            contract: contract_id,
+            fn_name,
+            args,
+            sub_invokes: &[],
+        },
+    }]);
 }
 
 fn setup() -> Harness {
     let env = Env::default();
-    env.mock_all_auths();
     let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, ScoutChainContract);
-    let client = ScoutChainContractClient::new(&env, &contract_id);
+    let contract_id = env.register(RegistrationContract, ());
+    let client = RegistrationContractClient::new(&env, &contract_id);
+
+    auth(
+        &env,
+        &admin,
+        &contract_id,
+        "initialize",
+        vec![&env, admin.to_val()],
+    );
     client.initialize(&admin);
-    Harness { env, admin, client }
+
+    Harness {
+        env,
+        admin,
+        client,
+        contract_id,
+    }
+}
+
+fn propose(h: &Harness, new_admin: &Address) {
+    auth(
+        &h.env,
+        &h.admin,
+        &h.contract_id,
+        "propose_admin",
+        vec![&h.env, new_admin.to_val()],
+    );
+    h.client.propose_admin(new_admin);
 }
 
 // Property 1: only the proposed address can accept
@@ -31,8 +70,16 @@ fn setup() -> Harness {
 fn test_only_proposed_can_accept() {
     let h = setup();
     let proposed = Address::generate(&h.env);
-    h.client.propose_admin(&proposed);
-    let result = h.client.try_accept_admin(&proposed);
+    propose(&h, &proposed);
+
+    auth(
+        &h.env,
+        &proposed,
+        &h.contract_id,
+        "accept_admin",
+        vec![&h.env],
+    );
+    let result = h.client.try_accept_admin();
     assert!(result.is_ok());
 }
 
@@ -40,9 +87,11 @@ fn test_only_proposed_can_accept() {
 fn test_non_proposed_cannot_accept() {
     let h = setup();
     let proposed = Address::generate(&h.env);
-    let attacker = Address::generate(&h.env);
-    h.client.propose_admin(&proposed);
-    let result = h.client.try_accept_admin(&attacker);
+    propose(&h, &proposed);
+
+    // No auth entry for accept_admin → require_auth on the pending address
+    // traps, so the call must fail.
+    let result = h.client.try_accept_admin();
     assert!(result.is_err());
 }
 
@@ -53,11 +102,22 @@ fn test_double_propose_replaces_pending() {
     let h = setup();
     let first = Address::generate(&h.env);
     let second = Address::generate(&h.env);
-    h.client.propose_admin(&first);
-    h.client.propose_admin(&second);
-    let result = h.client.try_accept_admin(&first);
+    propose(&h, &first);
+    propose(&h, &second);
+
+    // The first proposal was replaced; first can no longer accept.
+    auth(&h.env, &first, &h.contract_id, "accept_admin", vec![&h.env]);
+    let result = h.client.try_accept_admin();
     assert!(result.is_err());
-    let result2 = h.client.try_accept_admin(&second);
+
+    auth(
+        &h.env,
+        &second,
+        &h.contract_id,
+        "accept_admin",
+        vec![&h.env],
+    );
+    let result2 = h.client.try_accept_admin();
     assert!(result2.is_ok());
 }
 
@@ -67,12 +127,15 @@ fn test_double_propose_replaces_pending() {
 fn test_admin_unchanged_before_accept() {
     let h = setup();
     let new_admin = Address::generate(&h.env);
-    h.client.propose_admin(&new_admin);
-    // The contract still operates under the old admin; verify by checking
-    // that a second proposal (admin-only) succeeds, proving admin didn't change.
+    propose(&h, &new_admin);
+
+    // The old admin is still in control: a second proposal (admin-only)
+    // succeeds, proving admin did not change.
     let third = Address::generate(&h.env);
-    h.client.propose_admin(&third);
-    let result = h.client.try_accept_admin(&third);
+    propose(&h, &third);
+
+    auth(&h.env, &third, &h.contract_id, "accept_admin", vec![&h.env]);
+    let result = h.client.try_accept_admin();
     assert!(result.is_ok());
 }
 
@@ -83,8 +146,10 @@ fn test_replaced_proposal_cannot_accept() {
     let h = setup();
     let first = Address::generate(&h.env);
     let second = Address::generate(&h.env);
-    h.client.propose_admin(&first);
-    h.client.propose_admin(&second);
-    let result = h.client.try_accept_admin(&first);
+    propose(&h, &first);
+    propose(&h, &second);
+
+    auth(&h.env, &first, &h.contract_id, "accept_admin", vec![&h.env]);
+    let result = h.client.try_accept_admin();
     assert!(result.is_err());
 }

@@ -11,8 +11,10 @@
 //! matching row in `ci/cpu-cost-budget.md` with a one-line justification in
 //! the PR description explaining why the growth is expected and acceptable.
 
-use scoutchain_verification::{RevocationSeverity, VerificationContract, VerificationContractClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use scoutchain_verification::{
+    RevocationSeverity, VerificationContract, VerificationContractClient,
+};
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
 // These starting budgets are deliberately generous placeholders, not
 // measured baselines: this environment could not run `cargo test` to
@@ -67,7 +69,12 @@ fn cost_register_validator() {
     let credentials = String::from_str(&env, "UEFA-A-License-2026");
 
     env.cost_estimate().budget().reset_default();
-    client.register_validator(&validator, &credentials, &String::from_str(&env, ""), &Vec::new(&env));
+    client.register_validator(
+        &validator,
+        &credentials,
+        &String::from_str(&env, ""),
+        &Vec::new(&env),
+    );
     assert_cpu_budget(&env, "register_validator", REGISTER_VALIDATOR_CPU_BUDGET);
 }
 
@@ -75,7 +82,12 @@ fn cost_register_validator() {
 fn cost_approve_milestone() {
     let (env, client) = setup();
     let validator = Address::generate(&env);
-    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &String::from_str(&env, ""), &Vec::new(&env));
+    client.register_validator(
+        &validator,
+        &String::from_str(&env, "UEFA-A-License-2026"),
+        &String::from_str(&env, ""),
+        &Vec::new(&env),
+    );
 
     env.cost_estimate().budget().reset_default();
     client.approve_milestone(
@@ -83,7 +95,8 @@ fn cost_approve_milestone() {
         &1u64,
         &String::from_str(&env, "scored a hat-trick"),
         &String::from_str(&env, CID_1),
-        &None);
+        &None,
+    );
     assert_cpu_budget(&env, "approve_milestone", APPROVE_MILESTONE_CPU_BUDGET);
 }
 
@@ -91,19 +104,26 @@ fn cost_approve_milestone() {
 fn cost_get_validator_milestones_page() {
     let (env, client) = setup();
     let validator = Address::generate(&env);
-    client.register_validator(&validator, &String::from_str(&env, "UEFA-A-License-2026"), &String::from_str(&env, ""), &Vec::new(&env));
+    client.register_validator(
+        &validator,
+        &String::from_str(&env, "UEFA-A-License-2026"),
+        &String::from_str(&env, ""),
+        &Vec::new(&env),
+    );
     client.approve_milestone(
         &validator,
         &1u64,
         &String::from_str(&env, "scored a hat-trick"),
         &String::from_str(&env, CID_2),
-        &None);
+        &None,
+    );
     client.approve_milestone(
         &validator,
         &2u64,
         &String::from_str(&env, "clean sheet"),
         &String::from_str(&env, CID_3),
-        &None);
+        &None,
+    );
 
     env.cost_estimate().budget().reset_default();
     client.get_validator_milestones_page(&validator, &0u32, &10u32);
@@ -142,6 +162,7 @@ fn cost_revoke_validator_cascade_50_limit_at_500_milestones() {
     client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-A-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 

@@ -18,14 +18,13 @@ pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
 pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
 pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
 pub const WIRING_UPDATED: &str = "wiring_updated";
+pub const DISPUTE_VOTE_CAST: &str = "dispute_vote_cast";
+pub const DISPUTE_TALLIED: &str = "dispute_tallied";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, ADMIN_TRANSFER_PROPOSED),
-            old_admin.clone(),
-        ),
+        (Symbol::new(env, ADMIN_TRANSFER_PROPOSED), old_admin.clone()),
         new_admin.clone(),
     );
 }
@@ -48,11 +47,13 @@ pub fn milestone_approved(
     evidence_hash: &String,
 ) {
     env.events().publish(
+        (Symbol::new(env, "milestone_approved"), validator.clone()),
         (
-            Symbol::new(env, "milestone_approved"),
-            validator.clone(),
+            player_id,
+            milestone_index,
+            description.clone(),
+            evidence_hash.clone(),
         ),
-        (player_id, milestone_index, description.clone(), evidence_hash.clone()),
     );
 }
 
@@ -75,7 +76,10 @@ pub fn validator_revoked(env: &Env, admin: &Address, wallet: &Address, reason: &
 /// topics: (event_name, admin)  data: (wallet, reason)
 pub fn validator_revoked_for_cause(env: &Env, admin: &Address, wallet: &Address, reason: &String) {
     env.events().publish(
-        (Symbol::new(env, "validator_revoked_for_cause"), admin.clone()),
+        (
+            Symbol::new(env, "validator_revoked_for_cause"),
+            admin.clone(),
+        ),
         (wallet.clone(), reason.clone()),
     );
 }
@@ -103,18 +107,14 @@ pub fn validator_transferred(
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
@@ -128,7 +128,10 @@ pub fn approve_milestone_paused(env: &Env, admin: &Address) {
 /// topics: (event_name, admin)  data: ()
 pub fn approve_milestone_unpaused(env: &Env, admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "approve_milestone_unpaused"), admin.clone()),
+        (
+            Symbol::new(env, "approve_milestone_unpaused"),
+            admin.clone(),
+        ),
         (),
     );
 }
@@ -156,7 +159,13 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
 /// addition to (not replacing) `progress_contract_updated`. `link`
 /// identifies which peer pointer changed (`"progress_contract"` or
 /// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -169,16 +178,31 @@ pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Addr
 
 /// Emitted when a player disputes a milestone (issue #471)
 /// topics: (event_name, player_wallet)  data: (player_id, milestone_index, reason)
-pub fn milestone_disputed(env: &Env, player_wallet: &Address, player_id: u64, milestone_index: u32, reason: &String) {
+pub fn milestone_disputed(
+    env: &Env,
+    player_wallet: &Address,
+    player_id: u64,
+    milestone_index: u32,
+    reason: &String,
+) {
     env.events().publish(
-        (Symbol::new(env, "milestone_disputed"), player_wallet.clone()),
+        (
+            Symbol::new(env, "milestone_disputed"),
+            player_wallet.clone(),
+        ),
         (player_id, milestone_index, reason.clone()),
     );
 }
 
 /// Emitted when an admin resolves a milestone dispute.
 /// topics: (event_name, admin)  data: (player_id, milestone_index, upheld)
-pub fn dispute_resolved(env: &Env, admin: &Address, player_id: u64, milestone_index: u32, upheld: bool) {
+pub fn dispute_resolved(
+    env: &Env,
+    admin: &Address,
+    player_id: u64,
+    milestone_index: u32,
+    upheld: bool,
+) {
     env.events().publish(
         (Symbol::new(env, "dispute_resolved"), admin.clone()),
         (player_id, milestone_index, upheld),
@@ -227,7 +251,12 @@ pub fn attestation_recorded(
 /// Emitted when a sub-threshold claim's voting window has elapsed and a new
 /// vote resets it to a fresh round, discarding all prior votes.
 /// topics: (event_name, player_id)  data: (evidence_hash, new_round)
-pub fn attestation_window_expired(env: &Env, player_id: u64, evidence_hash: &String, new_round: u32) {
+pub fn attestation_window_expired(
+    env: &Env,
+    player_id: u64,
+    evidence_hash: &String,
+    new_round: u32,
+) {
     env.events().publish(
         (Symbol::new(env, ATTESTATION_WINDOW_EXPIRED), player_id),
         (evidence_hash.clone(), new_round),
@@ -295,10 +324,7 @@ pub fn milestone_flagged_for_rereview(
     milestone_index: u32,
 ) {
     env.events().publish(
-        (
-            Symbol::new(env, "milestone_flagged"),
-            validator.clone(),
-        ),
+        (Symbol::new(env, "milestone_flagged"), validator.clone()),
         (player_id, milestone_index),
     );
 }
@@ -307,17 +333,9 @@ pub fn milestone_flagged_for_rereview(
 /// `rereview_milestone` (issue #1039).
 ///
 /// topics: (event_name, reviewer)  data: (player_id, milestone_index)
-pub fn milestone_flag_cleared(
-    env: &Env,
-    reviewer: &Address,
-    player_id: u64,
-    milestone_index: u32,
-) {
+pub fn milestone_flag_cleared(env: &Env, reviewer: &Address, player_id: u64, milestone_index: u32) {
     env.events().publish(
-        (
-            Symbol::new(env, "milestone_flag_cleared"),
-            reviewer.clone(),
-        ),
+        (Symbol::new(env, "milestone_flag_cleared"), reviewer.clone()),
         (player_id, milestone_index),
     );
 }
