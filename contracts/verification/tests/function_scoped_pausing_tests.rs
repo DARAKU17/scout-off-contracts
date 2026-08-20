@@ -6,7 +6,9 @@
 //! - Interaction between whole-contract pause and function-scoped pause
 //! - Admin controls for pause/unpause
 
-use scoutchain_verification::{VerificationContract, VerificationContractClient};
+use scoutchain_verification::{
+    RevocationSeverity, VerificationContract, VerificationContractClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     Address, Env, String,
@@ -41,6 +43,7 @@ fn setup() -> Harness {
     client.register_validator(
         &validator,
         &String::from_str(&env, CREDENTIALS),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 
@@ -247,6 +250,7 @@ fn test_register_validator_works_when_approve_milestone_paused() {
     h.client.register_validator(
         &new_validator,
         &String::from_str(&h.env, CREDENTIALS),
+        &String::from_str(&h.env, "Default Academy"),
         &soroban_sdk::Vec::new(&h.env),
     );
 }
@@ -263,11 +267,13 @@ fn test_batch_register_validators_works_when_approve_milestone_paused() {
             (
                 validator1,
                 String::from_str(&h.env, CREDENTIALS),
+                String::from_str(&h.env, "Default Academy"),
                 soroban_sdk::Vec::new(&h.env),
             ),
             (
                 validator2,
                 String::from_str(&h.env, "UEFA A License"),
+                String::from_str(&h.env, "Default Academy"),
                 soroban_sdk::Vec::new(&h.env),
             ),
         ],
@@ -288,7 +294,11 @@ fn test_revoke_validator_works_when_approve_milestone_paused() {
     h.client.pause_approve_milestone();
 
     // revoke_validator should still work
-    h.client.revoke_validator(&h.validator, &None);
+    h.client.revoke_validator(
+        &h.validator,
+        &RevocationSeverity::Routine,
+        &None,
+    );
 }
 
 #[test]
@@ -371,6 +381,7 @@ fn test_function_pause_independent_of_whole_contract_pause() {
     h.client.register_validator(
         &new_validator,
         &String::from_str(&h.env, CREDENTIALS),
+        &String::from_str(&h.env, "Default Academy"),
         &soroban_sdk::Vec::new(&h.env),
     );
 

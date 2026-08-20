@@ -16,7 +16,8 @@
 //! 6. CPU-instruction cost of the threshold-reaching call does not scale with vote count
 
 use scoutchain_verification::{
-    AttestationStatus, VerificationContract, VerificationContractClient, VerificationError,
+    AttestationStatus, RevocationSeverity, VerificationContract, VerificationContractClient,
+    VerificationError,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -42,6 +43,7 @@ fn register_validator(env: &Env, client: &VerificationContractClient) -> Address
     client.register_validator(
         &wallet,
         &String::from_str(env, CREDENTIALS),
+        &String::from_str(env, "Default Academy"),
         &soroban_sdk::Vec::new(env),
     );
     wallet
@@ -216,6 +218,7 @@ fn revoke_validator_retroactively_invalidates_a_pending_vote() {
     env.mock_all_auths();
     client.revoke_validator(
         &v1,
+        &RevocationSeverity::ForCause,
         &Some(String::from_str(&env, "Key compromise suspected")),
     );
 

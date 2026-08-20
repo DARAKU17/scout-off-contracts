@@ -2,26 +2,21 @@
 mod errors;
 mod events;
 mod types;
-use types::{FeeConfigProposal, ProContactPeriod};
 
-pub use types::{FeeConfig, FeeConfigHistoryEntry, SubscriptionTier};
+use types::{FeeConfigProposal, ProContactPeriod, ScoutAccessWiringState};
 
-// Export migration-related types for external consumers (tests, bindings).
-pub use types::{ContactRecord, Subscription, TrialEscrow, TrialOffer};
-
-// Export the storage-key enum for tests that inspect raw storage (mirrors the
-// re-export convention used by the progress and verification contracts).
-pub use types::DataKey;
-
-// Also expose the errors enum for external tests.
 pub use errors::ScoutAccessError;
+pub use types::{
+    ContactRecord, DataKey, FeeConfig, FeeConfigHistoryEntry, Subscription, SubscriptionTier,
+    TrialEscrow, TrialOffer,
+};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 use scoutchain_shared_types::{
-    require_admin,
+    read_wiring_link, require_admin,
     safe_math::{safe_add_i128, safe_add_u32, safe_add_u64, safe_mul_i128},
-    validate_cid, ContractHealth,
+    validate_cid, write_wiring_link, ContractHealth,
 };
 
 // Generated client for cross-contract calls to the progress contract.
@@ -367,6 +362,45 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Pause the `pay_to_contact` function independently (function-scoped circuit
+    /// breaker), mirroring `verification.pause_approve_milestone`. The
+    /// whole-contract pause still takes precedence; this enables granular control
+    /// when only fee-charging contact needs to be halted (e.g. a suspected
+    /// fee-calculation bug or a griefing attack) without blocking scouts from
+    /// reading their subscription status or `subscribe`/trial-offer flows.
+    /// All other functions remain operational. Admin only. (issue #1056)
+    pub fn pause_pay_to_contact(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(ScoutAccessError::NotInitialized)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedPayToContact, &true);
+        events::pay_to_contact_paused(&env, &admin);
+        Ok(())
+    }
+
+    /// Unpause the `pay_to_contact` function (function-scoped circuit breaker).
+    /// Admin only. (issue #1056)
+    pub fn unpause_pay_to_contact(env: Env) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(ScoutAccessError::NotInitialized)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedPayToContact, &false);
+        events::pay_to_contact_unpaused(&env, &admin);
+        Ok(())
+    }
+
     /// Register the progress contract address so log_trial_offer can
     /// atomically advance the player to Level 3 (admin only).
     ///
@@ -376,10 +410,14 @@ impl ScoutAccessContract {
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &addr);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &addr,
+        );
         events::progress_contract_updated(&env, &admin, &addr);
+        events::wiring_updated(&env, &admin, "progress_contract", &addr, epoch);
         Ok(())
     }
 
@@ -395,11 +433,40 @@ impl ScoutAccessContract {
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &addr,
+        );
         events::registration_contract_updated(&env, &admin, &addr);
+        events::wiring_updated(&env, &admin, "registration_contract", &addr, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of both cross-contract peer address pointers held
+    /// by this contract (progress, registration), each with its address and
+    /// re-wiring epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> ScoutAccessWiringState {
+        let progress_contract = read_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+        );
+        let registration_contract = read_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+        );
+        ScoutAccessWiringState {
+            progress_contract,
+            registration_contract,
+        }
     }
 
     /// Emergency refund: admin returns `amount` XLM (stroops) from the
@@ -772,14 +839,14 @@ impl ScoutAccessContract {
         // subscription can begin in a different calendar month from the
         // previous contact and both entrypoints must share one quota.
         let period_key = DataKey::ProContactCount(scout.clone());
-        let period: ProContactPeriod = env
-            .storage()
-            .persistent()
-            .get(&period_key)
-            .unwrap_or(ProContactPeriod {
-                period_start: sub.subscribed_at,
-                count: 0,
-            });
+        let period: ProContactPeriod =
+            env.storage()
+                .persistent()
+                .get(&period_key)
+                .unwrap_or(ProContactPeriod {
+                    period_start: sub.subscribed_at,
+                    count: 0,
+                });
         let current = if period.period_start == sub.subscribed_at {
             period.count
         } else {
@@ -831,6 +898,7 @@ impl ScoutAccessContract {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_pay_to_contact_not_paused(&env)?;
         scout.require_auth();
 
         let subscription: Subscription = env
@@ -1066,14 +1134,14 @@ impl ScoutAccessContract {
         // counter before charging; batch writes it after the single charge.
         if sub.tier == SubscriptionTier::Pro {
             let period_key = DataKey::ProContactCount(scout.clone());
-            let period: ProContactPeriod = env
-                .storage()
-                .persistent()
-                .get(&period_key)
-                .unwrap_or(ProContactPeriod {
-                    period_start: sub.subscribed_at,
-                    count: 0,
-                });
+            let period: ProContactPeriod =
+                env.storage()
+                    .persistent()
+                    .get(&period_key)
+                    .unwrap_or(ProContactPeriod {
+                        period_start: sub.subscribed_at,
+                        count: 0,
+                    });
             let current = if period.period_start == sub.subscribed_at {
                 period.count
             } else {
@@ -1228,6 +1296,18 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::TrialEscrow(player_id, next_index), &escrow);
+        // Extend TrialEscrow TTL so the escrow record outlives its own expiry
+        // window. Without this, Soroban assigns the default minimal persistent
+        // TTL (~4,096 ledgers ≈ 5.7 hours), which is shorter than the
+        // configured trial_offer_expiry_secs and could cause the record to
+        // become archived before either confirm_trial_offer or
+        // expire_trial_offers resolves it — locking the escrowed XLM with no
+        // read-accessible path to the two functions that can release it.
+        env.storage().persistent().extend_ttl(
+            &DataKey::TrialEscrow(player_id, next_index),
+            TRIAL_TTL_THRESHOLD,
+            TRIAL_TTL_EXTEND_TO,
+        );
 
         // #795: index this escrow so expire_trial_offers can sweep it later
         // without an off-chain indexer.
@@ -1418,6 +1498,17 @@ impl ScoutAccessContract {
                 None => continue,
             };
             if now <= escrow.expires_at {
+                // Keep-alive: this escrow has not yet expired so it stays in
+                // the outstanding list for a future sweep. Re-extend its TTL
+                // so that a large backlog of live escrows cannot be silently
+                // archived between sweep calls — which would make them
+                // unreadable to both this sweep function and
+                // confirm_trial_offer before the player ever acts on the offer.
+                env.storage().persistent().extend_ttl(
+                    &escrow_key,
+                    TRIAL_TTL_THRESHOLD,
+                    TRIAL_TTL_EXTEND_TO,
+                );
                 kept.push_back((player_id, index));
                 continue;
             }
@@ -1521,6 +1612,33 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MAX,
         );
         Ok(sub)
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) subscription entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction.
+    ///
+    /// Admin-only. Returns `SubscriptionRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_subscription_record(env: Env, scout: Address) -> Result<(), ScoutAccessError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::SubscriptionRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::subscription_record_restored(&env, &admin, &scout);
+        Ok(())
     }
 
     pub fn get_fee_config(env: Env) -> FeeConfig {
@@ -2200,9 +2318,15 @@ impl ScoutAccessContract {
             .instance()
             .get::<DataKey, bool>(&DataKey::Paused)
             .unwrap_or(false);
+        let pay_to_contact_paused = env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedPayToContact)
+            .unwrap_or(false);
         ContractHealth {
             initialized,
             paused,
+            pay_to_contact_paused,
         }
     }
 
@@ -2348,6 +2472,22 @@ impl ScoutAccessContract {
             .unwrap_or(false)
         {
             return Err(ScoutAccessError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Check that `pay_to_contact` is not paused (function-scoped circuit
+    /// breaker). Independent of the whole-contract `Paused` flag; defaults to
+    /// `false` (not paused) when the flag has never been set. Mirrors
+    /// `verification::require_approve_milestone_not_paused`. (issue #1056)
+    fn require_pay_to_contact_not_paused(env: &Env) -> Result<(), ScoutAccessError> {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::PausedPayToContact)
+            .unwrap_or(false)
+        {
+            return Err(ScoutAccessError::PayToContactPaused);
         }
         Ok(())
     }
@@ -4094,6 +4234,9 @@ mod tests {
 
         client.set_progress_contract(&progress_addr);
 
+        // set_progress_contract now emits both the legacy
+        // progress_contract_updated event and the new wiring_updated event
+        // (issue #1041) on every successful call.
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
             soroban_sdk::vec![
@@ -4106,6 +4249,16 @@ mod tests {
                     )
                         .into_val(&env),
                     progress_addr.clone().into_val(&env),
+                ),
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        _admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (progress_addr.clone(), 1u32).into_val(&env),
                 )
             ]
         );
@@ -4128,6 +4281,83 @@ mod tests {
                 Some(second)
             );
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (_, _admin, _xlm, _contract_id, client) = setup();
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert_eq!(state.registration_contract.address, None);
+        assert_eq!(state.registration_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_both_links_and_bumps_epoch() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        let progress_addr = Address::generate(&env);
+        let reg_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        client.set_registration_contract(&reg_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert_eq!(state.registration_contract.address, Some(reg_addr));
+        assert_eq!(state.registration_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+
+        // Freely re-settable — no first-call-only guard on either link — and
+        // a second call must bump the epoch again, not reset it.
+        let new_progress_addr = Address::generate(&env);
+        client.set_progress_contract(&new_progress_addr);
+        assert_eq!(
+            client.get_wiring_state().progress_contract.epoch,
+            2,
+            "re-wiring the same link must bump its epoch again"
+        );
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let (env, _admin, _xlm, contract_id, client) = setup();
+        let reg_addr = Address::generate(&env);
+
+        client.set_registration_contract(&reg_addr);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::REGISTRATION_CONTRACT_UPDATED),
+                        _admin.clone(),
+                    )
+                        .into_val(&env),
+                    reg_addr.clone().into_val(&env),
+                ),
+                (
+                    contract_id.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        _admin.clone(),
+                        Symbol::new(&env, "registration_contract"),
+                    )
+                        .into_val(&env),
+                    (reg_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -4188,6 +4418,7 @@ mod tests {
         ver_client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         ver_client.approve_milestone(
@@ -4276,6 +4507,7 @@ mod tests {
         ver_client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         ver_client.approve_milestone(
@@ -5509,5 +5741,82 @@ mod tests {
 
         let result = client.try_renew_if_due(&scout);
         assert_eq!(result, Err(Ok(ScoutAccessError::ScoutNotSubscribed)));
+    }
+
+    /// Regression test for the TrialEscrow TTL bug.
+    ///
+    /// Before the fix, `log_trial_offer` wrote `DataKey::TrialEscrow` via
+    /// `.set()` but never called `extend_ttl` on it, leaving it with Soroban's
+    /// default minimal persistent TTL (~4,096 ledgers ≈ 5.7 hours). This is
+    /// shorter than `trial_offer_expiry_secs` (1 hour in the test default
+    /// config), but more importantly it is shorter than the platform's 30-day
+    /// activity cycle, meaning the record could be silently archived before
+    /// either `confirm_trial_offer` or `expire_trial_offers` ran — locking
+    /// the escrowed XLM with no normal read path to resolve it.
+    ///
+    /// After the fix, `log_trial_offer` extends the TTL to `TRIAL_TTL_EXTEND_TO`
+    /// (518,400 ledgers ≈ 30 days), well beyond the default. This test:
+    /// 1. Calls `log_trial_offer` and asserts the TTL is immediately set to the
+    ///    full policy value (> 5,000 ledgers, far above any reasonable default).
+    /// 2. Advances the ledger sequence past the old default TTL (~4,096 ledgers)
+    ///    and asserts the `TrialEscrow` entry is still present (not archived).
+    #[test]
+    fn test_trial_escrow_ttl_extended_on_log_trial_offer() {
+        use soroban_sdk::testutils::{storage::Persistent, Ledger};
+
+        let (env, _admin, xlm, _contract_id, client) = setup();
+
+        // Start at a known sequence with headroom for max_entry_ttl.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let scout = Address::generate(&env);
+        // Fund with enough XLM for Elite subscription + escrow.
+        mint_token(&env, &xlm, &_admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
+
+        let index = client.log_trial_offer(
+            &scout,
+            &1u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        assert_eq!(index, 1);
+
+        // --- Assertion 1: TTL is immediately extended to the policy value ---
+        // The write-side fix calls extend_ttl(..., TRIAL_TTL_THRESHOLD=259_200,
+        // TRIAL_TTL_EXTEND_TO=518_400), so the stored TTL must be substantially
+        // larger than the minimal default (~500 in this test environment).
+        env.as_contract(&client.address, || {
+            let ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::TrialEscrow(1u64, index));
+            assert!(
+                ttl > 5_000,
+                "TrialEscrow TTL should be extended to policy value after log_trial_offer, got {}",
+                ttl
+            );
+        });
+
+        // --- Assertion 2: Entry survives past the old default persistent TTL ---
+        // Without the fix, the default TTL would be 500 ledgers (our test env
+        // min_persistent_entry_ttl). Advance well past that.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 2_000; // 4× the default test TTL
+        });
+
+        // The TrialEscrow entry must still be accessible — not archived.
+        env.as_contract(&client.address, || {
+            assert!(
+                env.storage()
+                    .persistent()
+                    .has(&DataKey::TrialEscrow(1u64, index)),
+                "TrialEscrow must still be present after advancing past the old default TTL"
+            );
+        });
     }
 }

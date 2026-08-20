@@ -5,7 +5,7 @@
 //!
 //! See docs/GAS_GRIEFING_AUDIT.md — Vector 1: ValidatorVector Monotonic Growth.
 
-use scoutchain_verification::{VerificationContract, VerificationContractClient};
+use scoutchain_verification::{RevocationSeverity, VerificationContract, VerificationContractClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, VerificationContractClient<'static>) {
@@ -94,7 +94,7 @@ fn test_get_validators_with_revoked_entries_bounded() {
 
     // Revoke the first 5.
     for v in validators.iter().take(5) {
-        client.revoke_validator(v, &None);
+        client.revoke_validator(v, &RevocationSeverity::Routine, &None);
     }
 
     // get_validators() must return only the 5 active ones.

@@ -53,7 +53,8 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 |---------|-----|---|
 | `PlayerLevel(player_id)` | 518,400 | Core identity: player's current tier/reputation. Never auto-archive dormant players. Extended on every `get_level()` read. |
 | `HistoryEntry(player_id, index)` | 518,400 | Permanent audit trail: milestone approvals are immutable. Extended on `advance_level` write and `get_history_entry` read. |
-| `HistoryVec(player_id)` | 518,400 | Optimization for history bulk queries; same lifetime as individual entries. Extended on write and read. |
+| `HistoryPage(player_id, page_index)` | 518,400 | Bounded history storage: player history is sharded into fixed-size pages so a single persistent key never grows without limit. Extended on append and on page reads. |
+| `HistoryVec(player_id)` | 518,400 | Legacy compatibility key retained for migration / recovery tooling; new writes populate `HistoryPage` shards instead of growing this monolithic vec. |
 | `HistoryCounter(player_id)` | 518,400 | Milestone index counter; must outlive all history entries. Extended on write. |
 | `Admin` | 518,400 | Cross-contract consistency. Bumped by `require_admin()` helper. |
 | `PendingAdmin` | 518,400 | Must survive admin proposal/acceptance window (typically seconds to minutes). |
@@ -121,7 +122,7 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 | `ProContactCount(scout)` | 518,400 | Pro-tier contact quota tracking. Extended on contact operations (`pay_to_contact`/`log_trial_offer`) and `get_pro_contact_count` read. |
 | `PlayerContacts(player_id)` | 518,400 | Inbound scout contact index for a player. Extended on `pay_to_contact`/`log_trial_offer` writes and `get_player_contacts` read. |
 | `ScoutTrialOffers(scout)` | 518,400 | Index of trial offers logged by a scout. Extended on `log_trial_offer` write and `get_scout_trial_offers` read. |
-| `TrialEscrow(player_id, index)` | Default (~4,096) | Escrow hold record. Written in `log_trial_offer` without `extend_ttl` (no TTL bump in code; flagged for separate fix). |
+| `TrialEscrow(player_id, index)` | 518,400 | Escrow hold record. Extended on `log_trial_offer` write (write-side fix) and on `expire_trial_offers` read for entries not yet past `expires_at` (read-side keep-alive). Must remain readable for at least as long as `trial_offer_expiry_secs` so that `confirm_trial_offer` and `expire_trial_offers` can resolve the escrowed XLM. |
 | `OutstandingTrialEscrows` | 518,400 | Sweep index of unconfirmed trial escrows. Extended on `log_trial_offer`, `expire_trial_offers`, and `get_outstanding_trial_escrows` read. |
 | `FeeConfigHistory` | 500 (Instance) | Bounded history of active fee configurations. Stored in instance storage; extended via `bump_instance_ttl` (500 ledgers max). |
 | `ConfirmationNonce(nonce)` | 518,400 | Idempotency marker for `confirm_trial_offer` retries. Extended on `confirm_trial_offer` write. |
@@ -131,21 +132,25 @@ This document defines the persistent storage TTL policy for the scout-off-contra
 **Keep-Alive Mechanism:**
 - Instance keys (`Initialized`, `Paused`, `FeeConfig`, `AccumulatedFees`, `XlmToken`, `FeeConfigHistory`) are bumped on every state-modifying contract entry point via `bump_instance_ttl`.
 - Scout subscription, auto-renew, contact, and trial offer operations automatically extend related persistent TTLs.
-- `TrialOffer` and index reads extend their respective TTLs, preventing silent loss of opportunity and index state.
-- `TrialEscrow` and `ContactCount` currently lack code-level TTL extensions and receive Soroban default persistent TTL (~4,096 ledgers). These missing TTL call sites are flagged for resolution in a separate bug issue.
+- `TrialOffer` and `TrialEscrow` reads extend their respective TTLs, preventing silent loss of opportunity and index state.
+- `TrialEscrow` is extended on `log_trial_offer` write and on each `expire_trial_offers` sweep pass for non-expired entries, ensuring the record outlives its own `expires_at` window.
 
 ## Recovery Paths (Archived-but-Not-Evicted Data)
 
 Soroban's archival model allows a grace period where a key is archived (not available to `get()` / `has()`) but not yet evicted (still recoverable via `restore()`).
 
-**Current Implementation:**
-- No explicit `restore_*` functions are implemented in any contract.
-- Archived data is allowed to silently age toward eviction without recovery attempts.
+**Current Implementation (issue #1066):**
+- Each contract exposes explicit, admin-gated `restore_*_record()` entrypoints that load the entry (auto-restoring it if archived), re-extend its TTL back to the full core-identity policy value (`PERSISTENT_TTL_MAX`, 518,400 ledgers), and emit a `*_record_restored` event:
+  - `registration::restore_player_record(player_id)`, `registration::restore_scout_record(scout_id)`
+  - `verification::restore_validator_record(wallet)`, `verification::restore_milestone_record(player_id, index)`
+  - `progress::restore_player_level_record(player_id)`
+  - `scout_access::restore_subscription_record(scout)`
+- If the targeted key is fully evicted (absent), the call fails with a dedicated error (`*RecordEvicted`) rather than silently succeeding, so operators can distinguish "recovered" from "gone".
+- Note: `verification::restore_validator` is a distinct reactivation path (flips `active`/`banned`); `restore_validator_record` only re-extends TTL and leaves status flags untouched.
 
 **Future Enhancement (not in this issue):**
-- Implement `restore_player_record()`, `restore_validator_record()` functions to recover archived-but-recoverable data.
 - Add off-chain monitoring to alert on imminent archival (e.g., when a key's TTL drops below 7 days).
-- See issue #XXX for detailed restoration architecture.
+- See issue #1066 for the implemented restoration architecture.
 
 ## Testing
 

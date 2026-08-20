@@ -16,6 +16,30 @@ pub const SCOUT_REACTIVATED: &str = "scout_reactivated";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
 pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
 pub const MIGRATION_REDEEMED: &str = "migration_redeemed";
+pub const WIRING_UPDATED: &str = "wiring_updated";
+
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by `set_progress_contract`. `link` is always
+/// `"progress_contract"` (the contract's only wiring pointer); the argument
+/// exists so this event's shape matches the other three contracts'
+/// `wiring_updated` events. See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
+    );
+}
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -125,5 +149,25 @@ pub fn migration_redeemed(
     env.events().publish(
         (Symbol::new(env, MIGRATION_REDEEMED), wallet.clone()),
         (*role, profile_id, new_contract_hint.clone()),
+    );
+}
+
+/// topics: (event_name, admin)  data: player_id
+/// Emitted by `restore_player_record` when an admin re-extends an archived or
+/// expired player profile's TTL back to the core-identity policy value.
+pub fn player_record_restored(env: &Env, admin: &Address, player_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "player_record_restored"), admin.clone()),
+        player_id,
+    );
+}
+
+/// topics: (event_name, admin)  data: scout_id
+/// Emitted by `restore_scout_record` when an admin re-extends an archived or
+/// expired scout profile's TTL back to the core-identity policy value.
+pub fn scout_record_restored(env: &Env, admin: &Address, scout_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "scout_record_restored"), admin.clone()),
+        scout_id,
     );
 }

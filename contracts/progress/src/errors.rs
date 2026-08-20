@@ -51,10 +51,33 @@ pub enum ProgressError {
     /// The supplied `history_index` is either zero, non-contiguous (gap in
     /// sequence), or would overwrite an existing entry at a different position.
     InvalidHistoryIndex = 14,
+    /// `restore_player_level_record` targeted a player-level entry whose
+    /// archival grace period has fully elapsed (evicted, not merely archived)
+    /// and is unrecoverable.
+    PlayerLevelRecordEvicted = 15,
 }
 
 impl AdminError for ProgressError {
     fn not_initialized() -> Self {
         ProgressError::NotInitialized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_error_discriminants_remain_stable() {
+        assert_eq!(ProgressError::AlreadyInitialized as u32, 1);
+        assert_eq!(ProgressError::NotInitialized as u32, 2);
+        assert_eq!(ProgressError::ContractPaused as u32, 3);
+        assert_eq!(ProgressError::Unauthorized as u32, 4);
+        assert_eq!(ProgressError::InvalidProgressTransition as u32, 5);
+        assert_eq!(ProgressError::AlreadyAtMaxLevel as u32, 6);
+        assert_eq!(ProgressError::PlayerNotFound as u32, 7);
+        assert_eq!(ProgressError::Overflow as u32, 8);
+        assert_eq!(ProgressError::RegistrationCallFailed as u32, 9);
+        assert_eq!(ProgressError::PendingAdminNotSet as u32, 10);
     }
 }

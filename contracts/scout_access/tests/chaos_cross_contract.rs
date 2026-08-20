@@ -46,7 +46,9 @@ use scoutchain_scout_access::{
     FeeConfig, ScoutAccessContract, ScoutAccessContractClient, SubscriptionTier,
 };
 use scoutchain_shared_types::ProgressLevel;
-use scoutchain_verification::{VerificationContract, VerificationContractClient};
+use scoutchain_verification::{
+    RevocationSeverity, VerificationContract, VerificationContractClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
@@ -135,11 +137,13 @@ fn build_harness() -> ChaosHarness {
     verification.register_validator(
         &v0,
         &String::from_str(&env, "UEFA-B-License-A"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     verification.register_validator(
         &v1,
         &String::from_str(&env, "UEFA-B-License-B"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 
@@ -246,7 +250,9 @@ fn op_confirm_trial_offer(
 /// Revoke validator at `v_idx`.
 fn op_revoke_validator(h: &mut ChaosHarness, v_idx: usize) {
     let v = h.pool.validators[v_idx].clone();
-    let _ = h.verification.try_revoke_validator(&v, &None);
+    let _ = h
+        .verification
+        .try_revoke_validator(&v, &RevocationSeverity::Routine, &None);
 }
 
 // ---------------------------------------------------------------------------

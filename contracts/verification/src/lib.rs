@@ -19,7 +19,8 @@ pub use errors::VerificationError;
 pub use types::{
     AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
     Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
-    PendingMilestoneClaim, PendingVoteRef, Validator, ValidatorActivityReport, ValidatorStatus,
+    PendingMilestoneClaim, PendingVoteRef, RevocationRecord, RevocationSeverity, Validator,
+    DiversityConfig, ValidatorActivityReport, ValidatorStatus, VerificationWiringState,
 };
 
 use soroban_sdk::xdr::ToXdr;
@@ -29,9 +30,9 @@ use soroban_sdk::{
 };
 
 use scoutchain_shared_types::{
-    require_admin,
+    read_wiring_link, require_admin,
     safe_math::{safe_add_u32, safe_add_u64, safe_sub_u32},
-    validate_cid, ProgressLevel,
+    validate_cid, write_wiring_link, ProgressLevel,
 };
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
@@ -48,6 +49,16 @@ const MAX_VALIDATORS: u32 = 100;
 
 /// Maximum milestones a single validator may approve for one player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 5;
+
+/// Maximum number of milestones flagged per call in a for-cause revocation
+/// cascade sweep.  Keeps per-call CPU cost proportional to this limit rather
+/// than to the validator's total historical approval count.  A validator with
+/// more than this many prior approvals requires one or more follow-up calls to
+/// `continue_revocation_cascade` to complete the sweep.
+///
+/// 50 matches the pagination cap used throughout the codebase (e.g.
+/// `get_validator_milestones_page`, `expire_trial_offers`).
+const CASCADE_LIMIT: u32 = 50;
 
 // Core identity TTL: 30 days at ~5s/ledger ≈ 518_400 ledgers.
 // Milestone records, validator registrations, and evidence uniqueness data are
@@ -241,6 +252,27 @@ impl VerificationContract {
     /// Store the progress contract address so approve_milestone can call it.
     /// Must be called after both contracts are deployed (admin only).
     /// Returns AlreadyConfigured if called more than once — use update_progress_contract instead.
+
+    pub fn get_diversity_config(env: Env) -> Option<DiversityConfig> {
+        env.storage().persistent().get(&DataKey::DiversityConfig)
+    }
+
+    pub fn set_diversity_config(
+        env: Env,
+        required_distinct_affiliations: u32,
+        starting_milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let config = DiversityConfig {
+            required_distinct_affiliations,
+            starting_milestone_index,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiversityConfig, &config);
+        Ok(())
+    }
+
     pub fn set_progress_contract(
         env: Env,
         progress_contract: Address,
@@ -249,13 +281,17 @@ impl VerificationContract {
         if env.storage().instance().has(&DataKey::ProgressContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::ProgressContractSet, &true);
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -266,10 +302,14 @@ impl VerificationContract {
         progress_contract: Address,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &progress_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &progress_contract,
+        );
         events::progress_contract_updated(&env, &admin, &progress_contract);
+        events::wiring_updated(&env, &admin, "progress_contract", &progress_contract, epoch);
         Ok(())
     }
 
@@ -281,7 +321,7 @@ impl VerificationContract {
         env: Env,
         reg_contract: Address,
     ) -> Result<(), VerificationError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         if env
             .storage()
             .instance()
@@ -289,12 +329,16 @@ impl VerificationContract {
         {
             return Err(VerificationError::AlreadyConfigured);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
         env.storage()
             .instance()
             .set(&DataKey::RegistrationContractSet, &true);
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
     }
 
@@ -304,11 +348,40 @@ impl VerificationContract {
         env: Env,
         reg_contract: Address,
     ) -> Result<(), VerificationError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &reg_contract);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+            &reg_contract,
+        );
+        events::wiring_updated(&env, &admin, "registration_contract", &reg_contract, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of both cross-contract peer address pointers held
+    /// by this contract (progress, registration), each with its address and
+    /// re-wiring epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired or paused contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> VerificationWiringState {
+        let progress_contract = read_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+        );
+        let registration_contract = read_wiring_link(
+            &env,
+            &DataKey::RegistrationContract,
+            &DataKey::RegistrationContractEpoch,
+        );
+        VerificationWiringState {
+            progress_contract,
+            registration_contract,
+        }
     }
 
     /// Set the minimum number of distinct validator regions required before
@@ -403,6 +476,7 @@ impl VerificationContract {
         env: Env,
         wallet: Address,
         credentials: String,
+        affiliation: String,
         specializations: Vec<String>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -414,6 +488,10 @@ impl VerificationContract {
         }
 
         if credentials.len() < MIN_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        if affiliation.len() > MAX_CREDENTIALS_LEN {
             return Err(VerificationError::InvalidInput);
         }
 
@@ -455,6 +533,7 @@ impl VerificationContract {
         let validator = Validator {
             wallet: wallet.clone(),
             credentials,
+            affiliation,
             registered_at: env.ledger().timestamp(),
             active: true,
             specializations,
@@ -553,10 +632,22 @@ impl VerificationContract {
     }
 
     /// Deactivate a validator (admin only).
-    /// Optionally accepts a reason (max 128 bytes) that is included in the event.
+    ///
+    /// Accepts an explicit `severity` parameter:
+    /// - `RevocationSeverity::Routine` — deactivates the validator, no cascade.
+    /// - `RevocationSeverity::ForCause` — deactivates the validator and starts a
+    ///   bounded cascade sweep that flags every milestone the validator previously
+    ///   approved as `MilestonePendingReReview`.  If the validator has more than
+    ///   `CASCADE_LIMIT` (50) prior approvals, the sweep stops after flagging the
+    ///   first batch and stores a cursor; call `continue_revocation_cascade` to
+    ///   finish.
+    ///
+    /// Optionally accepts a reason (max 128 bytes) included in the event and
+    /// stored in the `RevocationRecord`.
     pub fn revoke_validator(
         env: Env,
         wallet: Address,
+        severity: RevocationSeverity,
         reason: Option<String>,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -607,33 +698,164 @@ impl VerificationContract {
             .set(&DataKey::ValidatorVector, &new_vector);
 
         // Retroactively invalidate this validator's contribution to every
-        // still-open (sub-threshold) pending attestation claim — a revoked
-        // validator's vote must never count toward a future threshold-cross.
+        // still-open (sub-threshold) pending attestation claim.
         let invalidated = Self::invalidate_pending_votes_for_validator(&env, &wallet);
         if invalidated > 0 {
             events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
         }
 
         let reason_str = reason.unwrap_or(String::from_str(&env, ""));
-        events::validator_revoked(&env, &admin, &wallet, &reason_str);
 
-        let routine_str = String::from_str(&env, "Routine");
-        if reason_str != routine_str {
-            env.storage()
-                .persistent()
-                .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
-            events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+        // Persist a RevocationRecord for audit purposes.
+        let record = RevocationRecord {
+            severity: severity.clone(),
+            reason: reason_str.clone(),
+            revoked_at: env.ledger().timestamp(),
+            admin: admin.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RevocationRecord(wallet.clone()), &record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RevocationRecord(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        // Emit the appropriate revocation event.
+        match severity {
+            RevocationSeverity::Routine => {
+                events::validator_revoked(&env, &admin, &wallet, &reason_str);
+            }
+            RevocationSeverity::ForCause => {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
+                events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+                // Start (or complete) the bounded cascade sweep.
+                Self::run_cascade_sweep(&env, &wallet, 0)?;
+            }
         }
+
         Ok(())
     }
 
+    /// Continue a for-cause revocation cascade sweep that was interrupted
+    /// because the validator had more than `CASCADE_LIMIT` prior approvals.
+    ///
+    /// Call this repeatedly (admin only) until it stops emitting
+    /// `revocation_cascade_continued` events and instead emits
+    /// `revocation_cascade_complete`.
+    ///
+    /// Returns `ValidatorNotFound` if the wallet is not registered, or
+    /// `Unauthorized` if the caller is not the admin.  If no cascade is in
+    /// progress (cursor absent) this is a no-op (all milestones already
+    /// flagged) and emits `revocation_cascade_complete` with the total count.
+    pub fn continue_revocation_cascade(env: Env, wallet: Address) -> Result<(), VerificationError> {
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        // Verify the validator exists.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Validator(wallet.clone()))
+        {
+            return Err(VerificationError::ValidatorNotFound);
+        }
+
+        let cursor: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RevocationCascadeCursor(wallet.clone()))
+            .unwrap_or(0);
+
+        Self::run_cascade_sweep(&env, &wallet, cursor)?;
+        Ok(())
+    }
+
+    /// Internal bounded cascade sweep helper.
+    ///
+    /// Starting from `start_index` (0-based position in `ValidatorMilestones`),
+    /// flags up to `CASCADE_LIMIT` milestones as `MilestonePendingReReview`,
+    /// emitting `milestone_flagged_for_rereview` for each.
+    ///
+    /// If the sweep is completed (fewer remaining milestones than the limit),
+    /// removes the cursor and emits `revocation_cascade_complete`.
+    ///
+    /// If the limit is hit before the list is exhausted, persists the next
+    /// cursor and emits `revocation_cascade_continued`.
+    fn run_cascade_sweep(
+        env: &Env,
+        wallet: &Address,
+        start_index: u32,
+    ) -> Result<(), VerificationError> {
+        let milestones_key = DataKey::ValidatorMilestones(wallet.clone());
+        let milestones: Vec<MilestoneRef> = env
+            .storage()
+            .persistent()
+            .get(&milestones_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let total = milestones.len();
+        let mut flagged_this_call: u32 = 0;
+        let mut i = start_index;
+
+        while i < total && flagged_this_call < CASCADE_LIMIT {
+            let m_ref = milestones.get(i).unwrap();
+            let flag_key =
+                DataKey::MilestonePendingReReview(m_ref.player_id, m_ref.milestone_index);
+            // Only flag if not already flagged (idempotent — supports re-runs).
+            if !env.storage().persistent().has(&flag_key) {
+                env.storage().persistent().set(&flag_key, &true);
+                env.storage().persistent().extend_ttl(
+                    &flag_key,
+                    PERSISTENT_TTL_MIN,
+                    PERSISTENT_TTL_MAX,
+                );
+                events::milestone_flagged_for_rereview(
+                    env,
+                    wallet,
+                    m_ref.player_id,
+                    m_ref.milestone_index,
+                );
+            }
+            flagged_this_call =
+                safe_add_u32(flagged_this_call, 1).map_err(|_| VerificationError::Overflow)?;
+            i = safe_add_u32(i, 1).map_err(|_| VerificationError::Overflow)?;
+        }
+
+        let cursor_key = DataKey::RevocationCascadeCursor(wallet.clone());
+        if i >= total {
+            // Sweep complete — remove the cursor.
+            env.storage().persistent().remove(&cursor_key);
+            events::revocation_cascade_complete(env, wallet, i);
+        } else {
+            // More to do — persist cursor and signal continuation.
+            env.storage().persistent().set(&cursor_key, &i);
+            env.storage().persistent().extend_ttl(
+                &cursor_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+            events::revocation_cascade_continued(env, wallet, i, flagged_this_call);
+        }
+
+        Ok(())
+    }
     /// Revoke multiple validators in a single atomic transaction (admin only).
     /// Iterates the wallet list and applies the same revoke logic for each,
     /// emitting one `validator_revoked` event per revocation.
     /// If a wallet is not found, the entire batch fails (atomicity).
+    ///
+    /// All wallets in the batch receive the same `severity` and `reason`.
+    /// For `RevocationSeverity::ForCause`, each validator's cascade sweep is
+    /// started inline; use `continue_revocation_cascade` for any validator
+    /// whose prior approval history exceeds `CASCADE_LIMIT`.
     pub fn batch_revoke_validators(
         env: Env,
         wallets: Vec<Address>,
+        severity: RevocationSeverity,
         reason: Option<String>,
     ) -> Result<(), VerificationError> {
         let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
@@ -680,14 +902,34 @@ impl VerificationContract {
                 events::validator_pending_votes_invalidated(&env, &admin, &wallet, invalidated);
             }
 
-            events::validator_revoked(&env, &admin, &wallet, &reason_str);
+            // Persist a RevocationRecord for each wallet.
+            let record = RevocationRecord {
+                severity: severity.clone(),
+                reason: reason_str.clone(),
+                revoked_at: env.ledger().timestamp(),
+                admin: admin.clone(),
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::RevocationRecord(wallet.clone()), &record);
+            env.storage().persistent().extend_ttl(
+                &DataKey::RevocationRecord(wallet.clone()),
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
 
-            let routine_str = String::from_str(&env, "Routine");
-            if reason_str != routine_str {
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
-                events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+            match severity {
+                RevocationSeverity::Routine => {
+                    events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                }
+                RevocationSeverity::ForCause => {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::ValidatorRevokedForCause(wallet.clone()), &true);
+                    events::validator_revoked(&env, &admin, &wallet, &reason_str);
+                    events::validator_revoked_for_cause(&env, &admin, &wallet, &reason_str);
+                    Self::run_cascade_sweep(&env, &wallet, 0)?;
+                }
             }
         }
 
@@ -701,7 +943,7 @@ impl VerificationContract {
     /// changes are persisted.
     pub fn batch_register_validators(
         env: Env,
-        entries: Vec<(Address, String, Vec<String>)>,
+        entries: Vec<(Address, String, String, Vec<String>)>,
     ) -> Result<(), VerificationError> {
         require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
         Self::require_not_paused(&env)?;
@@ -722,7 +964,10 @@ impl VerificationContract {
 
         // First pass: validate each entry without mutating state.
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
 
             // Length checks.
             if credentials.len() > MAX_CREDENTIALS_LEN || credentials.len() < MIN_CREDENTIALS_LEN {
@@ -742,7 +987,7 @@ impl VerificationContract {
 
             // Duplicate within the batch.
             for j in 0..i {
-                let (other_wallet, _, _) = entries.get(j).unwrap();
+                let (other_wallet, _, _, _) = entries.get(j).unwrap();
                 if other_wallet == wallet {
                     return Err(VerificationError::ValidatorAlreadyRegistered);
                 }
@@ -766,10 +1011,14 @@ impl VerificationContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         for i in 0..entries.len() {
-            let (wallet, credentials, specializations) = entries.get(i).unwrap();
+            let (wallet, credentials, affiliation, specializations) = entries.get(i).unwrap();
+            if affiliation.len() > MAX_CREDENTIALS_LEN {
+                return Err(VerificationError::InvalidInput);
+            }
             let validator = Validator {
                 wallet: wallet.clone(),
                 credentials: credentials.clone(),
+                affiliation: affiliation.clone(),
                 registered_at: env.ledger().timestamp(),
                 active: true,
                 specializations: specializations.clone(),
@@ -892,6 +1141,60 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Recover an archived (or expired-but-not-evicted) validator entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL back to the
+    /// full documented lifetime so it cannot silently age into permanent
+    /// eviction. It does NOT change `active`/`banned` flags (use
+    /// `restore_validator` for reactivation).
+    ///
+    /// Admin-only. Returns `ValidatorRecordEvicted` if the entry has already
+    /// been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_validator_record(env: Env, wallet: Address) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Validator(wallet.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::validator_record_restored(&env, &admin, &wallet);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) milestone entry by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_validator_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `MilestoneRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_milestone_record(
+        env: Env,
+        player_id: u64,
+        index: u32,
+    ) -> Result<(), VerificationError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, index))
+            .ok_or(VerificationError::MilestoneRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Milestone(player_id, index),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::milestone_record_restored(&env, &admin, player_id, index);
+        Ok(())
+    }
+
     /// Update the specialization tags for an existing validator (admin only).
     ///
     /// Replaces the validator's current `specializations` list with the supplied
@@ -973,6 +1276,7 @@ impl VerificationContract {
         let new_validator = Validator {
             wallet: new_wallet.clone(),
             credentials: old_validator.credentials.clone(),
+            affiliation: old_validator.affiliation.clone(),
             registered_at: old_validator.registered_at,
             active: old_validator.active,
             specializations: old_validator.specializations.clone(),
@@ -2409,6 +2713,7 @@ impl VerificationContract {
         ContractHealth {
             initialized,
             paused,
+            pay_to_contact_paused: false,
         }
     }
 
@@ -2623,6 +2928,82 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .has(&DataKey::MilestoneDispute(player_id, milestone_index))
+    }
+
+    // -------------------------------------------------------------------------
+    // Revocation cascade re-review (issue #1039)
+    // -------------------------------------------------------------------------
+
+    /// Returns `true` if the milestone at `(player_id, milestone_index)` is
+    /// currently flagged as pending re-review due to a for-cause validator
+    /// revocation cascade.  Returns `false` if it has never been flagged or
+    /// has already been cleared by `rereview_milestone`.
+    pub fn is_milestone_flagged(env: Env, player_id: u64, milestone_index: u32) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::MilestonePendingReReview(
+                player_id,
+                milestone_index,
+            ))
+    }
+
+    /// Clear a pending re-review flag on a milestone after independently
+    /// confirming the underlying achievement.
+    ///
+    /// Caller (`reviewer`) must be a currently-active validator (not
+    /// necessarily the original approver of the milestone).  Emits
+    /// `milestone_flag_cleared` on success.
+    ///
+    /// Returns:
+    /// - `MilestoneNotFound` if the milestone does not exist.
+    /// - `NotEligibleToReReview` if the caller is not a currently-active
+    ///   validator.
+    /// - `MilestoneNotFlagged` if the milestone is not currently flagged.
+    pub fn rereview_milestone(
+        env: Env,
+        reviewer: Address,
+        player_id: u64,
+        milestone_index: u32,
+    ) -> Result<(), VerificationError> {
+        reviewer.require_auth();
+
+        // Milestone must exist.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Milestone(player_id, milestone_index))
+        {
+            return Err(VerificationError::MilestoneNotFound);
+        }
+
+        // Reviewer must be a currently-active validator.
+        let validator_status = Self::get_validator_status(env.clone(), reviewer.clone());
+        if validator_status != ValidatorStatus::Active {
+            return Err(VerificationError::NotEligibleToReReview);
+        }
+
+        // The milestone must be flagged.
+        let flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
+        if !env.storage().persistent().has(&flag_key) {
+            return Err(VerificationError::MilestoneNotFlagged);
+        }
+
+        // Clear the flag.
+        env.storage().persistent().remove(&flag_key);
+
+        events::milestone_flag_cleared(&env, &reviewer, player_id, milestone_index);
+        Ok(())
+    }
+
+    /// Return the stored `RevocationRecord` for a validator wallet, if any.
+    ///
+    /// Returns `None` if the validator has never been revoked via the new
+    /// severity-aware `revoke_validator` path (i.e. old routine revocations
+    /// performed before this feature shipped will not have a record).
+    pub fn get_revocation_record(env: Env, wallet: Address) -> Option<RevocationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RevocationRecord(wallet))
     }
 
     /// Returns the total number of disputes filed for a given `player_id`.
@@ -3009,32 +3390,70 @@ impl VerificationContract {
             &evidence_hash,
         );
 
-        if let Some(progress_addr) = env
+        let validator: Validator = env
             .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ProgressContract)
-        {
-            let progress_client = progress_contract::Client::new(env, &progress_addr);
-            match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
-                Ok(_) => {}
-                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
-                    events::level_advancement_skipped(
-                        env,
-                        player_id,
-                        &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
-                    );
+            .persistent()
+            .get(&DataKey::Validator(validator_wallet.clone()))
+            .unwrap();
+
+        let mut player_affiliations: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerAffiliations(player_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        if !player_affiliations.contains(&validator.affiliation) {
+            player_affiliations.push_back(validator.affiliation.clone());
+            env.storage().persistent().set(
+                &DataKey::PlayerAffiliations(player_id),
+                &player_affiliations,
+            );
+        }
+
+        let diversity_config = Self::get_diversity_config(env.clone());
+        let mut advance_allowed = true;
+        if let Some(config) = diversity_config {
+            if next_index >= config.starting_milestone_index {
+                if player_affiliations.len() < config.required_distinct_affiliations {
+                    advance_allowed = false;
                 }
-                Err(e) => {
-                    let code = match &e {
-                        Ok(pe) => *pe as u32,
-                        Err(_) => 0u32,
-                    };
-                    events::progress_call_failed(env, player_id, code);
-                    return Err(VerificationError::ProgressCallFailed);
+            }
+        }
+
+        if advance_allowed {
+            if let Some(progress_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::ProgressContract)
+            {
+                let progress_client = progress_contract::Client::new(env, &progress_addr);
+                match progress_client.try_advance_level(validator_wallet, &player_id, &next_index) {
+                    Ok(_) => {}
+                    Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {
+                        events::level_advancement_skipped(
+                            env,
+                            player_id,
+                            &soroban_sdk::String::from_str(env, "AlreadyAtMaxLevel"),
+                        );
+                    }
+                    Err(e) => {
+                        let code = match &e {
+                            Ok(pe) => *pe as u32,
+                            Err(_) => 0u32,
+                        };
+                        events::progress_call_failed(env, player_id, code);
+                        return Err(VerificationError::ProgressCallFailed);
+                    }
+                }
+            } else {
+                if !env.storage().instance().has(&DataKey::ProgressContract) {
+                    events::progress_contract_not_set(env, player_id);
                 }
             }
         } else {
-            events::progress_contract_not_set(env, player_id);
+            if !env.storage().instance().has(&DataKey::ProgressContract) {
+                events::progress_contract_not_set(env, player_id);
+            }
         }
 
         Ok(next_index)
@@ -3304,6 +3723,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Academy Director"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3362,6 +3782,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Academy Director"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3411,6 +3832,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Senior Coach"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3461,6 +3883,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Senior Coach"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3499,11 +3922,13 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "Pro Coach AA"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &v2,
             &String::from_str(&env, "Pro Coach BB"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3550,6 +3975,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3591,11 +4017,13 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "UEFA-B-CoachA"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &v2,
             &String::from_str(&env, "UEFA-B-CoachB"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3644,6 +4072,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3674,6 +4103,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3706,10 +4136,11 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         let reason: Option<String> = None;
-        client.revoke_validator(&validator, &reason);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &reason);
 
         assert!(!client.is_active_validator(&validator));
     }
@@ -3724,10 +4155,11 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         let reason = Some(String::from_str(&env, "Misconduct and protocol violation"));
-        client.revoke_validator(&validator, &reason);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &reason);
 
         assert!(!client.is_active_validator(&validator));
     }
@@ -3743,12 +4175,13 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         // 129-byte string
         let long_reason = "x".repeat(129);
         let reason = Some(String::from_str(&env, &long_reason));
-        client.revoke_validator(&validator, &reason);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &reason);
     }
 
     #[test]
@@ -3762,10 +4195,11 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         let reason: Option<String> = None;
-        client.revoke_validator(&validator, &reason);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &reason);
 
         // Should panic — validator is inactive
         client.approve_milestone(
@@ -3806,11 +4240,13 @@ mod tests {
         client.register_validator(
             &validator1,
             &String::from_str(&env, "UEFA-B-CoachA"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &validator2,
             &String::from_str(&env, "UEFA-B-CoachB"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3848,6 +4284,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3874,6 +4311,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -3970,6 +4408,9 @@ mod tests {
         let addr = Address::generate(&env);
         client.set_progress_contract(&addr);
 
+        // set_progress_contract now emits both the legacy
+        // progress_contract_updated event and the new wiring_updated event
+        // (issue #1041) on every successful call.
         let events = env.events().all();
         assert_eq!(
             events,
@@ -3982,7 +4423,17 @@ mod tests {
                         admin.clone(),
                     )
                         .into_val(&env),
-                    addr.into_val(&env)
+                    addr.clone().into_val(&env)
+                ),
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (addr, 1u32).into_val(&env)
                 )
             ]
         );
@@ -3990,6 +4441,12 @@ mod tests {
 
     #[test]
     fn test_update_progress_contract_succeeds() {
+        // Regression test: verification's legacy first-call-only guard
+        // (set_progress_contract → AlreadyConfigured on re-call, see
+        // test_set_progress_contract_second_call_returns_already_configured)
+        // must remain paired with a still-functional update_progress_contract
+        // escape hatch for intentional re-wiring (issue #1041 keeps this path
+        // deprecated-but-functional, not removed).
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -3998,6 +4455,116 @@ mod tests {
         let addr2 = Address::generate(&env);
         client.set_progress_contract(&addr1);
         client.update_progress_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(addr2));
+        assert_eq!(
+            state.progress_contract.epoch, 2,
+            "update_progress_contract must still bump the epoch, same as any other wiring setter"
+        );
+
+        // The legacy guard itself must still be intact: a further
+        // set_progress_contract call is still rejected, only
+        // update_progress_contract may re-wire past the first call.
+        let addr3 = Address::generate(&env);
+        let result = client.try_set_progress_contract(&addr3);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert_eq!(state.registration_contract.address, None);
+        assert_eq!(state.registration_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_both_links() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        let reg_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        client.set_registration_contract(&reg_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert_eq!(state.registration_contract.address, Some(reg_addr));
+        assert_eq!(state.registration_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_set_registration_contract_second_call_returns_already_configured() {
+        // registration_contract carries the same first-call-only legacy
+        // guard as progress_contract (both predate issue #1041) — verify it
+        // is untouched by the wiring-epoch rollout.
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr = Address::generate(&env);
+        client.set_registration_contract(&addr);
+
+        let result = client.try_set_registration_contract(&addr);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    #[test]
+    fn test_update_registration_contract_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.set_registration_contract(&addr1);
+        client.update_registration_contract(&addr2);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.registration_contract.address, Some(addr2));
+        assert_eq!(state.registration_contract.epoch, 2);
+    }
+
+    #[test]
+    fn test_set_registration_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let reg_addr = Address::generate(&env);
+        client.set_registration_contract(&reg_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "registration_contract"),
+                    )
+                        .into_val(&env),
+                    (reg_addr, 1u32).into_val(&env)
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -4014,6 +4581,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4023,7 +4591,7 @@ mod tests {
         client.upgrade(&new_wasm_hash);
 
         // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator, &None);
+        client.revoke_validator(&validator, &RevocationSeverity::Routine, &None);
         assert!(!client.is_active_validator(&validator));
     }
 
@@ -4040,6 +4608,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, &too_long),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
     }
@@ -4056,6 +4625,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, &exactly_256),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4110,7 +4680,7 @@ mod tests {
         // Register exactly MAX_VALIDATORS (100) validators — all must succeed.
         for _ in 0..100 {
             let v = Address::generate(&env);
-            client.register_validator(&v, &String::from_str(&env, "Credentials"), &Vec::new(&env));
+            client.register_validator(&v, &String::from_str(&env, "Credentials"), &String::from_str(&env, "Default Academy"), &Vec::new(&env));
         }
 
         // The 101st registration must return ValidatorCapReached, not panic.
@@ -4118,6 +4688,7 @@ mod tests {
         let result = client.try_register_validator(
             &extra,
             &String::from_str(&env, "Credentials"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(result, Err(Ok(VerificationError::ValidatorCapReached)));
@@ -4136,21 +4707,24 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "Credentials 1"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &v2,
             &String::from_str(&env, "Credentials 2"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &v3,
             &String::from_str(&env, "Credentials 3"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
         let reason: Option<String> = None;
-        client.revoke_validator(&v2, &reason);
+        client.revoke_validator(&v2, &RevocationSeverity::Routine, &reason);
 
         let validators = client.get_validators();
         assert_eq!(validators.len(), 2);
@@ -4174,6 +4748,7 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "Credentials 1"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_active_validator_count(), 1);
@@ -4181,6 +4756,7 @@ mod tests {
         client.register_validator(
             &v2,
             &String::from_str(&env, "Credentials 2"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_active_validator_count(), 2);
@@ -4188,19 +4764,20 @@ mod tests {
         client.register_validator(
             &v3,
             &String::from_str(&env, "Credentials 3"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_active_validator_count(), 3);
 
         let reason: Option<String> = None;
-        client.revoke_validator(&v2, &reason);
+        client.revoke_validator(&v2, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_active_validator_count(), 2);
 
-        client.revoke_validator(&v3, &reason);
+        client.revoke_validator(&v3, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_active_validator_count(), 1);
 
         // Revoking an already-revoked validator should not change the count
-        client.revoke_validator(&v3, &reason);
+        client.revoke_validator(&v3, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_active_validator_count(), 1);
     }
 
@@ -4232,6 +4809,7 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "Credentials 1"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_active_count_matches_statuses();
@@ -4239,6 +4817,7 @@ mod tests {
         client.register_validator(
             &v2,
             &String::from_str(&env, "Credentials 2"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_active_count_matches_statuses();
@@ -4246,20 +4825,21 @@ mod tests {
         client.register_validator(
             &v3,
             &String::from_str(&env, "Credentials 3"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_active_count_matches_statuses();
 
-        client.revoke_validator(&v2, &reason);
+        client.revoke_validator(&v2, &RevocationSeverity::Routine, &reason);
         assert_active_count_matches_statuses();
 
-        client.revoke_validator(&v3, &reason);
+        client.revoke_validator(&v3, &RevocationSeverity::Routine, &reason);
         assert_active_count_matches_statuses();
 
         client.restore_validator(&v2);
         assert_active_count_matches_statuses();
 
-        client.revoke_validator(&v1, &reason);
+        client.revoke_validator(&v1, &RevocationSeverity::Routine, &reason);
         assert_active_count_matches_statuses();
 
         client.restore_validator(&v3);
@@ -4284,6 +4864,7 @@ mod tests {
         client.register_validator(
             &v1,
             &String::from_str(&env, "Credentials 1"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_validator_count(), 1);
@@ -4292,6 +4873,7 @@ mod tests {
         client.register_validator(
             &v2,
             &String::from_str(&env, "Credentials 2"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_validator_count(), 2);
@@ -4300,6 +4882,7 @@ mod tests {
         client.register_validator(
             &v3,
             &String::from_str(&env, "Credentials 3"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(client.get_validator_count(), 3);
@@ -4307,18 +4890,18 @@ mod tests {
 
         // Revoke some validators - total count should remain 3, active count decreases
         let reason: Option<String> = None;
-        client.revoke_validator(&v2, &reason);
+        client.revoke_validator(&v2, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_validator_count(), 3); // total still 3
         assert_eq!(client.get_active_validator_count(), 2); // active decreased to 2
         assert_eq!(client.get_validators().len(), 2); // get_validators() returns active only
 
-        client.revoke_validator(&v3, &reason);
+        client.revoke_validator(&v3, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_validator_count(), 3); // total still 3
         assert_eq!(client.get_active_validator_count(), 1); // active decreased to 1
         assert_eq!(client.get_validators().len(), 1); // get_validators() returns active only
 
         // Revoking an already-revoked validator should not change either count
-        client.revoke_validator(&v3, &reason);
+        client.revoke_validator(&v3, &RevocationSeverity::Routine, &reason);
         assert_eq!(client.get_validator_count(), 3);
         assert_eq!(client.get_active_validator_count(), 1);
     }
@@ -4337,6 +4920,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         // 45 chars starting with Qm — one short of valid CIDv0
@@ -4359,6 +4943,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         // 47 chars starting with Qm — one over valid CIDv0
@@ -4381,6 +4966,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         // 46 chars but contains '0' which is invalid in base58btc
@@ -4402,6 +4988,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         let idx = client.approve_milestone(
@@ -4424,6 +5011,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         // 58 chars starting with bafy — one short of valid CIDv1
@@ -4448,6 +5036,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         let idx = client.approve_milestone(
@@ -4470,6 +5059,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.approve_milestone(
@@ -4508,6 +5098,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4556,6 +5147,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4611,6 +5203,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4668,6 +5261,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4719,6 +5313,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4762,6 +5357,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4800,6 +5396,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4849,6 +5446,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4903,6 +5501,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4948,6 +5547,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -4992,6 +5592,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5042,6 +5643,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5105,6 +5707,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5145,6 +5748,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5187,7 +5791,7 @@ mod tests {
         let credentials = String::from_str(&env, "UEFA A License");
 
         // First registration succeeds
-        client.register_validator(&validator, &credentials, &Vec::new(&env));
+        client.register_validator(&validator, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
         assert!(client.is_active_validator(&validator));
 
         // Verify validator is in the vector
@@ -5199,6 +5803,7 @@ mod tests {
         let result = client.try_register_validator(
             &validator,
             &String::from_str(&env, "Different credentials"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         assert_eq!(
@@ -5225,7 +5830,7 @@ mod tests {
 
         let old_wallet = Address::generate(&env);
         let credentials = String::from_str(&env, "UEFA A License");
-        client.register_validator(&old_wallet, &credentials, &Vec::new(&env));
+        client.register_validator(&old_wallet, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
 
         // Record a milestone to verify milestones get migrated
         client.approve_milestone(
@@ -5268,7 +5873,7 @@ mod tests {
 
         let wallet = Address::generate(&env);
         let credentials = String::from_str(&env, "UEFA B License");
-        client.register_validator(&wallet, &credentials, &Vec::new(&env));
+        client.register_validator(&wallet, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
 
         // Record a milestone to verify milestone count remains intact
         client.approve_milestone(
@@ -5314,11 +5919,13 @@ mod tests {
         client.register_validator(
             &wallet_cause,
             &String::from_str(&env, "Coach A License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &wallet_routine,
             &String::from_str(&env, "Coach B License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5339,10 +5946,17 @@ mod tests {
         );
 
         // Revoke with cause
-        client.revoke_validator(&wallet_cause, &Some(String::from_str(&env, "Misconduct")));
-
+        client.revoke_validator(
+            &wallet_cause,
+            &RevocationSeverity::ForCause,
+            &Some(String::from_str(&env, "Misconduct")),
+        );
         // Revoke for routine
-        client.revoke_validator(&wallet_routine, &Some(String::from_str(&env, "Routine")));
+        client.revoke_validator(
+            &wallet_routine,
+            &RevocationSeverity::Routine,
+            &Some(String::from_str(&env, "Routine")),
+        );
 
         // Check validator status
         assert_eq!(
@@ -5401,11 +6015,13 @@ mod tests {
         client.register_validator(
             &active_wallet,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
         client.register_validator(
             &revoked_wallet,
             &String::from_str(&env, "UEFA-A-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5413,7 +6029,7 @@ mod tests {
         // status is plain `Revoked` (any reason other than "Routine" would
         // surface as `RevokedForCause`).
         let reason = Some(String::from_str(&env, "Routine"));
-        client.revoke_validator(&revoked_wallet, &reason);
+        client.revoke_validator(&revoked_wallet, &RevocationSeverity::Routine, &reason);
 
         // Batch-query all three wallets.
         let wallets = soroban_sdk::vec![
@@ -5489,6 +6105,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA-B-License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5577,6 +6194,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
             &specs,
         );
 
@@ -5663,6 +6281,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "KYC Certificate"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -5686,7 +6305,7 @@ mod tests {
         let validator = Address::generate(&env);
         let mut specs = Vec::new(&env);
         specs.push_back(String::from_str(&env, "physical-stats"));
-        client.register_validator(&validator, &String::from_str(&env, "Coach License"), &specs);
+        client.register_validator(&validator, &String::from_str(&env, "Coach License"), &String::from_str(&env, "Default Academy"), &specs);
 
         let v = client.get_validator(&validator);
         assert_eq!(v.specializations, specs);
@@ -5723,6 +6342,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Coach A License"),
+            &String::from_str(&env, "Default Academy"),
             &specs,
         );
 
@@ -5750,6 +6370,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Coach A License"),
+            &String::from_str(&env, "Default Academy"),
             &specs,
         );
 
@@ -5775,6 +6396,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "Coach A License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 

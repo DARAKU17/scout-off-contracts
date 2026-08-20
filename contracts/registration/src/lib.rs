@@ -10,7 +10,8 @@ mod types;
 
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerStatus, PlayerSummary,
-    ProgressLevel, ScoutProfile, ScoutStatus, ScoutVerificationRecord, StoredPlayerProfile,
+    ProgressLevel, RegistrationWiringState, ScoutProfile, ScoutStatus, ScoutVerificationRecord,
+    StoredPlayerProfile,
 };
 
 pub use errors::ScoutChainError;
@@ -21,7 +22,9 @@ pub use types::{MigrationAuthorization, MigrationRole};
 // scope for the rest of this module.
 pub use types::PlayerVitals;
 
-use scoutchain_shared_types::{require_admin, safe_math::safe_add_u64};
+use scoutchain_shared_types::{
+    read_wiring_link, require_admin, safe_math::safe_add_u64, write_wiring_link,
+};
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
 
 // Generated client stub for the progress contract — used to resolve a player's
@@ -175,13 +178,36 @@ impl RegistrationContract {
     }
 
     /// Store the progress contract address so filter_players can resolve
-    /// levels at query time (admin only).
+    /// levels at query time (admin only). Freely re-settable — no
+    /// first-call-only guard (see `docs/WIRING_REGISTRY_DESIGN.md` for why
+    /// this is the majority policy across all four contracts).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
-        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProgressContract, &addr);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let epoch = write_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+            &addr,
+        );
+        events::wiring_updated(&env, &admin, "progress_contract", &addr, epoch);
         Ok(())
+    }
+
+    /// Returns a snapshot of the single cross-contract peer address pointer
+    /// held by this contract (progress), with its address and re-wiring
+    /// epoch.
+    ///
+    /// This is a **read-only** function — it does not require auth, does not
+    /// modify state, and is intentionally exempt from the pause/init guards
+    /// so it remains callable even on a mis-wired contract, matching
+    /// `progress.get_wiring_state()`. See `docs/WIRING_REGISTRY_DESIGN.md`.
+    pub fn get_wiring_state(env: Env) -> RegistrationWiringState {
+        let progress_contract = read_wiring_link(
+            &env,
+            &DataKey::ProgressContract,
+            &DataKey::ProgressContractEpoch,
+        );
+        RegistrationWiringState { progress_contract }
     }
 
     /// Update a player's progress level. Only callable by the registered progress contract.
@@ -923,6 +949,55 @@ impl RegistrationContract {
             .unwrap_or(false)
     }
 
+    /// Recover an archived (or expired-but-not-evicted) player profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// On Soroban protocol 23+, reading an archived entry auto-restores it
+    /// within the archival grace period. This entrypoint makes that recovery
+    /// explicit and operator-driven, then lifts the entry's TTL out of the
+    /// minimal auto-restore window back to the full documented lifetime so it
+    /// cannot silently age into permanent eviction.
+    ///
+    /// Admin-only. Returns `PlayerRecordEvicted` if the entry has already been
+    /// fully evicted (key absent) and is no longer recoverable.
+    pub fn restore_player_record(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: PlayerProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Player(player_id))
+            .ok_or(ScoutChainError::PlayerRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Player(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::player_record_restored(&env, &admin, player_id);
+        Ok(())
+    }
+
+    /// Recover an archived (or expired-but-not-evicted) scout profile by
+    /// re-extending its TTL to the core-identity policy value (518,400 ledgers).
+    ///
+    /// See `restore_player_record` for the protocol-23 archival-recovery
+    /// semantics. Admin-only. Returns `ScoutRecordEvicted` if the entry has
+    /// already been fully evicted (key absent) and is unrecoverable.
+    pub fn restore_scout_record(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+        let _profile: ScoutProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutRecordEvicted)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::Scout(scout_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        events::scout_record_restored(&env, &admin, scout_id);
+        Ok(())
+    }
+
     /// Return a lightweight player summary without IPFS hashes or wallet.
     pub fn get_player_summary(env: Env, player_id: u64) -> Result<PlayerSummary, ScoutChainError> {
         let profile = Self::load_player(&env, player_id)?;
@@ -1131,6 +1206,7 @@ impl RegistrationContract {
         ContractHealth {
             initialized,
             paused,
+            pay_to_contact_paused: false,
         }
     }
 
@@ -3118,6 +3194,75 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Wiring observability (issue #1041)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_wiring_state_initially_unconfigured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, None);
+        assert_eq!(state.progress_contract.epoch, 0);
+        assert!(!state.is_fully_wired());
+    }
+
+    #[test]
+    fn test_get_wiring_state_reflects_link_and_bumps_epoch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        let state = client.get_wiring_state();
+        assert_eq!(state.progress_contract.address, Some(progress_addr));
+        assert_eq!(state.progress_contract.epoch, 1);
+        assert!(state.is_fully_wired());
+
+        // Freely re-settable — no first-call-only guard — and a second call
+        // must bump the epoch again, not reset it.
+        let new_progress_addr = Address::generate(&env);
+        client.set_progress_contract(&new_progress_addr);
+        let state2 = client.get_wiring_state();
+        assert_eq!(state2.progress_contract.address, Some(new_progress_addr));
+        assert_eq!(
+            state2.progress_contract.epoch, 2,
+            "re-wiring the same link must bump its epoch again"
+        );
+    }
+
+    #[test]
+    fn test_set_progress_contract_emits_wiring_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        Symbol::new(&env, crate::events::WIRING_UPDATED),
+                        admin.clone(),
+                        Symbol::new(&env, "progress_contract"),
+                    )
+                        .into_val(&env),
+                    (progress_addr, 1u32).into_val(&env),
+                )
+            ]
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Pause / unpause behaviour
     // -------------------------------------------------------------------------
 
@@ -3325,6 +3470,7 @@ mod tests {
         ver_client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 

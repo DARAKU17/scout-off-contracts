@@ -17,6 +17,7 @@ pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
 pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
 pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
 pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
@@ -149,6 +150,24 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
     );
 }
 
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_progress_contract` / `update_progress_contract` /
+/// `set_registration_contract` / `update_registration_contract` call, in
+/// addition to (not replacing) `progress_contract_updated`. `link`
+/// identifies which peer pointer changed (`"progress_contract"` or
+/// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
+    );
+}
+
 /// Emitted when a player disputes a milestone (issue #471)
 /// topics: (event_name, player_wallet)  data: (player_id, milestone_index, reason)
 pub fn milestone_disputed(
@@ -263,5 +282,97 @@ pub fn progress_call_failed(env: &Env, player_id: u64, error_code: u32) {
     env.events().publish(
         (Symbol::new(env, "progress_call_failed"), player_id),
         error_code,
+    );
+}
+
+/// Emitted by `restore_validator_record` when an admin re-extends an archived
+/// or expired validator entry's TTL back to the core-identity policy value.
+/// topics: (event_name, admin)  data: wallet
+pub fn validator_record_restored(env: &Env, admin: &Address, wallet: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "validator_record_restored"), admin.clone()),
+        wallet.clone(),
+    );
+}
+
+/// Emitted by `restore_milestone_record` when an admin re-extends an archived
+/// or expired milestone entry's TTL back to the core-identity policy value.
+/// topics: (event_name, admin)  data: (player_id, index)
+pub fn milestone_record_restored(env: &Env, admin: &Address, player_id: u64, index: u32) {
+    env.events().publish(
+        (Symbol::new(env, "milestone_record_restored"), admin.clone()),
+        (player_id, index),
+    );
+}
+
+/// Emitted for each milestone flagged during a for-cause revocation cascade
+/// (issue #1039).
+///
+/// topics: (event_name, validator)  data: (player_id, milestone_index)
+pub fn milestone_flagged_for_rereview(
+    env: &Env,
+    validator: &Address,
+    player_id: u64,
+    milestone_index: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "milestone_flagged"),
+            validator.clone(),
+        ),
+        (player_id, milestone_index),
+    );
+}
+
+/// Emitted when an active validator clears a pending re-review flag via
+/// `rereview_milestone` (issue #1039).
+///
+/// topics: (event_name, reviewer)  data: (player_id, milestone_index)
+pub fn milestone_flag_cleared(
+    env: &Env,
+    reviewer: &Address,
+    player_id: u64,
+    milestone_index: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "milestone_flag_cleared"),
+            reviewer.clone(),
+        ),
+        (player_id, milestone_index),
+    );
+}
+
+/// Emitted when a for-cause cascade sweep completes (all milestones flagged)
+/// or when `continue_revocation_cascade` exhausts the remaining milestones
+/// in a single call.
+///
+/// topics: (event_name, validator)  data: total_flagged_so_far
+pub fn revocation_cascade_complete(env: &Env, validator: &Address, total_flagged: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, "revocation_cascade_complete"),
+            validator.clone(),
+        ),
+        total_flagged,
+    );
+}
+
+/// Emitted when a for-cause cascade sweep call reaches its per-call limit and
+/// a continuation cursor is stored so the sweep can be resumed.
+///
+/// topics: (event_name, validator)  data: (next_cursor, flagged_this_call)
+pub fn revocation_cascade_continued(
+    env: &Env,
+    validator: &Address,
+    next_cursor: u32,
+    flagged_this_call: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "revocation_cascade_continued"),
+            validator.clone(),
+        ),
+        (next_cursor, flagged_this_call),
     );
 }

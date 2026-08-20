@@ -4,7 +4,7 @@ use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 #[allow(dead_code)]
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
-pub use scoutchain_shared_types::{ContractHealth, ProgressLevel};
+pub use scoutchain_shared_types::{ContractHealth, ProgressLevel, WiringLink};
 
 /// Role identifier for migration authorizations.
 #[contracttype]
@@ -199,6 +199,9 @@ pub enum DataKey {
     PlayerIndex,
     /// Address of the progress contract allowed to call set_player_level
     ProgressContract,
+    /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
+    /// `set_progress_contract` call.
+    ProgressContractEpoch,
     /// Explicit player level override used for admin-seeded players or
     /// progress updates that should be visible to reads even before a progress
     /// contract is wired.
@@ -229,9 +232,7 @@ pub enum DataKey {
     ValidatorRegLastSent(Address),
     /// Cooldown in seconds between repeated registration attempts from the
     /// same wallet. 0 means no cooldown. Configurable by admin.
-    RegCooldownSecs(u64),
-
-    // ── Migration ticket replay prevention ──
+    RegCooldownSecs(u64), // ── Migration ticket replay prevention ──
     /// Nonce tracking for migration authorizations. A wallet+nonce pair is
     /// stored as `true` after a migration authorization is redeemed, preventing
     /// the same authorization from being replayed.
@@ -242,4 +243,18 @@ pub enum DataKey {
     /// hidden from scout discovery results. Set by `deactivate_scout`,
     /// cleared by `reactivate_scout`.
     ScoutDeactivated(u64),
+}
+
+/// Snapshot of the single cross-contract peer address pointer held by the
+/// registration contract (progress), with its address and re-wiring epoch.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistrationWiringState {
+    pub progress_contract: WiringLink,
+}
+
+impl RegistrationWiringState {
+    pub fn is_fully_wired(&self) -> bool {
+        self.progress_contract.is_configured()
+    }
 }

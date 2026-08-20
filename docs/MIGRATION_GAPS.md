@@ -34,6 +34,7 @@ category into one place so a migration operator has a single checklist.
 | 11 | **Fee configuration history** | `scout_access` | ✅ Fully replayable | `replay-state.sh` atomically restores the current `FeeConfig` and all bounded history entries through `admin_seed_fee_config`. | — |
 | 12 | **Player deactivation state** | `registration` | ✅ Reconciled | The PostgreSQL schema contains `players.deactivated`; the reconciliation tool now compares it against the registration contract's deactivation getter. | — |
 | 13 | **Auto-renewal flags** | `scout_access` | ✅ Fully replayable | `replay-state.sh` reads and replays every scout's flag through `admin_seed_auto_renew`. | — |
+| 14 | **Milestone pending-re-review flags** | `verification` | ⚠️ Partially replayable | `is_milestone_flagged(player_id, milestone_index)` exposes per-milestone flag state on-chain. `migrations/005_milestone_flags.sql` adds the `milestone_flags` and `revocation_records` tables; the indexer consumes `milestone_flagged`, `milestone_flag_cleared`, and `revocation_cascade_complete` events to keep these tables current. There is no admin-seed path to replay flags onto a new contract; flags are recreated by re-running the bounded revocation cascade. | Closed via #1039 — see [INDEXER.md](INDEXER.md#known-gaps-between-the-contracts-and-this-schema) |
 
 ---
 
@@ -59,6 +60,10 @@ Before running `scripts/migrate-contract.sh`, verify the following:
 
 3. **Player deactivations** — run the indexer reconciliation check after cutover
    to confirm `players.deactivated` matches the registration getter (row 12).
+
+4. **Scout subscriptions and auto-renewal** — verify the replay report contains
+   the expected active subscriptions and per-scout renewal flags (rows 8 and 13).
+
 
 ---
 

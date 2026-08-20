@@ -23,6 +23,11 @@ pub struct ContractHealth {
     pub initialized: bool,
     /// Whether state-changing operations are currently paused.
     pub paused: bool,
+    /// Whether the `scout_access.pay_to_contact` function is paused independently
+    /// of the whole-contract pause (function-scoped circuit breaker).
+    /// Always `false` for contracts that do not implement a `pay_to_contact`
+    /// function (`registration`, `verification`, `progress`).
+    pub pay_to_contact_paused: bool,
 }
 
 impl ProgressLevel {
@@ -87,6 +92,103 @@ where
         .persistent()
         .extend_ttl(admin_key, admin_bump_ledgers, admin_bump_ledgers);
     Ok(admin)
+}
+
+/// One cross-contract peer-address pointer: the currently configured
+/// `address` (if any) and a monotonically incrementing `epoch` bumped on
+/// every successful write via [`write_wiring_link`].
+///
+/// Every contract's `get_wiring_state()` getter returns one `WiringLink` per
+/// peer pointer it holds (`verification` and `scout_access` each hold two;
+/// `progress` holds three; `registration` holds one) — see
+/// `docs/WIRING_REGISTRY_DESIGN.md` for the full cross-contract picture and
+/// how an off-chain caller uses `epoch` to detect a partially-applied
+/// re-wiring.
+///
+/// # Why `epoch` in addition to `address: Option<Address>`
+///
+/// `Option::None` already distinguishes "never configured" from "configured
+/// to *something*" — `epoch` adds a dimension `Option` cannot: it lets an
+/// operator distinguish *how many times* a link has been (re-)wired. Given
+/// only a single snapshot this mostly matters for the specific interrupted
+/// re-wiring scenario this design exists to catch: comparing `epoch` across
+/// **all pointers that target the same contract** (e.g. `verification`'s,
+/// `registration`'s, and `scout_access`'s independent `ProgressContract`
+/// pointers) reveals a mid-migration state that a bare address comparison
+/// alone would describe correctly but less diagnostically — an operator
+/// re-running a re-wiring script can tell "my calls aren't landing at all"
+/// (epoch unchanged from a prior snapshot) apart from "my calls are landing,
+/// but with the wrong address" (epoch changed, address still wrong), which
+/// point to two entirely different bugs (an auth/network failure vs. a
+/// typo'd argument).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WiringLink {
+    pub address: Option<Address>,
+    pub epoch: u32,
+}
+
+impl WiringLink {
+    /// The zero-value link: never configured.
+    pub const fn unconfigured() -> Self {
+        WiringLink {
+            address: None,
+            epoch: 0,
+        }
+    }
+
+    /// Whether this link currently has an address set. Equivalent to
+    /// `epoch > 0` — every successful [`write_wiring_link`] call sets both
+    /// the address and bumps the epoch together, so the two can never
+    /// disagree about "configured or not."
+    pub fn is_configured(&self) -> bool {
+        self.address.is_some()
+    }
+}
+
+/// Read a wiring link's current address + epoch from instance storage.
+///
+/// `addr_key` and `epoch_key` are two variants of the calling contract's own
+/// `DataKey` enum (e.g. `DataKey::ProgressContract` and
+/// `DataKey::ProgressContractEpoch`). Returns [`WiringLink::unconfigured`]
+/// (address `None`, epoch `0`) if the link has never been written.
+pub fn read_wiring_link<K>(env: &Env, addr_key: &K, epoch_key: &K) -> WiringLink
+where
+    K: IntoVal<Env, soroban_sdk::Val>,
+{
+    let address = env.storage().instance().get::<K, Address>(addr_key);
+    let epoch = env
+        .storage()
+        .instance()
+        .get::<K, u32>(epoch_key)
+        .unwrap_or(0);
+    WiringLink { address, epoch }
+}
+
+/// Write a wiring link's address and atomically bump its epoch by one.
+///
+/// Every `set_*_contract` / `update_*_contract` setter across all four
+/// contracts calls this so epoch bookkeeping cannot silently drift between
+/// per-contract implementations — see `docs/WIRING_REGISTRY_DESIGN.md`
+/// ("Open Question 1", resolved by this shared helper). Returns the new
+/// epoch value; callers pass it straight into their `wiring_updated` event.
+///
+/// This does not perform admin authorization itself — callers must call
+/// [`require_admin`] (or otherwise authorize the caller) before invoking
+/// this.
+pub fn write_wiring_link<K>(env: &Env, addr_key: &K, epoch_key: &K, addr: &Address) -> u32
+where
+    K: IntoVal<Env, soroban_sdk::Val>,
+{
+    let next_epoch = env
+        .storage()
+        .instance()
+        .get::<K, u32>(epoch_key)
+        .unwrap_or(0)
+        + 1;
+    env.storage().instance().set(addr_key, addr);
+    env.storage().instance().set(epoch_key, &next_epoch);
+    next_epoch
 }
 
 /// Safe (checked) arithmetic helpers shared across all four contracts.
@@ -475,6 +577,25 @@ mod tests {
 
     fn s(env: &Env, v: &str) -> String {
         String::from_str(env, v)
+    }
+
+    #[test]
+    fn wiring_link_unconfigured_is_not_configured() {
+        let link = WiringLink::unconfigured();
+        assert_eq!(link.address, None);
+        assert_eq!(link.epoch, 0);
+        assert!(!link.is_configured());
+    }
+
+    #[test]
+    fn wiring_link_with_address_is_configured() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let link = WiringLink {
+            address: Some(addr),
+            epoch: 1,
+        };
+        assert!(link.is_configured());
     }
 
     #[test]

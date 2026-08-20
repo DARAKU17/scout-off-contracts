@@ -248,6 +248,8 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 Store the progress contract address so `set_player_level` may only be called
 by that contract. Must be called after both contracts are deployed (admin only).
+Freely re-settable — no guard. Bumps the link's re-wiring epoch and emits
+`wiring_updated` (`link = "progress_contract"`) on every call (issue #1041).
 
 | | |
 |---|---|
@@ -257,6 +259,26 @@ by that contract. Must be called after both contracts are deployed (admin only).
 ```bash
 stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
   -- set_progress_contract --addr $PROGRESS_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> RegistrationWiringState`
+
+Returns a snapshot of the single peer-address pointer this contract holds
+(`progress_contract`), paired with its re-wiring epoch (`0` iff unset).
+`RegistrationWiringState::is_fully_wired()` returns `true` iff the address is
+set. Read-only, no auth required — see
+[`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -749,7 +771,12 @@ change the admin; the proposed address must still call `accept_admin`.
 Wire the progress contract address so `approve_milestone` can call
 `advance_level` cross-contract. Must be called once after deployment.
 Returns `AlreadyConfigured` on subsequent calls — use
-`update_progress_contract` for intentional re-wiring.
+`update_progress_contract` for intentional re-wiring. This first-call-only
+guard is deliberately preserved (issue #1041) for backward compatibility with
+already-deployed contracts, unlike every other `set_*_contract` setter across
+all four contracts, which is freely re-settable. Bumps the link's re-wiring
+epoch and emits `wiring_updated` (`link = "progress_contract"`) in addition
+to `progress_contract_updated`.
 
 | | |
 |---|---|
@@ -766,7 +793,8 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 #### `update_progress_contract(progress_contract: Address) -> Result<(), VerificationError>`
 
 Re-wire the progress contract address after the initial `set_progress_contract`
-call. Use when redeploying or rotating the progress contract.
+call. Use when redeploying or rotating the progress contract. Also bumps the
+link's re-wiring epoch and emits `wiring_updated`, same as `set_progress_contract`.
 
 | | |
 |---|---|
@@ -785,7 +813,10 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 Store the registration contract address so `dispute_milestone` can verify
 wallet-to-player-id ownership via cross-contract call. Must be called once
 after deployment. Returns `AlreadyConfigured` on subsequent calls — use
-`update_registration_contract` for intentional re-wiring.
+`update_registration_contract` for intentional re-wiring. Same
+deliberately-preserved first-call-only guard as `set_progress_contract`
+above (issue #1041). Bumps the link's re-wiring epoch and emits
+`wiring_updated` (`link = "registration_contract"`).
 
 | | |
 |---|---|
@@ -803,7 +834,8 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 Re-wire the registration contract address after the initial
 `set_registration_contract` call. Use when redeploying or rotating the
-registration contract.
+registration contract. Also bumps the link's re-wiring epoch and emits
+`wiring_updated`, same as `set_registration_contract`.
 
 | | |
 |---|---|
@@ -813,6 +845,27 @@ registration contract.
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- update_registration_contract --addr $NEW_REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> VerificationWiringState`
+
+Returns a snapshot of both peer-address pointers this contract holds
+(`progress_contract`, `registration_contract`), each as a
+`WiringLink { address: Option<Address>, epoch: u32 }`
+(`scoutchain_shared_types::WiringLink`). `VerificationWiringState::is_fully_wired()`
+returns `true` iff both links are configured. Read-only, no auth required —
+see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -844,41 +897,115 @@ stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
 
 ---
 
-#### `revoke_validator(wallet: Address, reason: Option<String>) -> Result<(), VerificationError>`
+#### `revoke_validator(wallet: Address, severity: RevocationSeverity, reason: Option<String>) -> Result<(), VerificationError>`
 
 Deactivate a validator. Revoked validators cannot approve milestones.
-`reason` is optional and capped at 128 bytes. If the reason is not exactly `"Routine"`, the validator is considered revoked for cause. This emits an additional `validator_revoked_for_cause` event and updates their status to `RevokedForCause` so off-chain indexers and `get_milestone_with_validator_status` can flag their historical milestones.
+
+`severity` must be one of:
+
+- `RevocationSeverity::Routine` — deactivates the validator only; no milestone flags are changed.
+- `RevocationSeverity::ForCause` — deactivates the validator **and** starts a bounded cascade sweep that flags every milestone the validator previously approved as `MilestonePendingReReview` (see below). If the validator has more than 50 prior approvals, `continue_revocation_cascade` must be called to finish the sweep.
+
+`reason` is optional and capped at 128 bytes. A `RevocationRecord` (severity, reason, timestamp, admin) is persisted under `DataKey::RevocationRecord(wallet)`.
+
+**Breaking change (v1.0.0):** The old `reason: Option<String>` signature is replaced. The old string-equality-to-`"Routine"` severity inference is removed. All call sites must supply an explicit `severity`.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason >128 bytes) · `Unauthorized` |
+| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason > 128 bytes) · `Unauthorized` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- revoke_validator \
   --wallet $VALIDATOR_ADDRESS \
-  --reason '"Misconduct"'
+  --severity '{"ForCause": null}' \
+  --reason '"Fabricated credentials"'
 ```
 
 ---
 
-#### `batch_revoke_validators(wallets: Vec<Address>, reason: Option<String>) -> Result<(), VerificationError>`
+#### `continue_revocation_cascade(wallet: Address) -> Result<(), VerificationError>`
 
-Revoke multiple validators in a single atomic transaction. Applies the same
-revoke logic as `revoke_validator` to each wallet in `wallets`, emitting one
-`validator_revoked` event per revocation (and `validator_revoked_for_cause` if the reason is not `"Routine"`). If any wallet is not registered the
-entire batch fails and no revocations are applied.
+Resume an in-progress for-cause revocation cascade sweep. Call repeatedly (admin only) until the `revocation_cascade_complete` event is emitted. If no cascade is in progress (all milestones already flagged), this is a no-op.
 
 | | |
 |---|---|
 | **Auth** | Admin must sign |
-| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason >128 bytes) · `Unauthorized` |
+| **Errors** | `ValidatorNotFound` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- continue_revocation_cascade \
+  --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `is_milestone_flagged(player_id: u64, milestone_index: u32) -> bool`
+
+Returns `true` if the milestone is currently flagged as pending re-review due to a for-cause validator revocation cascade. Returns `false` if never flagged or already cleared.
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- is_milestone_flagged \
+  --player_id 42 \
+  --milestone_index 1
+```
+
+---
+
+#### `rereview_milestone(reviewer: Address, player_id: u64, milestone_index: u32) -> Result<(), VerificationError>`
+
+Clear a `MilestonePendingReReview` flag after independently confirming the underlying achievement. The `reviewer` must be a currently-active validator (not necessarily the original approver). Emits `milestone_flag_cleared`.
+
+| | |
+|---|---|
+| **Auth** | `reviewer` must sign |
+| **Errors** | `MilestoneNotFound` · `NotEligibleToReReview` (reviewer not active) · `MilestoneNotFlagged` |
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- rereview_milestone \
+  --reviewer $REVIEWER_ADDRESS \
+  --player_id 42 \
+  --milestone_index 1
+```
+
+---
+
+#### `get_revocation_record(wallet: Address) -> Option<RevocationRecord>`
+
+Return the stored `RevocationRecord` for a revoked validator, if any. Returns `None` if the validator has never been revoked via the severity-aware path.
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  -- get_revocation_record \
+  --wallet $VALIDATOR_ADDRESS
+```
+
+---
+
+#### `batch_revoke_validators(wallets: Vec<Address>, severity: RevocationSeverity, reason: Option<String>) -> Result<(), VerificationError>`
+
+Revoke multiple validators in a single atomic transaction. Applies the same
+revoke logic as `revoke_validator` to each wallet in `wallets`, emitting one
+`validator_revoked` event per revocation (and `validator_revoked_for_cause` for ForCause). If any wallet is not registered, the entire batch fails and no revocations are applied.
+
+For `ForCause`, each validator's cascade sweep is started inline. Use `continue_revocation_cascade` for any validator whose prior approval history exceeds the 50-entry per-call limit.
+
+**Breaking change (v1.0.0):** `reason: Option<String>` is replaced by `severity: RevocationSeverity` + `reason: Option<String>`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `ValidatorNotFound` · `ReasonTooLong` (reason > 128 bytes) · `Unauthorized` |
 
 ```bash
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- batch_revoke_validators \
   --wallets '["'$VALIDATOR_ADDRESS_1'","'$VALIDATOR_ADDRESS_2'"]' \
+  --severity '{"Routine": null}' \
   --reason '"Season review"'
 ```
 
@@ -2197,20 +2324,24 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `get_progress_history(player_id: u64) -> Vec<ProgressEntry>`
 
-Return all history entries for a player in chronological order. Internally reads
-a single `HistoryVec` persistent storage key regardless of entry count — O(1)
-reads instead of the previous O(N) loop. Returns an empty `Vec` for unknown
-player IDs.
+Return all history entries for a player in chronological order. The contract now
+stores the full logical history as bounded `HistoryPage(player_id, page_index)`
+shards (fixed-size pages, not one ever-growing `HistoryVec` key) and
+reconstructs the chronological list at read time. This keeps per-entry storage
+cost bounded even if a player experiences many resets or repeated re-entries.
+Returns an empty `Vec` for unknown player IDs.
 
-**Gas trade-off**: the Vec grows with each level change (max 3 entries per player
-given the four-tier model). Because the entire Vec is loaded in one read the cost
-is proportional to the serialised size of the Vec, not the number of reads.
+**Gas trade-off**: each page is a small, fixed-size `Vec<ProgressEntry>`, so the
+read cost scales with the number of pages touched rather than the total lifetime
+entry count in a single unbounded storage key. The logical history can still be
+reconstructed for Merkle commitments and auditing without exposing an
+unbounded per-player storage blob.
 
-**Migration note**: existing deployments that only have `HistoryEntry(player_id, i)`
-keys (written before this change) will return an empty Vec from this function.
-Use `get_history_entry` with individual indices to read pre-migration data, or
-run a one-time migration script that calls `advance_level` / `reset_player_level`
-to rewrite history into the new Vec key.
+**Migration note**: the legacy `HistoryVec(player_id)` key remains readable for
+compatibility with older deployments and recovery tooling, but new writes append
+to `HistoryPage` shards instead of extending the legacy vec. Existing data can
+still be recovered by concatenating the `HistoryEntry(player_id, i)` records in
+index order until a one-time migration is complete.
 
 | | |
 |---|---|
@@ -2271,7 +2402,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID -- health
 
 #### `set_verification_contract(addr: Address) -> Result<(), ProgressError>`
 
-Store the verification contract address so `advance_level` can authenticate cross-contract callers. Without this, only direct `caller` auth is accepted (useful for testing). Admin only.
+Store the verification contract address so `advance_level` can authenticate cross-contract callers. Without this, only direct `caller` auth is accepted (useful for testing). Admin only. Freely re-settable — no guard. Bumps `VerificationContract`'s re-wiring epoch and emits `wiring_updated` (`link = "verification_contract"`) on every call (issue #1041).
 
 | | |
 |---|---|
@@ -2287,7 +2418,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `set_registration_contract(addr: Address) -> Result<(), ProgressError>`
 
-Store the registration contract address so `advance_level` can sync player levels via cross-contract call. Admin only.
+Store the registration contract address so `advance_level` can sync player levels via cross-contract call. Admin only. Freely re-settable — no guard. Bumps `RegistrationContract`'s re-wiring epoch and emits `wiring_updated` (`link = "registration_contract"`) on every call.
 
 | | |
 |---|---|
@@ -2303,7 +2434,7 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 #### `set_scout_access_contract(addr: Address) -> Result<(), ProgressError>`
 
-Whitelist the scout_access contract as a secondary authorized caller of `advance_level` (for trial-offer Level-3 advances). Admin only.
+Whitelist the scout_access contract as a secondary authorized caller of `advance_level` (for trial-offer Level-3 advances). Admin only. Freely re-settable — no guard. Bumps `ScoutAccessContract`'s re-wiring epoch and emits `wiring_updated` (`link = "scout_access_contract"`) on every call.
 
 | | |
 |---|---|
@@ -2313,6 +2444,22 @@ Whitelist the scout_access contract as a secondary authorized caller of `advance
 ```bash
 stellar contract invoke --id $PROGRESS_CONTRACT_ID \
   -- set_scout_access_contract --addr $SCOUT_ACCESS_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> ProgressWiringState`
+
+Returns a snapshot of all three peer-address pointers this contract holds (`registration_contract`, `verification_contract`, `scout_access_contract`), each paired with a re-wiring epoch (`registration_epoch`, `verification_epoch`, `scout_access_epoch` — `0` iff the corresponding address is `None`). `ProgressWiringState::is_fully_wired()` returns `true` iff all three addresses are set. Read-only, no auth required, exempt from the pause/init guards so it stays callable on a mis-wired or paused contract — see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -2657,7 +2804,9 @@ proposal and does not immediately change the admin.
 Register the progress contract address so `log_trial_offer` can call
 `advance_level` cross-contract (admin only). Unlike
 `verification.set_progress_contract`, this has no first-call-only guard —
-it can always be re-invoked to re-wire the link.
+it can always be re-invoked to re-wire the link. Bumps the link's re-wiring
+epoch and emits `wiring_updated` (`link = "progress_contract"`) in addition
+to `progress_contract_updated` (issue #1041).
 
 | | |
 |---|---|
@@ -2685,6 +2834,46 @@ re-wire the progress contract link across contracts.
 ```bash
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_progress_contract --addr $NEW_PROGRESS_CONTRACT_ID
+```
+
+---
+
+#### `set_registration_contract(addr: Address) -> Result<(), ScoutAccessError>`
+
+Wire the registration contract address for Pro-tier scout verification
+gating (admin only). No first-call-only guard — freely re-settable. Bumps
+the link's re-wiring epoch and emits `wiring_updated`
+(`link = "registration_contract"`) in addition to
+`registration_contract_updated` (issue #1041).
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_registration_contract --addr $REGISTRATION_CONTRACT_ID
+```
+
+---
+
+#### `get_wiring_state() -> ScoutAccessWiringState`
+
+Returns a snapshot of both peer-address pointers this contract holds
+(`progress_contract`, `registration_contract`), each as a
+`WiringLink { address: Option<Address>, epoch: u32 }`. `is_fully_wired()`
+returns `true` iff both links are configured. Read-only, no auth required —
+see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_wiring_state
 ```
 
 ---
@@ -3059,7 +3248,7 @@ scouts are **exempt** from this limit.
 | | |
 |---|---|
 | **Auth** | `scout` must sign |
-| **Errors** | `ContractPaused` · `NotInitialized` · `ScoutNotSubscribed` · `SubscriptionExpired` · `AlreadyContacted` · `ProContactLimitReached` · `Overflow` |
+| **Errors** | `ContractPaused` · `NotInitialized` · `PayToContactPaused` · `ScoutNotSubscribed` · `SubscriptionExpired` · `AlreadyContacted` · `ProContactLimitReached` · `Overflow` |
 
 **Check precedence order** (when multiple error conditions are simultaneously
 true, the first matching check in this list wins):
@@ -3068,21 +3257,29 @@ true, the first matching check in this list wins):
 |----------|-------------------|---------------|
 | 1 | Contract is paused | `ContractPaused` (3) |
 | 2 | Contract is not initialized | `NotInitialized` (2) |
-| 3 | Scout auth | panic / host auth error |
-| 4 | No `Subscription` record exists for the scout | `ScoutNotSubscribed` (6) |
-| 5 | `Subscription` record exists but `expires_at < now` | `SubscriptionExpired` (7) |
-| 6 | `ContactRecord` already exists for `(player_id, scout)` | `AlreadyContacted` (8) |
-| 7 | Scout is Pro tier AND `current_count >= pro_contact_limit` | `ProContactLimitReached` (20) |
-| 8 | Fee accumulation arithmetic overflows | `Overflow` (10) |
+| 3 | `pay_to_contact` is paused (function-scoped, issue #1056) | `PayToContactPaused` (30) |
+| 4 | Scout auth | panic / host auth error |
+| 5 | No `Subscription` record exists for the scout | `ScoutNotSubscribed` (6) |
+| 6 | `Subscription` record exists but `expires_at < now` | `SubscriptionExpired` (7) |
+| 7 | `ContactRecord` already exists for `(player_id, scout)` | `AlreadyContacted` (8) |
+| 8 | Scout is Pro tier AND `current_count >= pro_contact_limit` | `ProContactLimitReached` (20) |
+| 9 | Fee accumulation arithmetic overflows | `Overflow` (10) |
 
-> **Design note — paused vs unsubscribed (Priority 1 vs 4)**: when the
+> **Design note — paused vs unsubscribed (Priority 1 vs 5)**: when the
 > contract is paused *and* the scout has no subscription, the caller sees
 > `ContractPaused`, not `ScoutNotSubscribed`. A frontend can safely treat
 > `ContractPaused` as "service unavailable, try again later" without
 > needing to check subscription state. This ordering is intentional and
 > consistent with every other state-changing function in this contract.
 
-> **Design note — expired vs already-contacted (Priority 5 vs 6)**: an
+> **Design note — function-scoped vs whole-contract pause (Priority 3 vs 1)**:
+> `pause_pay_to_contact` halts only `pay_to_contact`, while the whole-contract
+> pause (Priority 1) still takes precedence. When only the function-scoped
+> pause is active, scouts can still `subscribe` / renew / read state; only
+> fee-charging contact is blocked. This mirrors `verification`'s
+> `pause_approve_milestone` pattern (issue #809).
+
+> **Design note — expired vs already-contacted (Priority 6 vs 7)**: an
 > expired subscription takes precedence over a duplicate-contact guard.
 > This is the more actionable error for the user ("renew your subscription")
 > and prevents leaking whether a contact record exists to an unsubscribed
@@ -3475,6 +3672,45 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_contract
 
 ---
 
+#### `pause_pay_to_contact() -> Result<(), ScoutAccessError>`
+
+Pause only the `pay_to_contact` function (function-scoped circuit breaker,
+mirroring `verification.pause_approve_milestone` from issue #809; implemented
+for scout_access in issue #1056).
+
+This halts fee-charging contact while leaving every other function operational:
+scouts can still `subscribe`, renew, read state, and use `batch_contact_players`
+/ `log_trial_offer`. The whole-contract pause (if active) still takes precedence
+over the function-scoped flag — un-pausing the whole contract does not clear
+`pay_to_contact`'s flag. The flag is stored in instance storage under
+`DataKey::PausedPayToContact` and defaults to `false`.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- pause_pay_to_contact
+```
+
+---
+
+#### `unpause_pay_to_contact() -> Result<(), ScoutAccessError>`
+
+Resume `pay_to_contact` after a function-scoped pause.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID -- unpause_pay_to_contact
+```
+
+---
+
 #### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ScoutAccessError>`
 
 Upgrade the contract WASM. Admin auth required. Persistent storage survives.
@@ -3527,7 +3763,9 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 #### `health() -> ContractHealth`
 
-Return the contract's initialization and pause status.
+Return the contract's initialization and pause status. `pay_to_contact_paused`
+reflects the function-scoped pause (see `pause_pay_to_contact`); it is
+independent of the whole-contract `paused` flag.
 
 | | |
 |---|---|
@@ -3580,6 +3818,97 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 # Player -> scouts that contacted this player.
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- get_player_contacts --player_id 1
+```
+
+---
+
+#### `get_contact_record(scout: Address, player_id: u64) -> Option<ContactRecord>`
+
+Retrieve the full `ContactRecord` for a `(player_id, scout)` pair. Returns
+`None` if the scout has not contacted this player.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_contact_record --scout $SCOUT_ADDRESS --player_id 1
+```
+
+---
+
+#### `get_player_contacts(player_id: u64) -> Vec<Address>`
+
+Return all scout addresses that have contacted `player_id` as an O(1) index
+lookup. Players can audit their inbound contact history directly from
+on-chain state without replaying off-chain events.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_contacts --player_id 1
+```
+
+---
+
+#### `restore_subscription_record(scout: Address) -> Result<(), ScoutAccessError>`
+
+Re-extend the TTL of a `Subscription` record that is nearing archival so its
+history remains available on-chain. Admin-only. Returns
+`SubscriptionRecordEvicted` (code 29) if the entry has already been fully
+evicted (key absent) and is unrecoverable.
+
+| | |
+|---|---|
+| **Auth** | Admin must sign |
+| **Errors** | `NotInitialized` · `Unauthorized` · `SubscriptionRecordEvicted` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- restore_subscription_record --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_player_trial_offers(player_id: u64) -> Vec<TrialOffer>`
+
+Return all trial offers for a given player in ascending index order (1..=N).
+Returns an empty Vec for a player with no trial offers. Unbounded (unlike the
+20-entry cap on `get_all_trial_offers`).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_trial_offers --player_id 1
+```
+
+---
+
+#### `get_scout_trial_offers(scout: Address) -> Vec<(u64, u32)>`
+
+Return all `(player_id, trial_index)` tuples for every trial offer logged by
+`scout`, in insertion order (oldest first). Returns an empty Vec for a scout
+who has not logged any trial offers. Each tuple can be passed to
+`get_trial_offer(player_id, index)` to fetch the full offer record.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_scout_trial_offers --scout $SCOUT_ADDRESS
 ```
 
 ---
@@ -3723,6 +4052,10 @@ given tier.
 pub struct ContractHealth {
     pub initialized: bool,
     pub paused: bool,
+    /// Function-scoped pause flag for `pay_to_contact` (scout_access only).
+    /// Always `false` for contracts that have no `pay_to_contact` function
+    /// (`registration`, `verification`, `progress`).
+    pub pay_to_contact_paused: bool,
 }
 ```
 
@@ -4089,6 +4422,8 @@ pub struct TrialOffer {
 | 26 | `PendingFeeConfigAlreadyExists` | `propose_fee_config` called while a pending proposal already exists |
 | 27 | `ScoutNotVerified` | Pro-tier `subscribe()` rejected an unverified (or not-found) scout — see [`docs/SYBIL_MITIGATION_DESIGN.md`](SYBIL_MITIGATION_DESIGN.md) |
 | 28 | `AutoRenewNotEnabled` | `renew_if_due` called for a scout without auto-renewal enabled |
+| 29 | `SubscriptionRecordEvicted` | `restore_subscription_record` targeted a subscription entry whose archival grace period has fully elapsed (evicted, not merely archived) and is unrecoverable |
+| 30 | `PayToContactPaused` | `pay_to_contact` called while the function-scoped pause is active (issue #1056) — the whole-contract `ContractPaused` (3) takes precedence when both are set |
 
 ---
 
@@ -4112,6 +4447,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `player_level_synced` | event_name, progress_contract (Address) | player_id (u64) | Progress contract syncs a player's level |
 | `admin_transfer_proposed` | event_name, old_admin (Address) | new_admin (Address) | Current admin proposes a replacement |
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` re-wired the `progress_contract` peer link (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### verification
 
@@ -4135,6 +4471,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `attestation_recorded` | event_name, validator (Address) | player_id (u64), evidence_hash (String), vote_count (u32), threshold (u32) | `attest_milestone` vote accepted (including the threshold-crossing one) |
 | `attestation_window_expired` | event_name, player_id (u64) | evidence_hash (String), new_round (u32) | A sub-threshold claim's voting window elapsed; the next vote starts a fresh round |
 | `validator_votes_invalidated` | event_name, admin (Address) | wallet (Address), invalidated_count (u32) | `revoke_validator` retroactively stripped this validator's pending votes |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` / `update_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### progress
 
@@ -4146,6 +4483,7 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_registration_contract` / `set_verification_contract` / `set_scout_access_contract` re-wired a peer link — `link` is `"registration_contract"`, `"verification_contract"`, or `"scout_access_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
 
 ### scout_access
 
@@ -4169,6 +4507,15 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `admin_transferred` | event_name, old_admin (Address) | new_admin (Address) | Pending admin accepts control |
 | `contract_paused` | event_name, admin (Address) | () | Circuit breaker engaged |
 | `contract_unpaused` | event_name, admin (Address) | () | Circuit breaker released |
+| `pay_to_contact_paused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` engaged (issue #1056) |
+| `pay_to_contact_unpaused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` released |
+| `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
+
+---
+
+## Cross-Contract Wiring
+
+See [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md) for the full design: every contract's `get_wiring_state()` getter, the `WiringLink { address, epoch }` shape shared via `scoutchain_shared_types`, the re-wiring policy (freely re-settable everywhere except verification's two legacy first-call-only setters, preserved for backward compatibility), and how `scripts/verify-cross-contract-wiring.sh` detects a partially-applied re-wiring across the eight peer-address pointers.
 
 ---
 

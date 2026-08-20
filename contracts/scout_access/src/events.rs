@@ -19,6 +19,7 @@ pub const REGISTRATION_CONTRACT_UPDATED: &str = "registration_contract_updated";
 pub const FEE_CONFIG_PROPOSED: &str = "fee_config_proposed";
 pub const FEE_CONFIG_UPDATED: &str = "fee_config_updated";
 pub const FEE_CONFIG_DELAY_BYPASSED: &str = "fee_config_delay_bypassed";
+pub const WIRING_UPDATED: &str = "wiring_updated";
 
 /// topics: (event_name, admin)  data: admin
 pub fn contract_initialized(env: &Env, admin: &Address) {
@@ -104,6 +105,25 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "contract_unpaused"), admin.clone()), ());
 }
 
+pub const PAY_TO_CONTACT_PAUSED: &str = "pay_to_contact_paused";
+pub const PAY_TO_CONTACT_UNPAUSED: &str = "pay_to_contact_unpaused";
+
+/// topics: (event_name, admin)  data: ()
+pub fn pay_to_contact_paused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "pay_to_contact_paused"), admin.clone()),
+        (),
+    );
+}
+
+/// topics: (event_name, admin)  data: ()
+pub fn pay_to_contact_unpaused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "pay_to_contact_unpaused"), admin.clone()),
+        (),
+    );
+}
+
 /// topics: (event_name, scout)  data: (tier, subscribed_at, expires_at)
 pub fn subscription_created(
     env: &Env,
@@ -156,6 +176,25 @@ pub fn registration_contract_updated(env: &Env, admin: &Address, registration_co
             admin.clone(),
         ),
         registration_contract.clone(),
+    );
+}
+
+/// topics: (event_name, admin, link)  data: (new_address, new_epoch)
+///
+/// Emitted by every `set_progress_contract` / `update_progress_contract` /
+/// `set_registration_contract` call, in addition to (not replacing)
+/// `progress_contract_updated` / `registration_contract_updated`. `link`
+/// identifies which peer pointer changed (`"progress_contract"` or
+/// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
+pub const WIRING_UPDATED: &str = "wiring_updated";
+pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, WIRING_UPDATED),
+            admin.clone(),
+            Symbol::new(env, link),
+        ),
+        (new_address.clone(), new_epoch),
     );
 }
 
@@ -251,5 +290,15 @@ pub fn subscription_auto_renewed(
     env.events().publish(
         (Symbol::new(env, SUBSCRIPTION_AUTO_RENEWED), scout.clone()),
         (tier.clone(), subscribed_at, expires_at),
+    );
+}
+
+/// Emitted by `restore_subscription_record` when an admin re-extends an
+/// archived or expired subscription entry's TTL back to the policy value.
+/// topics: (event_name, admin)  data: scout
+pub fn subscription_record_restored(env: &Env, admin: &Address, scout: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "subscription_record_restored"), admin.clone()),
+        scout.clone(),
     );
 }

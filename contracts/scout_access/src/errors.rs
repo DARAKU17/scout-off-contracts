@@ -112,6 +112,16 @@ pub enum ScoutAccessError {
     AutoRenewAlreadyExists = 33,
     /// A fee-config history replay conflicts with history already stored.
     FeeConfigHistoryAlreadyExists = 34,
+    /// `restore_subscription_record` targeted a subscription entry whose
+    /// archival grace period has fully elapsed (evicted, not merely archived)
+    /// and is unrecoverable. (Codes 13 and 18 are reserved by tests.)
+    SubscriptionRecordEvicted = 35,
+
+    // ── Function-scoped pausing ──
+    /// The `pay_to_contact` function is paused independently of the
+    /// whole-contract pause (issue #1056). Mirrors `verification`'s
+    /// `ApproveMilestonePaused`.
+    PayToContactPaused = 36,
 }
 
 impl AdminError for ScoutAccessError {

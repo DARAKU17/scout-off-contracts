@@ -1,5 +1,7 @@
 use soroban_sdk::{contracttype, Address, String};
 
+pub use scoutchain_shared_types::WiringLink;
+
 /// Subscription tier for scouts
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +140,10 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for `pay_to_contact` (independent of the
+    /// whole-contract `Paused` flag). Stored in instance storage, defaults to
+    /// `false` when absent. Mirrors `verification`'s `PausedApproveMilestone`.
+    PausedPayToContact,
     FeeConfig,
     /// Proposed fee configuration awaiting activation after a 7-day delay
     PendingFeeConfig,
@@ -206,4 +212,36 @@ pub enum DataKey {
     /// functions on this contract check this flag before writing any state.
     /// Cleared by `close_migration_window`. Stored in instance storage.
     MigrationActive,
+    /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
+    /// `set_progress_contract` / `update_progress_contract` call. See
+    /// `scoutchain_shared_types::WiringLink` and
+    /// `docs/WIRING_REGISTRY_DESIGN.md` (issue #1041).
+    ProgressContractEpoch,
+    /// Re-wiring epoch for `DataKey::RegistrationContract`, bumped by every
+    /// `set_registration_contract` call.
+    RegistrationContractEpoch,
+}
+
+/// Snapshot of both cross-contract peer address pointers held by the
+/// scout_access contract, each with its address and re-wiring epoch.
+/// Returned by `ScoutAccessContract::get_wiring_state`. See
+/// `docs/WIRING_REGISTRY_DESIGN.md` for the full cross-contract picture.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoutAccessWiringState {
+    /// Peer link to the progress contract, set via `set_progress_contract`
+    /// (or its `update_progress_contract` alias). Used so `log_trial_offer`
+    /// can atomically advance a player to Level 3.
+    pub progress_contract: WiringLink,
+    /// Peer link to the registration contract, set via
+    /// `set_registration_contract`. Used for Pro-tier scout verification
+    /// gating.
+    pub registration_contract: WiringLink,
+}
+
+impl ScoutAccessWiringState {
+    /// Returns `true` iff both peer links are configured.
+    pub fn is_fully_wired(&self) -> bool {
+        self.progress_contract.is_configured() && self.registration_contract.is_configured()
+    }
 }

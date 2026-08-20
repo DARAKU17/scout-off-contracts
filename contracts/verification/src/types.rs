@@ -1,4 +1,4 @@
-pub use scoutchain_shared_types::ContractHealth;
+pub use scoutchain_shared_types::{ContractHealth, WiringLink};
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 
 /// Convenience aggregate returned by `get_validator_activity_report`.
@@ -76,6 +76,8 @@ pub struct Validator {
     pub wallet: Address,
     /// Human-readable credential label (e.g. "UEFA B License", "Academy Director")
     pub credentials: String,
+    /// Administrator-verified organizational affiliation (e.g. "FC Example Academy")
+    pub affiliation: String,
     /// Ledger timestamp when the validator was registered, in Unix seconds.
     pub registered_at: u64,
     /// Whether this validator is currently authorized to approve milestones.
@@ -220,6 +222,48 @@ pub enum AttestationStatus {
     Committed(u32),
 }
 
+/// Severity level for a validator revocation.
+///
+/// Passed explicitly to `revoke_validator` instead of inferring severity from
+/// free-text string content.  `Routine` leaves prior milestone approvals
+/// untouched; `ForCause` triggers a cascade sweep that flags every milestone
+/// the validator previously approved as `MilestonePendingReReview`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevocationSeverity {
+    /// Routine deactivation — no cascade flag sweep triggered.
+    Routine,
+    /// For-cause revocation — every previously-approved milestone is flagged
+    /// `MilestonePendingReReview` so scouts and indexers can identify affected
+    /// records.
+    ForCause,
+}
+
+/// Persisted record of a validator revocation (stored under
+/// `DataKey::RevocationRecord(wallet)`).
+///
+/// Retains the severity, human-readable reason, ledger timestamp, and the
+/// admin address that performed the revocation for audit purposes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationRecord {
+    /// Severity of this revocation.
+    pub severity: RevocationSeverity,
+    /// Human-readable reason supplied by the admin (may be empty).
+    pub reason: String,
+    /// Unix timestamp (seconds) when the revocation occurred.
+    pub revoked_at: u64,
+    /// Admin address that performed the revocation.
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiversityConfig {
+    pub required_distinct_affiliations: u32,
+    pub starting_milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -239,6 +283,10 @@ pub enum DataKey {
     ValidatorVector,
     TotalMilestoneCount,
     GlobalMilestoneIndex,
+    /// Persistent config for diversity-gated milestone advancement
+    DiversityConfig,
+    /// Persistent index: player_id → Vec<String> distinct affiliations that have contributed milestones
+    PlayerAffiliations(u64),
     /// Persistent index: validator wallet → Vec<u64> of distinct player_ids
     /// for which that validator has approved at least one milestone.
     /// Updated on every `approve_milestone` call (duplicates are skipped).
@@ -316,4 +364,57 @@ pub enum DataKey {
     /// functions on this contract check this flag before writing any state.
     /// Cleared by `close_migration_window`. Stored in instance storage.
     MigrationActive,
+
+    // ── Wiring epochs (issue #1041) ──
+    /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
+    /// `set_progress_contract` / `update_progress_contract` call. See
+    /// `scoutchain_shared_types::WiringLink` and
+    /// `docs/WIRING_REGISTRY_DESIGN.md`.
+    ProgressContractEpoch,
+    /// Re-wiring epoch for `DataKey::RegistrationContract`, bumped by every
+    /// `set_registration_contract` / `update_registration_contract` call.
+    RegistrationContractEpoch,
+
+    // ── Validator revocation cascade re-review (issue #1039) ──
+    /// Persisted `RevocationRecord` for a revoked validator wallet.
+    /// Keyed by validator wallet address.
+    RevocationRecord(Address),
+    /// Per-milestone pending-re-review flag. `true` means the milestone has
+    /// been flagged as pending re-review by a for-cause revocation cascade.
+    /// Cleared by a successful `rereview_milestone` call.
+    MilestonePendingReReview(u64, u32),
+    /// Continuation cursor for a bounded for-cause cascade sweep.
+    /// Stores the index (0-based position in the `ValidatorMilestones` vec)
+    /// from which the next `continue_revocation_cascade` call should resume.
+    /// Absent when no cascade is in progress or when the sweep is complete.
+    RevocationCascadeCursor(Address),
+}
+
+/// Snapshot of both cross-contract peer address pointers held by the
+/// verification contract, each with its address and re-wiring epoch.
+/// Returned by [`VerificationContract::get_wiring_state`].
+///
+/// See `docs/WIRING_REGISTRY_DESIGN.md` for the full cross-contract picture
+/// and `scoutchain_shared_types::WiringLink` for what `epoch` means.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationWiringState {
+    /// Peer link to the progress contract. Set via `set_progress_contract`
+    /// (first call only — see `DataKey::ProgressContractSet`) or
+    /// `update_progress_contract` (any subsequent call). Only this address
+    /// may be the target of `advance_level` cross-calls from
+    /// `approve_milestone` / `attest_milestone`.
+    pub progress_contract: WiringLink,
+    /// Peer link to the registration contract. Set via
+    /// `set_registration_contract` (first call only — see
+    /// `DataKey::RegistrationContractSet`) or `update_registration_contract`.
+    /// Used by `dispute_milestone` to verify wallet↔player_id binding.
+    pub registration_contract: WiringLink,
+}
+
+impl VerificationWiringState {
+    /// Returns `true` iff both peer links are configured.
+    pub fn is_fully_wired(&self) -> bool {
+        self.progress_contract.is_configured() && self.registration_contract.is_configured()
+    }
 }

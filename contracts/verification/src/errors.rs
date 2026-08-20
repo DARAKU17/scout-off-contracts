@@ -111,6 +111,23 @@ pub enum VerificationError {
     /// A `MilestoneDispute` already exists at `(player_id, milestone_index)`
     /// with different content. Identical replays are no-ops.
     DisputeAlreadyExists = 32,
+    /// `restore_validator_record` targeted a validator entry whose archival
+    /// grace period has fully elapsed (evicted, not merely marked inactive) and
+    /// is unrecoverable.
+    ValidatorRecordEvicted = 33,
+    /// `restore_milestone_record` targeted a milestone entry that has been
+    /// fully evicted and is unrecoverable.
+    MilestoneRecordEvicted = 34,
+
+    // ── Revocation cascade re-review (issue #1039) ──
+    /// `rereview_milestone` called by a wallet that is not a currently-active
+    /// validator. Only active (non-revoked) validators may clear a pending
+    /// re-review flag.
+    NotEligibleToReReview = 35,
+    /// `rereview_milestone` called on a milestone that is not currently flagged
+    /// as pending re-review. The flag either never existed or was already
+    /// cleared by a prior `rereview_milestone` call.
+    MilestoneNotFlagged = 36,
 }
 
 impl AdminError for VerificationError {
@@ -143,6 +160,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
@@ -163,6 +181,7 @@ mod tests {
         client.register_validator(
             &validator,
             &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
             &Vec::new(&env),
         );
 
