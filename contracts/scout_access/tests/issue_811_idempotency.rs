@@ -137,6 +137,7 @@ fn test_confirm_trial_offer_idempotency_nonce_prevents_replay() {
     verification.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     verification.approve_milestone(

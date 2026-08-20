@@ -5,7 +5,9 @@
 //!
 //! See docs/GAS_GRIEFING_AUDIT.md — Vector 1: ValidatorVector Monotonic Growth.
 
-use scoutchain_verification::{RevocationSeverity, VerificationContract, VerificationContractClient};
+use scoutchain_verification::{
+    RevocationSeverity, VerificationContract, VerificationContractClient,
+};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, VerificationContractClient<'static>) {
@@ -36,6 +38,7 @@ fn test_validator_cap_enforced_at_100() {
         client.register_validator(
             &v,
             &String::from_str(&env, "UEFA-B-License-2026"),
+            &String::from_str(&env, "Default Academy"),
             &soroban_sdk::Vec::new(&env),
         );
     }
@@ -52,6 +55,7 @@ fn test_validator_cap_enforced_at_100() {
     let result = client.try_register_validator(
         &extra,
         &String::from_str(&env, "UEFA-A-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     assert!(
@@ -87,6 +91,7 @@ fn test_get_validators_with_revoked_entries_bounded() {
         client.register_validator(
             &v,
             &String::from_str(&env, "UEFA-B-License-2026"),
+            &String::from_str(&env, "Default Academy"),
             &soroban_sdk::Vec::new(&env),
         );
         validators.push(v);
@@ -140,6 +145,7 @@ fn test_get_validators_cpu_cost_at_cap() {
         client.register_validator(
             &v,
             &String::from_str(&env, "UEFA-B-License-2026"),
+            &String::from_str(&env, "Default Academy"),
             &soroban_sdk::Vec::new(&env),
         );
     }

@@ -157,7 +157,13 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
 /// addition to (not replacing) `progress_contract_updated`. `link`
 /// identifies which peer pointer changed (`"progress_contract"` or
 /// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -316,10 +322,7 @@ pub fn milestone_flagged_for_rereview(
     milestone_index: u32,
 ) {
     env.events().publish(
-        (
-            Symbol::new(env, "milestone_flagged"),
-            validator.clone(),
-        ),
+        (Symbol::new(env, "milestone_flagged"), validator.clone()),
         (player_id, milestone_index),
     );
 }
@@ -328,17 +331,9 @@ pub fn milestone_flagged_for_rereview(
 /// `rereview_milestone` (issue #1039).
 ///
 /// topics: (event_name, reviewer)  data: (player_id, milestone_index)
-pub fn milestone_flag_cleared(
-    env: &Env,
-    reviewer: &Address,
-    player_id: u64,
-    milestone_index: u32,
-) {
+pub fn milestone_flag_cleared(env: &Env, reviewer: &Address, player_id: u64, milestone_index: u32) {
     env.events().publish(
-        (
-            Symbol::new(env, "milestone_flag_cleared"),
-            reviewer.clone(),
-        ),
+        (Symbol::new(env, "milestone_flag_cleared"), reviewer.clone()),
         (player_id, milestone_index),
     );
 }

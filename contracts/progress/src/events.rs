@@ -61,7 +61,13 @@ pub fn player_level_reset(
 /// `"verification_contract"`, or `"scout_access_contract"`) so a single
 /// indexer subscription can distinguish them without three separate event
 /// names. See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -89,7 +95,10 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
 /// topics: (event_name, admin)  data: player_id
 pub fn player_level_record_restored(env: &Env, admin: &Address, player_id: u64) {
     env.events().publish(
-        (Symbol::new(env, "player_level_record_restored"), admin.clone()),
+        (
+            Symbol::new(env, "player_level_record_restored"),
+            admin.clone(),
+        ),
         player_id,
     );
 }

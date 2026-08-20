@@ -74,6 +74,7 @@ fn seed(h: &Harness) -> Seeded {
     h.verification.register_validator(
         &validator,
         &String::from_str(&h.env, "UEFA-B-License"),
+        &String::from_str(&h.env, "Default Academy"),
         &soroban_sdk::Vec::new(&h.env),
     );
 

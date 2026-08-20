@@ -379,10 +379,16 @@ pub enum DataKey {
     /// Persisted `RevocationRecord` for a revoked validator wallet.
     /// Keyed by validator wallet address.
     RevocationRecord(Address),
-    /// Per-milestone pending-re-review flag. `true` means the milestone has
-    /// been flagged as pending re-review by a for-cause revocation cascade.
-    /// Cleared by a successful `rereview_milestone` call.
+    /// Legacy per-milestone pending-re-review flag. New cascades use the
+    /// validator-scoped pages below so a bounded batch does not exceed the
+    /// network's per-transaction ledger-write limit; readers retain support
+    /// for this key for state written by an earlier implementation.
     MilestonePendingReReview(u64, u32),
+    /// Sharded pending-re-review flags for one revoked validator. Each page
+    /// contains compact `(player_id, milestone_index)` references.
+    MilestonePendingReReviewPage(Address, u32),
+    /// Number of pending-re-review references stored for one revoked validator.
+    MilestonePendingReReviewCount(Address),
     /// Continuation cursor for a bounded for-cause cascade sweep.
     /// Stores the index (0-based position in the `ValidatorMilestones` vec)
     /// from which the next `continue_revocation_cascade` call should resume.

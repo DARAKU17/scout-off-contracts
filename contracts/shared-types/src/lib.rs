@@ -574,6 +574,7 @@ fn is_base32_char(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     fn s(env: &Env, v: &str) -> String {
         String::from_str(env, v)

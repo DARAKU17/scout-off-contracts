@@ -128,6 +128,7 @@ impl Harness {
             verification.register_validator(
                 &wallet,
                 &String::from_str(&env, "UEFA B License"),
+                &String::from_str(&env, "Default Academy"),
                 &Vec::new(&env),
             );
             validators.push_back(wallet);

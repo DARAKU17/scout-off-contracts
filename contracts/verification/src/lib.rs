@@ -17,10 +17,11 @@ mod types;
 
 pub use errors::VerificationError;
 pub use types::{
-    AttestationStatus, ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage,
-    Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef, MilestoneWithValidatorStatus,
-    PendingMilestoneClaim, PendingVoteRef, RevocationRecord, RevocationSeverity, Validator,
-    DiversityConfig, ValidatorActivityReport, ValidatorStatus, VerificationWiringState,
+    AttestationStatus, ContractHealth, DataKey, DiversityConfig, GlobalMilestoneEntry,
+    GlobalMilestoneIndexPage, Milestone, MilestoneAttestation, MilestoneDispute, MilestoneRef,
+    MilestoneWithValidatorStatus, PendingMilestoneClaim, PendingVoteRef, RevocationRecord,
+    RevocationSeverity, Validator, ValidatorActivityReport, ValidatorStatus,
+    VerificationWiringState,
 };
 
 use soroban_sdk::xdr::ToXdr;
@@ -790,6 +791,13 @@ impl VerificationContract {
         wallet: &Address,
         start_index: u32,
     ) -> Result<(), VerificationError> {
+        // A direct persistent key per flag would make a 50-item batch exceed
+        // Soroban's transaction write-entry limit once the revocation record,
+        // validator index, and cursor are included. Store the flags in compact
+        // validator-scoped pages instead: one bounded sweep writes at most two
+        // page entries while preserving O(1) lookup by the public getter.
+        const FLAG_PAGE_SIZE: u32 = 50;
+
         let milestones_key = DataKey::ValidatorMilestones(wallet.clone());
         let milestones: Vec<MilestoneRef> = env
             .storage()
@@ -800,19 +808,70 @@ impl VerificationContract {
         let total = milestones.len();
         let mut flagged_this_call: u32 = 0;
         let mut i = start_index;
+        let count_key = DataKey::MilestonePendingReReviewCount(wallet.clone());
+        let mut pending_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let mut page_index = pending_count / FLAG_PAGE_SIZE;
+        let mut page: Vec<MilestoneRef> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestonePendingReReviewPage(
+                wallet.clone(),
+                page_index,
+            ))
+            .unwrap_or_else(|| Vec::new(env));
+
+        // A repeated initial call is allowed to be idempotent. Load the
+        // existing references once rather than probing/writing one key per
+        // milestone, which is what previously exhausted transaction limits.
+        let mut existing: Vec<MilestoneRef> = Vec::new(env);
+        if start_index == 0 && pending_count > 0 {
+            let page_count = (pending_count + FLAG_PAGE_SIZE - 1) / FLAG_PAGE_SIZE;
+            for p in 0..page_count {
+                if let Some(entries) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Vec<MilestoneRef>>(&DataKey::MilestonePendingReReviewPage(
+                        wallet.clone(),
+                        p,
+                    ))
+                {
+                    for j in 0..entries.len() {
+                        existing.push_back(entries.get(j).unwrap());
+                    }
+                }
+            }
+        }
 
         while i < total && flagged_this_call < CASCADE_LIMIT {
             let m_ref = milestones.get(i).unwrap();
-            let flag_key =
-                DataKey::MilestonePendingReReview(m_ref.player_id, m_ref.milestone_index);
-            // Only flag if not already flagged (idempotent — supports re-runs).
-            if !env.storage().persistent().has(&flag_key) {
-                env.storage().persistent().set(&flag_key, &true);
-                env.storage().persistent().extend_ttl(
-                    &flag_key,
-                    PERSISTENT_TTL_MIN,
-                    PERSISTENT_TTL_MAX,
-                );
+            let mut already_flagged = false;
+            for j in 0..existing.len() {
+                let stored = existing.get(j).unwrap();
+                if stored.player_id == m_ref.player_id
+                    && stored.milestone_index == m_ref.milestone_index
+                {
+                    already_flagged = true;
+                    break;
+                }
+            }
+
+            if !already_flagged {
+                if page.len() >= FLAG_PAGE_SIZE {
+                    env.storage().persistent().set(
+                        &DataKey::MilestonePendingReReviewPage(wallet.clone(), page_index),
+                        &page,
+                    );
+                    env.storage().persistent().extend_ttl(
+                        &DataKey::MilestonePendingReReviewPage(wallet.clone(), page_index),
+                        PERSISTENT_TTL_MIN,
+                        PERSISTENT_TTL_MAX,
+                    );
+                    page_index = page_index.saturating_add(1);
+                    page = Vec::new(env);
+                }
+                page.push_back(m_ref.clone());
+                pending_count =
+                    safe_add_u32(pending_count, 1).map_err(|_| VerificationError::Overflow)?;
                 events::milestone_flagged_for_rereview(
                     env,
                     wallet,
@@ -823,6 +882,24 @@ impl VerificationContract {
             flagged_this_call =
                 safe_add_u32(flagged_this_call, 1).map_err(|_| VerificationError::Overflow)?;
             i = safe_add_u32(i, 1).map_err(|_| VerificationError::Overflow)?;
+        }
+
+        if page.len() > 0 {
+            env.storage().persistent().set(
+                &DataKey::MilestonePendingReReviewPage(wallet.clone(), page_index),
+                &page,
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::MilestonePendingReReviewPage(wallet.clone(), page_index),
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+            env.storage().persistent().set(&count_key, &pending_count);
+            env.storage().persistent().extend_ttl(
+                &count_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
         }
 
         let cursor_key = DataKey::RevocationCascadeCursor(wallet.clone());
@@ -2939,12 +3016,54 @@ impl VerificationContract {
     /// revocation cascade.  Returns `false` if it has never been flagged or
     /// has already been cleared by `rereview_milestone`.
     pub fn is_milestone_flagged(env: Env, player_id: u64, milestone_index: u32) -> bool {
-        env.storage()
+        // Read the legacy key first so flags written by an older contract
+        // version remain visible after an upgrade.
+        if env
+            .storage()
             .persistent()
             .has(&DataKey::MilestonePendingReReview(
                 player_id,
                 milestone_index,
             ))
+        {
+            return true;
+        }
+
+        let milestone: Milestone = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+        {
+            Some(value) => value,
+            None => return false,
+        };
+        let wallet = milestone.validator;
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestonePendingReReviewCount(wallet.clone()))
+            .unwrap_or(0);
+        let page_count = (count + 49) / 50;
+        for page_index in 0..page_count {
+            if let Some(page) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Vec<MilestoneRef>>(&DataKey::MilestonePendingReReviewPage(
+                    wallet.clone(),
+                    page_index,
+                ))
+            {
+                for i in 0..page.len() {
+                    let reference = page.get(i).unwrap();
+                    if reference.player_id == player_id
+                        && reference.milestone_index == milestone_index
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Clear a pending re-review flag on a milestone after independently
@@ -2982,15 +3101,63 @@ impl VerificationContract {
             return Err(VerificationError::NotEligibleToReReview);
         }
 
-        // The milestone must be flagged.
-        let flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
-        if !env.storage().persistent().has(&flag_key) {
-            return Err(VerificationError::MilestoneNotFlagged);
+        // Clear a legacy per-milestone flag when present.
+        let legacy_flag_key = DataKey::MilestonePendingReReview(player_id, milestone_index);
+        if env.storage().persistent().has(&legacy_flag_key) {
+            env.storage().persistent().remove(&legacy_flag_key);
+            events::milestone_flag_cleared(&env, &reviewer, player_id, milestone_index);
+            return Ok(());
         }
 
-        // Clear the flag.
-        env.storage().persistent().remove(&flag_key);
+        // New cascades store compact references in pages scoped to the
+        // validator that originally approved this milestone.
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(player_id, milestone_index))
+            .ok_or(VerificationError::MilestoneNotFound)?;
+        let wallet = milestone.validator;
+        let count_key = DataKey::MilestonePendingReReviewCount(wallet.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let page_count = (count + 49) / 50;
+        let mut cleared = false;
+        for page_index in 0..page_count {
+            let page_key = DataKey::MilestonePendingReReviewPage(wallet.clone(), page_index);
+            let page: Vec<MilestoneRef> = env
+                .storage()
+                .persistent()
+                .get(&page_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut replacement: Vec<MilestoneRef> = Vec::new(&env);
+            for i in 0..page.len() {
+                let reference = page.get(i).unwrap();
+                if reference.player_id == player_id && reference.milestone_index == milestone_index
+                {
+                    cleared = true;
+                } else {
+                    replacement.push_back(reference);
+                }
+            }
+            if cleared {
+                env.storage().persistent().set(&page_key, &replacement);
+                env.storage().persistent().extend_ttl(
+                    &page_key,
+                    PERSISTENT_TTL_MIN,
+                    PERSISTENT_TTL_MAX,
+                );
+                break;
+            }
+        }
 
+        if !cleared {
+            return Err(VerificationError::MilestoneNotFlagged);
+        }
+        env.storage()
+            .persistent()
+            .set(&count_key, &count.saturating_sub(1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         events::milestone_flag_cleared(&env, &reviewer, player_id, milestone_index);
         Ok(())
     }
@@ -4680,7 +4847,12 @@ mod tests {
         // Register exactly MAX_VALIDATORS (100) validators — all must succeed.
         for _ in 0..100 {
             let v = Address::generate(&env);
-            client.register_validator(&v, &String::from_str(&env, "Credentials"), &String::from_str(&env, "Default Academy"), &Vec::new(&env));
+            client.register_validator(
+                &v,
+                &String::from_str(&env, "Credentials"),
+                &String::from_str(&env, "Default Academy"),
+                &Vec::new(&env),
+            );
         }
 
         // The 101st registration must return ValidatorCapReached, not panic.
@@ -5791,7 +5963,12 @@ mod tests {
         let credentials = String::from_str(&env, "UEFA A License");
 
         // First registration succeeds
-        client.register_validator(&validator, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
+        client.register_validator(
+            &validator,
+            &credentials,
+            &String::from_str(&env, "Default Academy"),
+            &Vec::new(&env),
+        );
         assert!(client.is_active_validator(&validator));
 
         // Verify validator is in the vector
@@ -5830,7 +6007,12 @@ mod tests {
 
         let old_wallet = Address::generate(&env);
         let credentials = String::from_str(&env, "UEFA A License");
-        client.register_validator(&old_wallet, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
+        client.register_validator(
+            &old_wallet,
+            &credentials,
+            &String::from_str(&env, "Default Academy"),
+            &Vec::new(&env),
+        );
 
         // Record a milestone to verify milestones get migrated
         client.approve_milestone(
@@ -5873,7 +6055,12 @@ mod tests {
 
         let wallet = Address::generate(&env);
         let credentials = String::from_str(&env, "UEFA B License");
-        client.register_validator(&wallet, &credentials, &String::from_str(&env, "Default Academy"), &Vec::new(&env));
+        client.register_validator(
+            &wallet,
+            &credentials,
+            &String::from_str(&env, "Default Academy"),
+            &Vec::new(&env),
+        );
 
         // Record a milestone to verify milestone count remains intact
         client.approve_milestone(
@@ -6305,7 +6492,12 @@ mod tests {
         let validator = Address::generate(&env);
         let mut specs = Vec::new(&env);
         specs.push_back(String::from_str(&env, "physical-stats"));
-        client.register_validator(&validator, &String::from_str(&env, "Coach License"), &String::from_str(&env, "Default Academy"), &specs);
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "Coach License"),
+            &String::from_str(&env, "Default Academy"),
+            &specs,
+        );
 
         let v = client.get_validator(&validator);
         assert_eq!(v.specializations, specs);

@@ -99,6 +99,7 @@ fn register_validator_with_key(
     client.register_validator(
         validator,
         &String::from_str(env, CREDENTIALS),
+        &String::from_str(env, "Default Academy"),
         &soroban_sdk::Vec::new(env),
     );
     client.register_attestation_key(validator, &pubkey_bytesn(env, sk));

@@ -55,10 +55,17 @@ fn test_duplicate_registration_is_atomic() {
     let dup = h
         .client
         .try_register_player(&wallet, &valid_vitals(&h.env), &one_hash(&h.env));
-    assert!(dup.is_err(), "duplicate registration must be rejected: {dup:?}");
+    assert!(
+        dup.is_err(),
+        "duplicate registration must be rejected: {dup:?}"
+    );
 
     // No second player was created, and the original wallet mapping is intact.
-    assert_eq!(h.client.get_player_count(), 1, "no second player may be created");
+    assert_eq!(
+        h.client.get_player_count(),
+        1,
+        "no second player may be created"
+    );
     assert!(
         h.client.try_get_player_by_wallet(&wallet).is_ok(),
         "original wallet mapping must remain"
@@ -80,7 +87,10 @@ fn test_invalid_registration_commits_no_state() {
     let res = h
         .client
         .try_register_player(&wallet, &bad, &one_hash(&h.env));
-    assert!(res.is_err(), "invalid registration must be rejected: {res:?}");
+    assert!(
+        res.is_err(),
+        "invalid registration must be rejected: {res:?}"
+    );
 
     assert_eq!(h.client.get_player_count(), 0, "no player may be created");
     assert!(

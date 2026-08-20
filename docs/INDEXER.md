@@ -202,7 +202,6 @@ The following correctness fixes shipped on `fix/1015-indexer-correctness`:
 
 **Impact:** `node --check scripts/reconcile-indexer.js` now passes. This was a pre-existing bug on `main`, unrelated to but blocking the fixes above.
 
-  `milestone_flagged`, `milestone_flag_cleared`, and
 ## Related documentation
 
 - [RUNBOOK.md](RUNBOOK.md) — emergency pause/unpause and other operational

@@ -128,6 +128,22 @@ fn raw_history_page(h: &Harness, player_id: u64, page: u32) -> Vec<ProgressEntry
 }
 
 /// Read `PlayerLevel` straight out of persistent storage.
+fn raw_history_vec(h: &Harness, player_id: u64) -> Vec<ProgressEntry> {
+    let counter = raw_history_counter(h, player_id);
+    let page_size = 8u32;
+    let mut reconstructed = Vec::new(&h.env);
+    if counter == 0 {
+        return reconstructed;
+    }
+    for page in 0..=((counter - 1) / page_size) {
+        let entries = raw_history_page(h, player_id, page);
+        for i in 0..entries.len() {
+            reconstructed.push_back(entries.get(i).unwrap());
+        }
+    }
+    reconstructed
+}
+
 fn raw_player_level(h: &Harness, player_id: u64) -> Option<ProgressLevel> {
     h.env.as_contract(&h.contract_id, || {
         h.env
@@ -173,8 +189,15 @@ fn assert_history_representations_agree(h: &Harness, player_id: u64) {
 fn test_history_is_sharded_into_fixed_pages() {
     let h = setup();
     let pid: u64 = 99;
-    for milestone in 1..=20u32 {
+    // A player can advance at most three tiers. Reset after each complete
+    // progression so the test creates 20 valid history entries while still
+    // exercising multiple fixed-size pages.
+    for milestone in 1..=15u32 {
         h.client.advance_level(&h.caller, &pid, &milestone);
+        if milestone % 3 == 0 {
+            h.client
+                .reset_player_level(&pid, &ProgressLevel::Unverified);
+        }
     }
 
     let total = raw_history_counter(&h, pid);

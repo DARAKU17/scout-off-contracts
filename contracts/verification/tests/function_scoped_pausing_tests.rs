@@ -294,11 +294,8 @@ fn test_revoke_validator_works_when_approve_milestone_paused() {
     h.client.pause_approve_milestone();
 
     // revoke_validator should still work
-    h.client.revoke_validator(
-        &h.validator,
-        &RevocationSeverity::Routine,
-        &None,
-    );
+    h.client
+        .revoke_validator(&h.validator, &RevocationSeverity::Routine, &None);
 }
 
 #[test]

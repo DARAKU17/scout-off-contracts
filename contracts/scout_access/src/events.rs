@@ -186,8 +186,13 @@ pub fn registration_contract_updated(env: &Env, admin: &Address, registration_co
 /// `progress_contract_updated` / `registration_contract_updated`. `link`
 /// identifies which peer pointer changed (`"progress_contract"` or
 /// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub const WIRING_UPDATED: &str = "wiring_updated";
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -298,7 +303,10 @@ pub fn subscription_auto_renewed(
 /// topics: (event_name, admin)  data: scout
 pub fn subscription_record_restored(env: &Env, admin: &Address, scout: &Address) {
     env.events().publish(
-        (Symbol::new(env, "subscription_record_restored"), admin.clone()),
+        (
+            Symbol::new(env, "subscription_record_restored"),
+            admin.clone(),
+        ),
         scout.clone(),
     );
 }

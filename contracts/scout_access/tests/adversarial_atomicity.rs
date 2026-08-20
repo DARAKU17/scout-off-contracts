@@ -157,6 +157,7 @@ fn approve_milestone(h: &Harness, player_id: u64, cid: &str) {
     h.verification.register_validator(
         &validator,
         &String::from_str(&h.env, "UEFA-B-License"),
+        &String::from_str(&h.env, "Default Academy"),
         &soroban_sdk::Vec::new(&h.env),
     );
     h.verification.approve_milestone(

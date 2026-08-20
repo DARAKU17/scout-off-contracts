@@ -72,6 +72,7 @@ fn setup_unwired() -> (Env, VerificationContractClient<'static>, Address) {
     client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     (env, client, validator)
@@ -95,6 +96,7 @@ fn setup_bad_wiring() -> (Env, VerificationContractClient<'static>, Address) {
     client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     (env, client, validator)
@@ -301,6 +303,7 @@ fn test_retry_with_fresh_evidence_hash_succeeds_after_wiring_fixed() {
     client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 
@@ -345,6 +348,7 @@ fn test_validator_cap_bounds_evidence_storage() {
         client.register_validator(
             &v,
             &String::from_str(&env, "UEFA-B-License-2026"),
+            &String::from_str(&env, "Default Academy"),
             &soroban_sdk::Vec::new(&env),
         );
     }
@@ -354,6 +358,7 @@ fn test_validator_cap_bounds_evidence_storage() {
     let result = client.try_register_validator(
         &extra,
         &String::from_str(&env, "UEFA-A-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
     assert!(

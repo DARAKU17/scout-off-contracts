@@ -34,6 +34,7 @@ fn test_approve_milestone_progress_call_failed_reverts_all_state() {
     verification_client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 
@@ -114,6 +115,7 @@ fn test_approve_milestone_duplicate_evidence_prevents_double_commit_on_retry() {
     verification_client.register_validator(
         &validator,
         &String::from_str(&env, "UEFA-B-License-2026"),
+        &String::from_str(&env, "Default Academy"),
         &soroban_sdk::Vec::new(&env),
     );
 

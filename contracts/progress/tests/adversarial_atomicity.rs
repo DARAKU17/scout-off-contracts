@@ -13,10 +13,13 @@ use scoutchain_progress::{ProgressContract, ProgressContractClient, ProgressErro
 use scoutchain_registration::{RegistrationContract, RegistrationContractClient};
 use scoutchain_shared_types::ProgressLevel;
 use scoutchain_verification::{VerificationContract, VerificationContractClient};
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env,
+};
 
 struct Harness {
-    registration: ScoutChainContractClient<'static>,
+    registration: RegistrationContractClient<'static>,
     progress: ProgressContractClient<'static>,
     ver_id: Address,
 }

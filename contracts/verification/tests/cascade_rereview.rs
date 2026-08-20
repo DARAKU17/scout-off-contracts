@@ -51,6 +51,7 @@ fn register_validator(env: &Env, client: &VerificationContractClient) -> Address
     client.register_validator(
         &wallet,
         &String::from_str(env, "UEFA-B-License-2026"),
+        &String::from_str(env, "Default Academy"),
         &Vec::new(env),
     );
     wallet
@@ -94,9 +95,18 @@ fn routine_revocation_flags_no_milestones() {
     client.revoke_validator(&validator, &RevocationSeverity::Routine, &None);
 
     // None of the milestones should be flagged.
-    assert!(!client.is_milestone_flagged(&1u64, &1u32), "player 1, milestone 1 must not be flagged after Routine revocation");
-    assert!(!client.is_milestone_flagged(&2u64, &1u32), "player 2, milestone 1 must not be flagged after Routine revocation");
-    assert!(!client.is_milestone_flagged(&3u64, &1u32), "player 3, milestone 1 must not be flagged after Routine revocation");
+    assert!(
+        !client.is_milestone_flagged(&1u64, &1u32),
+        "player 1, milestone 1 must not be flagged after Routine revocation"
+    );
+    assert!(
+        !client.is_milestone_flagged(&2u64, &1u32),
+        "player 2, milestone 1 must not be flagged after Routine revocation"
+    );
+    assert!(
+        !client.is_milestone_flagged(&3u64, &1u32),
+        "player 3, milestone 1 must not be flagged after Routine revocation"
+    );
 }
 
 // ── Test 2: ForCause revocation — all milestones flagged (small batch) ───────
@@ -111,10 +121,17 @@ fn for_cause_revocation_flags_all_milestones_small_batch() {
 
     // Before revocation nothing is flagged.
     for i in 1u64..=10 {
-        assert!(!client.is_milestone_flagged(&i, &1u32), "milestone must not be flagged before revocation");
+        assert!(
+            !client.is_milestone_flagged(&i, &1u32),
+            "milestone must not be flagged before revocation"
+        );
     }
 
-    client.revoke_validator(&validator, &RevocationSeverity::ForCause, &Some(String::from_str(&env, "credential fraud")));
+    client.revoke_validator(
+        &validator,
+        &RevocationSeverity::ForCause,
+        &Some(String::from_str(&env, "credential fraud")),
+    );
 
     // After ForCause revocation all 10 should be flagged.
     for i in 1u64..=10 {
@@ -141,7 +158,11 @@ fn for_cause_cascade_is_bounded_and_resumable() {
     approve_n_milestones(&env, &client, &validator, TOTAL, 1000);
 
     // Revoke for cause — should flag first 50 and leave a cursor.
-    client.revoke_validator(&validator, &RevocationSeverity::ForCause, &Some(String::from_str(&env, "fabricated credentials")));
+    client.revoke_validator(
+        &validator,
+        &RevocationSeverity::ForCause,
+        &Some(String::from_str(&env, "fabricated credentials")),
+    );
 
     // First 50 player IDs (1001..=1050) should be flagged.
     for i in 1001u64..=1050 {
@@ -183,12 +204,18 @@ fn rereview_milestone_clears_flag() {
 
     // Flag it via ForCause.
     client.revoke_validator(&validator, &RevocationSeverity::ForCause, &None);
-    assert!(client.is_milestone_flagged(&2001u64, &1u32), "must be flagged");
+    assert!(
+        client.is_milestone_flagged(&2001u64, &1u32),
+        "must be flagged"
+    );
 
     // An active validator (reviewer) clears the flag.
     client.rereview_milestone(&reviewer, &2001u64, &1u32);
 
-    assert!(!client.is_milestone_flagged(&2001u64, &1u32), "flag must be cleared after rereview");
+    assert!(
+        !client.is_milestone_flagged(&2001u64, &1u32),
+        "flag must be cleared after rereview"
+    );
 }
 
 // ── Test 5: rereview_milestone rejects inactive reviewers ────────────────────
@@ -250,7 +277,9 @@ fn get_revocation_record_returns_stored_record() {
         &Some(String::from_str(&env, "credential fraud")),
     );
 
-    let record = client.get_revocation_record(&validator).expect("record must exist after revocation");
+    let record = client
+        .get_revocation_record(&validator)
+        .expect("record must exist after revocation");
     assert_eq!(record.severity, RevocationSeverity::ForCause);
     assert_eq!(record.reason, String::from_str(&env, "credential fraud"));
 }
@@ -275,7 +304,10 @@ fn restored_original_validator_can_rereview_own_flagged_milestone() {
 
     // Restored validator can now rereview their own flagged milestone.
     let result = client.try_rereview_milestone(&validator, &5001u64, &1u32);
-    assert!(result.is_ok(), "restored validator must be able to rereview: {result:?}");
+    assert!(
+        result.is_ok(),
+        "restored validator must be able to rereview: {result:?}"
+    );
     assert!(!client.is_milestone_flagged(&5001u64, &1u32));
 }
 
@@ -343,16 +375,20 @@ fn cascade_sweep_cpu_cost_bounded_at_500_milestones() {
          to CASCADE_LIMIT, not to the validator's full history."
     );
 
-    // Exactly 50 milestones should be flagged (first 50 players × 1 milestone each).
-    for player_offset in 0u32..50 {
+    // Exactly 50 milestones should be flagged: the first 10 players have
+    // five approvals each, so the validator history's first 50 references
+    // cover players 10000..10009.
+    for player_offset in 0u32..10 {
         let player_id = (10_000u32 + player_offset) as u64;
-        assert!(
-            client.is_milestone_flagged(&player_id, &1u32),
-            "player {player_id} milestone 1 must be flagged in first batch"
-        );
+        for milestone_index in 1u32..=5 {
+            assert!(
+                client.is_milestone_flagged(&player_id, &milestone_index),
+                "player {player_id} milestone {milestone_index} must be flagged in first batch"
+            );
+        }
     }
-    // Players 50..99 should NOT yet be flagged.
-    for player_offset in 50u32..100 {
+    // The remaining players should NOT yet be flagged.
+    for player_offset in 10u32..100 {
         let player_id = (10_000u32 + player_offset) as u64;
         assert!(
             !client.is_milestone_flagged(&player_id, &1u32),
