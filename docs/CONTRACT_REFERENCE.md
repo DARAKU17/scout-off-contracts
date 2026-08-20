@@ -4452,8 +4452,10 @@ pub struct TrialOffer {
 | 12 | `ScoutNotFound` | Invalid `scout_id` |
 | 13 | `InvalidInput` | Field too long, bad hash count, or empty value |
 | 14 | `PendingAdminNotSet` | `accept_admin` called without a pending proposal |
-| 15 | `InvalidMigrationAuthorization` | Migration authorization signature is invalid or expired |
-| 16 | `MigrationNonceAlreadyUsed` | Migration nonce has already been used (replay detected) |
+| 15 | `PlayerCapReached` | Player registration cap reached — a hard stop, not retryable |
+| 16 | `RegistrationCooldown` | Caller registered again before the cooldown elapsed — retryable |
+| 17 | `PlayerRecordEvicted` | `restore_player_record` targeted a fully evicted, unrecoverable player entry |
+| 18 | `ScoutRecordEvicted` | `restore_scout_record` targeted a fully evicted, unrecoverable scout entry |
 
 ### `VerificationError` (verification contract)
 
