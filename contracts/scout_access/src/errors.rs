@@ -98,10 +98,11 @@ pub enum ScoutAccessError {
     /// and is unrecoverable. (Codes 13 and 18 are reserved by tests.)
     SubscriptionRecordEvicted = 29,
 
-    // ── Evidence access grants ──
-    /// `admin_revoke_evidence_access` was called for a (player_id, scout)
-    /// pair with no `EvidenceAccessGrant` on record.
-    GrantNotFound = 30,
+    // ── Function-scoped pausing ──
+    /// The `pay_to_contact` function is paused independently of the
+    /// whole-contract pause (issue #1056). Mirrors `verification`'s
+    /// `ApproveMilestonePaused`.
+    PayToContactPaused = 30,
 }
 
 impl AdminError for ScoutAccessError {

@@ -28,6 +28,14 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v1.0.0`
+- Release date: `2026-08-19`
+- Contracts affected: `verification`
+- Summary: Implemented the validator revocation cascade re-review system (issue #1039). `revoke_validator` now accepts an explicit `RevocationSeverity` enum (`Routine | ForCause`) and an optional reason string instead of inferring severity from a magic string. For `ForCause` revocations, the contract iterates the validator's `ValidatorMilestones` history and flags every referenced milestone as `MilestonePendingReReview` in a bounded, resumable sweep (50 per call); `continue_revocation_cascade` picks up where the initial call left off. New public entrypoints: `is_milestone_flagged`, `rereview_milestone` (active validator clears a flag after independent confirmation), `get_revocation_record`, `continue_revocation_cascade`. New error codes: `NotEligibleToReReview` (32), `MilestoneNotFlagged` (33). New events: `milestone_flagged`, `milestone_flag_cleared`, `revocation_cascade_complete`, `revocation_cascade_continued`. New types: `RevocationSeverity`, `RevocationRecord`. New SQL migration `005_milestone_flags.sql` adds `milestone_flags` and `revocation_records` indexer tables. `batch_revoke_validators` updated with the same new signature. `scripts/check-abi-diff.sh` classifies the `revoke_validator` and `batch_revoke_validators` parameter-list changes as MAJOR.
+- Classification: `Breaking (MAJOR)`
+
+> **Migration guide:** Any caller of `revoke_validator(wallet, reason)` or `batch_revoke_validators(wallets, reason)` must add an explicit `severity` parameter (second positional argument). For callers that previously passed `reason = Some("Routine")` to mean a routine deactivation, change to `severity = RevocationSeverity::Routine`. For all other reasons, use `RevocationSeverity::ForCause`. The behavior for `ForCause` is unchanged in terms of validator deactivation; the new cascade flagging is additive. Run `migrations/005_milestone_flags.sql` against the backend database before deploying this version.
+
 - Version: `v0.3.0`
 - Release date: `2026-08-18`
 - Contracts affected: `progress`, `registration`, `scout_access`, `verification`

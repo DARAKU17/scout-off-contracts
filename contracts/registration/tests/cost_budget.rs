@@ -15,15 +15,9 @@ use scoutchain_registration::{PlayerVitals, RegistrationContract, RegistrationCo
 use scoutchain_shared_types::ProgressLevel;
 use soroban_sdk::{testutils::Address as _, vec, Address, Env, String};
 
-// These starting budgets are deliberately generous placeholders, not
-// measured baselines: this environment could not run `cargo test` to
-// capture real current costs when this file was first introduced (no Rust
-// toolchain available). Tighten each budget to roughly
-// current-cost-plus-headroom after the first real CI run reports actual
-// numbers — that tightening is a follow-up, not a blocker.
-const REGISTER_PLAYER_CPU_BUDGET: u64 = 20_000_000;
-const UPDATE_PROFILE_CPU_BUDGET: u64 = 10_000_000;
-const FILTER_PLAYERS_CPU_BUDGET: u64 = 15_000_000;
+const REGISTER_PLAYER_CPU_BUDGET: u64 = 452_787;
+const UPDATE_PROFILE_CPU_BUDGET: u64 = 193_686;
+const FILTER_PLAYERS_CPU_BUDGET: u64 = 1_714_870;
 
 fn setup() -> (Env, RegistrationContractClient<'static>) {
     let env = Env::default();
