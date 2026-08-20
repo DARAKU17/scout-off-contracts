@@ -140,6 +140,14 @@ The validator contract is covered by [`.github/CODEOWNERS`](../.github/CODEOWNER
 requests review from the designated validator-logic owner for changes under
 `/contracts/verification/`.
 
+Beyond `/contracts/verification/`, [`.github/CODEOWNERS`](../.github/CODEOWNERS) also designates
+owners for `/contracts/registration/`, `/contracts/progress/`, `/contracts/scout_access/`, and a
+`*` default covering every remaining path (`docs/`, `scripts/`, `config/`, `migrations/`,
+`bindings/`, and top-level files). The same **Require review from Code Owners** branch-protection
+rule therefore gates changes to those paths once it is enabled by an administrator — there are no
+intentionally owner-less areas of the repository. Owners may be redirected in review if a different
+reviewer is more appropriate for a given contract.
+
 Repository administrators must enable **Require review from Code Owners** in the `main`
 branch-protection rule for this mapping to block merges. Before enabling that rule, confirm
 that the listed owner has the required write access and update the mapping if the authorized
