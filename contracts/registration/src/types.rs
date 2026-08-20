@@ -1,5 +1,7 @@
-use soroban_sdk::{contracttype, Address, String, Vec, Bytes};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
+/// Bound on tracked migration nonces per wallet (documented design limit).
+#[allow(dead_code)]
 const MAX_MIGRATION_NONCES: u32 = 1024;
 
 pub use scoutchain_shared_types::{ContractHealth, ProgressLevel, WiringLink};
@@ -31,7 +33,7 @@ pub struct MigrationAuthorization {
     pub expires_at: u64,
     /// ed25519 signature over the canonical message:
     /// `wallet || role || profile_data_hash || new_contract_hint || nonce || expires_at`
-    pub signature: Bytes,
+    pub signature: BytesN<64>,
 }
 
 /// Basic player vitals stored on-chain
@@ -122,7 +124,7 @@ pub enum PlayerStatus {
     Deactivated,
 }
 
-/// Direct status for a scout.
+/// Direct status for a registered scout.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScoutStatus {
@@ -230,10 +232,16 @@ pub enum DataKey {
     ValidatorRegLastSent(Address),
     /// Cooldown in seconds between repeated registration attempts from the
     /// same wallet. 0 means no cooldown. Configurable by admin.
-    RegCooldownSecs(u64),
-    /// Tracks used nonces for migration authorizations to prevent replay attacks
+    RegCooldownSecs(u64), // ── Migration ticket replay prevention ──
+    /// Nonce tracking for migration authorizations. A wallet+nonce pair is
+    /// stored as `true` after a migration authorization is redeemed, preventing
+    /// the same authorization from being replayed.
     MigrationNonce(Address, u64),
-    /// Deactivation flag for a scout profile
+
+    // ── Scout deactivation ──
+    /// Deactivation flag for a scout. When present and `true`, the scout is
+    /// hidden from scout discovery results. Set by `deactivate_scout`,
+    /// cleared by `reactivate_scout`.
     ScoutDeactivated(u64),
 }
 
@@ -243,4 +251,10 @@ pub enum DataKey {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegistrationWiringState {
     pub progress_contract: WiringLink,
+}
+
+impl RegistrationWiringState {
+    pub fn is_fully_wired(&self) -> bool {
+        self.progress_contract.is_configured()
+    }
 }

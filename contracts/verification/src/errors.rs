@@ -100,24 +100,34 @@ pub enum VerificationError {
     /// once threshold >= 2 is configured.
     ThresholdModeRequiresAttestation = 28,
 
-    // ── Archival recovery ──
+    // ── Migration ──
+    /// Migration window is not currently active on this contract.
+    /// Call `open_migration_window` (admin-only) before seeding state.
+    MigrationNotActive = 30,
+    /// A `Milestone` already exists at `(player_id, milestone_index)` with
+    /// different content. Identical replays are no-ops; conflicting replays
+    /// are rejected to prevent silent overwriting of committed milestones.
+    MilestoneAlreadyExists = 31,
+    /// A `MilestoneDispute` already exists at `(player_id, milestone_index)`
+    /// with different content. Identical replays are no-ops.
+    DisputeAlreadyExists = 32,
     /// `restore_validator_record` targeted a validator entry whose archival
     /// grace period has fully elapsed (evicted, not merely marked inactive) and
     /// is unrecoverable.
-    ValidatorRecordEvicted = 30,
+    ValidatorRecordEvicted = 33,
     /// `restore_milestone_record` targeted a milestone entry that has been
     /// fully evicted and is unrecoverable.
-    MilestoneRecordEvicted = 31,
+    MilestoneRecordEvicted = 34,
 
     // ── Revocation cascade re-review (issue #1039) ──
     /// `rereview_milestone` called by a wallet that is not a currently-active
-    /// validator.  Only active (non-revoked) validators may clear a pending
+    /// validator. Only active (non-revoked) validators may clear a pending
     /// re-review flag.
-    NotEligibleToReReview = 32,
+    NotEligibleToReReview = 35,
     /// `rereview_milestone` called on a milestone that is not currently flagged
-    /// as pending re-review.  The flag either never existed or was already
+    /// as pending re-review. The flag either never existed or was already
     /// cleared by a prior `rereview_milestone` call.
-    MilestoneNotFlagged = 33,
+    MilestoneNotFlagged = 36,
 }
 
 impl AdminError for VerificationError {
@@ -136,7 +146,7 @@ mod tests {
     fn setup() -> (Env, crate::VerificationContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let id = env.register_contract(None, crate::VerificationContract);
+        let id = env.register(crate::VerificationContract, ());
         let client = crate::VerificationContractClient::new(&env, &id);
         (env, client)
     }
@@ -147,12 +157,18 @@ mod tests {
         let admin = Address::generate(&env);
         let validator = Address::generate(&env);
         client.initialize(&admin);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
+            &Vec::new(&env),
+        );
 
         let description_256 = String::from_str(&env, &"a".repeat(256));
         let evidence = String::from_str(&env, VALID_CID_V0);
 
-        let result = client.try_approve_milestone(&validator, &1u64, &description_256, &evidence, &None);
+        let result =
+            client.try_approve_milestone(&validator, &1u64, &description_256, &evidence, &None);
         assert!(result.is_ok(), "256-byte description should succeed");
     }
 
@@ -162,12 +178,18 @@ mod tests {
         let admin = Address::generate(&env);
         let validator = Address::generate(&env);
         client.initialize(&admin);
-        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"), &Vec::new(&env));
+        client.register_validator(
+            &validator,
+            &String::from_str(&env, "UEFA B License"),
+            &String::from_str(&env, "Default Academy"),
+            &Vec::new(&env),
+        );
 
         let description_257 = String::from_str(&env, &"a".repeat(257));
         let evidence = String::from_str(&env, VALID_CID_V0);
 
-        let result = client.try_approve_milestone(&validator, &1u64, &description_257, &evidence, &None);
+        let result =
+            client.try_approve_milestone(&validator, &1u64, &description_257, &evidence, &None);
         assert_eq!(
             result,
             Err(Ok(VerificationError::InvalidInput)),

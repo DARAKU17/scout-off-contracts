@@ -474,7 +474,7 @@ Error codes are **per-contract**. The same numeric code can mean different thing
 | 20 | `ProContactLimitReached` | Pro-tier scout hit per-period contact limit |
 | 21 | `PendingAdminNotSet` | `accept_admin` called without a prior `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for same offer |
-| 23 | `TrialOfferExpired` | `confirm_trial_offer` called after offer expiry window |
+| 23 | `TrialOfferExpired` | Legacy compatibility code; expiry confirmation now commits the refund and returns success |
 
 > **Note:** Code 13 is intentionally reserved in `ScoutAccessError` and must not be assigned.
 

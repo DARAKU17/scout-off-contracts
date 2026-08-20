@@ -101,7 +101,7 @@ fn cost_advance_level_stays_bounded_even_with_long_history() {
 
     for i in 1..=24u32 {
         client.advance_level(&verification, &player_id, &i);
-        if i % 4 == 0 {
+        if i % 3 == 0 {
             client.reset_player_level(&player_id, &ProgressLevel::Unverified);
         }
     }

@@ -65,7 +65,12 @@ fn setup() -> Harness {
     let contract = ScoutAccessContractClient::new(&env, &id);
     contract.initialize(&admin, &xlm, &default_fees());
 
-    Harness { env, xlm, admin, contract }
+    Harness {
+        env,
+        xlm,
+        admin,
+        contract,
+    }
 }
 
 /// Mint XLM and subscribe `scout` to Basic tier.
@@ -264,7 +269,10 @@ fn test_health_reflects_pay_to_contact_pause_state() {
 
     // Health should now reflect it without pausing the whole contract
     let health_after = h.contract.health();
-    assert!(!health_after.paused, "whole-contract should still not be paused");
+    assert!(
+        !health_after.paused,
+        "whole-contract should still not be paused"
+    );
     assert!(
         health_after.pay_to_contact_paused,
         "pay_to_contact_paused should be true"

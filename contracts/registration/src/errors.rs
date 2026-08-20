@@ -28,7 +28,7 @@ pub enum ScoutChainError {
     /// Invalid `scout_id`.
     ScoutNotFound = 12,
     /// Player registration cap reached.
-    PlayerCapReached = 15,
+    PlayerCapReached = 16,
 
     // ── Business logic ──
     /// Skipping or reversing a level.
@@ -50,7 +50,7 @@ pub enum ScoutChainError {
 
     // ── Rate limiting ──
     /// Caller attempted to register again before the cooldown period elapsed.
-    RegistrationCooldown = 16,
+    RegistrationCooldown = 15,
 
     // ── Archival recovery ──
     /// `restore_player_record` targeted a player entry whose archival grace
@@ -81,14 +81,14 @@ mod tests {
         ("AlreadyRegistered", 8),
         ("PlayerNotFound", 3),
         ("ScoutNotFound", 12),
-        ("PlayerCapReached", 15),
+        ("PlayerCapReached", 16),
         ("InvalidProgressTransition", 5),
         ("ScoutNotSubscribed", 6),
         ("InsufficientFee", 7),
         ("InvalidInput", 13),
         ("Overflow", 11),
         ("PendingAdminNotSet", 14),
-        ("RegistrationCooldown", 16),
+        ("RegistrationCooldown", 15),
         ("PlayerRecordEvicted", 17),
         ("ScoutRecordEvicted", 18),
     ];
@@ -109,8 +109,8 @@ mod tests {
         assert_eq!(ScoutChainError::ScoutNotFound as u32, 12);
         assert_eq!(ScoutChainError::InvalidInput as u32, 13);
         assert_eq!(ScoutChainError::PendingAdminNotSet as u32, 14);
-        assert_eq!(ScoutChainError::PlayerCapReached as u32, 15);
-        assert_eq!(ScoutChainError::RegistrationCooldown as u32, 16);
+        assert_eq!(ScoutChainError::PlayerCapReached as u32, 16);
+        assert_eq!(ScoutChainError::RegistrationCooldown as u32, 15);
         assert_eq!(ScoutChainError::PlayerRecordEvicted as u32, 17);
         assert_eq!(ScoutChainError::ScoutRecordEvicted as u32, 18);
     }

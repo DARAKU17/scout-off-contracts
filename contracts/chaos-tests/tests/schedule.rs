@@ -146,10 +146,9 @@ impl Harness {
             }
             Operation::RegisterScout => {
                 let wallet = Address::generate(&self.env);
-                let result = self.registration.try_register_scout(
-                    &wallet,
-                    &String::from_str(&self.env, "North Africa"),
-                );
+                let result = self
+                    .registration
+                    .try_register_scout(&wallet, &String::from_str(&self.env, "North Africa"));
                 if result.is_ok() {
                     self.scouts.push_back(wallet);
                 }
