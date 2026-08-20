@@ -294,13 +294,27 @@ included the change.
 
 ## Trial Offer
 
-An on-chain record that a scout has offered a player a trial or professional
-opportunity. Logging a trial offer also advances the player to `EliteTier`
-(Level 3) via a cross-contract call to the progress contract. Only scouts with
-an active Elite subscription may log trial offers.
+An escrow-backed, on-chain record that an Elite-tier scout has offered a
+player a trial or professional opportunity. [`log_trial_offer`](CONTRACT_REFERENCE.md#log_trial_offerscout-address-player_id-u64-details_hash-string---resultu32-scoutaccesserror)
+is step 1: it transfers `trial_offer_escrow_stroops` from the scout, stores a
+`TrialOffer` and `TrialEscrow(amount, expires_at)`, and does **not** advance
+the player's level by itself.
 
-- Relevant functions: `log_trial_offer`, `get_trial_offer`, `get_trial_count`
-  — see [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
+The player completes step 2 by calling
+[`confirm_trial_offer`](CONTRACT_REFERENCE.md#confirm_trial_offerplayer_wallet-address-player_id-u64-index-u32-idempotency_nonce-optionstring---result-scoutaccesserror)
+before `expires_at`; a successful confirmation releases the escrow and
+advances the player to `EliteTier` (Level 3). If the offer is not confirmed in
+time, late confirmation or the admin-only
+[`expire_trial_offers`](CONTRACT_REFERENCE.md#expire_trial_offerslimit-u32---resultu32-scoutaccesserror)
+sweep refunds the escrowed amount to the originating scout and removes the
+pending escrow record.
+
+- See [TRIAL_ESCROW_IMPACT.md](TRIAL_ESCROW_IMPACT.md) and
+  [trial-escrow-enumeration.md](trial-escrow-enumeration.md) for the escrow
+  rationale and expiry-sweep design.
+- Relevant functions: `log_trial_offer`, `confirm_trial_offer`,
+  `expire_trial_offers`, `get_trial_offer`, `get_trial_count` — see
+  [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
 
 ---
 
