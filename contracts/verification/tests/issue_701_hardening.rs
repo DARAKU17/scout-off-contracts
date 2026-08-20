@@ -23,6 +23,7 @@
 //!    incorrectly rejecting a subsequent legitimate vote with
 //!    `TooManyPendingVotes`.
 
+use ed25519_dalek::{Signer, SigningKey};
 use scoutchain_verification::{
     AttestationStatus, MilestoneAttestation, VerificationContract, VerificationContractClient,
     VerificationError,
@@ -33,7 +34,6 @@ use soroban_sdk::{
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, IntoVal, String,
 };
-use ed25519_dalek::{Signer, SigningKey};
 
 const CREDENTIALS: &str = "UEFA-B-License-2026";
 const ATTESTATION_DOMAIN: &str = "ScoutChain-MilestoneAttestation-v1";
@@ -54,6 +54,7 @@ fn register_validator(env: &Env, client: &VerificationContractClient) -> Address
     client.register_validator(
         &wallet,
         &String::from_str(env, CREDENTIALS),
+        &String::from_str(env, "Default Academy"),
         &soroban_sdk::Vec::new(env),
     );
     wallet
@@ -107,7 +108,14 @@ fn attest_as(
     description: &String,
     evidence_hash: &String,
 ) -> AttestationStatus {
-    scope_auth_to(env, client, validator, player_id, description, evidence_hash);
+    scope_auth_to(
+        env,
+        client,
+        validator,
+        player_id,
+        description,
+        evidence_hash,
+    );
     client.attest_milestone(validator, &player_id, description, evidence_hash)
 }
 
@@ -141,9 +149,12 @@ fn sign_attestation(env: &Env, sk: &SigningKey, attestation: &MilestoneAttestati
     let message = attestation_message(env, attestation);
     let mut msg_buf = [0u8; 1024];
     let len = message.len() as usize;
-    assert!(len <= msg_buf.len(), "attestation message too large for test buffer");
-    for i in 0..len {
-        msg_buf[i] = message.get(i as u32).unwrap();
+    assert!(
+        len <= msg_buf.len(),
+        "attestation message too large for test buffer"
+    );
+    for (i, b) in message.iter().enumerate() {
+        msg_buf[i] = b;
     }
     let sig = sk.sign(&msg_buf[..len]);
     BytesN::from_array(env, &sig.to_bytes())
@@ -158,6 +169,7 @@ fn register_validator_with_key(
     client.register_validator(
         validator,
         &String::from_str(env, CREDENTIALS),
+        &String::from_str(env, "Default Academy"),
         &soroban_sdk::Vec::new(env),
     );
     client.register_attestation_key(validator, &pubkey_bytesn(env, sk));

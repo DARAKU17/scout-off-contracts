@@ -16,7 +16,8 @@
 //! 6. CPU-instruction cost of the threshold-reaching call does not scale with vote count
 
 use scoutchain_verification::{
-    AttestationStatus, VerificationContract, VerificationContractClient, VerificationError,
+    AttestationStatus, RevocationSeverity, VerificationContract, VerificationContractClient,
+    VerificationError,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -42,6 +43,7 @@ fn register_validator(env: &Env, client: &VerificationContractClient) -> Address
     client.register_validator(
         &wallet,
         &String::from_str(env, CREDENTIALS),
+        &String::from_str(env, "Default Academy"),
         &soroban_sdk::Vec::new(env),
     );
     wallet
@@ -104,7 +106,14 @@ fn attest_as(
     description: &String,
     evidence_hash: &String,
 ) -> AttestationStatus {
-    scope_auth_to(env, client, validator, player_id, description, evidence_hash);
+    scope_auth_to(
+        env,
+        client,
+        validator,
+        player_id,
+        description,
+        evidence_hash,
+    );
     client.attest_milestone(validator, &player_id, description, evidence_hash)
 }
 
@@ -140,12 +149,19 @@ fn sub_threshold_votes_do_not_commit_threshold_vote_commits_once() {
         AttestationStatus::Committed(index) => {
             assert_eq!(index, 1);
             let ms = client.get_milestone(&player_id, &index);
-            assert_eq!(ms.validator, v3, "attribution follows the threshold-reaching vote");
+            assert_eq!(
+                ms.validator, v3,
+                "attribution follows the threshold-reaching vote"
+            );
             assert_eq!(ms.evidence_hash, evidence);
         }
         other => panic!("expected Committed after the 3rd distinct vote, got {other:?}"),
     }
-    assert_eq!(client.get_milestone_count(&player_id), 1, "commit fired exactly once");
+    assert_eq!(
+        client.get_milestone_count(&player_id),
+        1,
+        "commit fired exactly once"
+    );
     assert!(
         client.get_pending_claim(&player_id, &evidence).is_none(),
         "pending accumulator is cleared once committed"
@@ -174,7 +190,10 @@ fn duplicate_attestation_is_rejected_distinctly_from_a_first_time_vote() {
     );
 
     let claim = client.get_pending_claim(&player_id, &evidence).unwrap();
-    assert_eq!(claim.vote_count, 1, "the duplicate must not have counted a second time");
+    assert_eq!(
+        claim.vote_count, 1,
+        "the duplicate must not have counted a second time"
+    );
 }
 
 #[test]
@@ -197,12 +216,19 @@ fn revoke_validator_retroactively_invalidates_a_pending_vote() {
     // v1 turns out to be compromised — admin revokes for cause. Re-arm
     // blanket auth since the previous call narrowed authorization to v1.
     env.mock_all_auths();
-    client.revoke_validator(&v1, &Some(String::from_str(&env, "Key compromise suspected")));
+    client.revoke_validator(
+        &v1,
+        &RevocationSeverity::ForCause,
+        &Some(String::from_str(&env, "Key compromise suspected")),
+    );
 
     let claim = client
         .get_pending_claim(&player_id, &evidence)
         .expect("claim is still open, just invalidated back to 0 votes");
-    assert_eq!(claim.vote_count, 0, "revocation must retroactively strip the pending vote");
+    assert_eq!(
+        claim.vote_count, 0,
+        "revocation must retroactively strip the pending vote"
+    );
     assert!(
         !client.has_attested(&player_id, &evidence, &v1),
         "the invalidated vote marker must be cleared, not merely ignored"
@@ -243,7 +269,10 @@ fn voting_window_expiry_resets_the_tally_instead_of_leaking_storage() {
     attest_as(&env, &client, &v1, player_id, &description, &evidence);
     attest_as(&env, &client, &v2, player_id, &description, &evidence);
     assert_eq!(
-        client.get_pending_claim(&player_id, &evidence).unwrap().vote_count,
+        client
+            .get_pending_claim(&player_id, &evidence)
+            .unwrap()
+            .vote_count,
         2
     );
     assert!(!client.is_attestation_window_expired(&player_id, &evidence));
@@ -267,7 +296,10 @@ fn voting_window_expiry_resets_the_tally_instead_of_leaking_storage() {
         "expired votes must not still count toward threshold"
     );
     let claim = client.get_pending_claim(&player_id, &evidence).unwrap();
-    assert_eq!(claim.round, 1, "expiry must bump the round rather than leaving stale state");
+    assert_eq!(
+        claim.round, 1,
+        "expiry must bump the round rather than leaving stale state"
+    );
     assert!(!client.is_attestation_window_expired(&player_id, &evidence));
 
     // v1 and v2 already voted in round 0 — after expiry they must be able to
@@ -295,7 +327,10 @@ fn approve_milestone_still_works_at_default_threshold_one() {
         &cid(&env, 5),
         &None,
     );
-    assert_eq!(idx, 1, "default threshold=1 preserves today's single-signature fast path");
+    assert_eq!(
+        idx, 1,
+        "default threshold=1 preserves today's single-signature fast path"
+    );
 }
 
 #[test]
@@ -403,7 +438,10 @@ fn cost_attest_milestone_threshold_reach_does_not_scale_with_vote_count() {
          instructions, threshold=20: {cpu_20} cpu instructions, delta={delta} ({delta_pct:.1}%)"
     );
 
-    assert!(cpu_5 > 0 && cpu_20 > 0, "both paths must report non-zero CPU");
+    assert!(
+        cpu_5 > 0 && cpu_20 > 0,
+        "both paths must report non-zero CPU"
+    );
     assert!(
         delta_pct < 60.0,
         "attest_milestone cost grew {delta_pct:.1}% going from threshold=5 to threshold=20 \

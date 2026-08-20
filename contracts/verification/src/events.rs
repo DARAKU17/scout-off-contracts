@@ -24,10 +24,7 @@ pub const DISPUTE_TALLIED: &str = "dispute_tallied";
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, ADMIN_TRANSFER_PROPOSED),
-            old_admin.clone(),
-        ),
+        (Symbol::new(env, ADMIN_TRANSFER_PROPOSED), old_admin.clone()),
         new_admin.clone(),
     );
 }
@@ -50,11 +47,13 @@ pub fn milestone_approved(
     evidence_hash: &String,
 ) {
     env.events().publish(
+        (Symbol::new(env, "milestone_approved"), validator.clone()),
         (
-            Symbol::new(env, "milestone_approved"),
-            validator.clone(),
+            player_id,
+            milestone_index,
+            description.clone(),
+            evidence_hash.clone(),
         ),
-        (player_id, milestone_index, description.clone(), evidence_hash.clone()),
     );
 }
 
@@ -77,7 +76,10 @@ pub fn validator_revoked(env: &Env, admin: &Address, wallet: &Address, reason: &
 /// topics: (event_name, admin)  data: (wallet, reason)
 pub fn validator_revoked_for_cause(env: &Env, admin: &Address, wallet: &Address, reason: &String) {
     env.events().publish(
-        (Symbol::new(env, "validator_revoked_for_cause"), admin.clone()),
+        (
+            Symbol::new(env, "validator_revoked_for_cause"),
+            admin.clone(),
+        ),
         (wallet.clone(), reason.clone()),
     );
 }
@@ -105,18 +107,14 @@ pub fn validator_transferred(
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
@@ -130,7 +128,10 @@ pub fn approve_milestone_paused(env: &Env, admin: &Address) {
 /// topics: (event_name, admin)  data: ()
 pub fn approve_milestone_unpaused(env: &Env, admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "approve_milestone_unpaused"), admin.clone()),
+        (
+            Symbol::new(env, "approve_milestone_unpaused"),
+            admin.clone(),
+        ),
         (),
     );
 }
@@ -158,7 +159,13 @@ pub fn progress_contract_updated(env: &Env, admin: &Address, progress_contract: 
 /// addition to (not replacing) `progress_contract_updated`. `link`
 /// identifies which peer pointer changed (`"progress_contract"` or
 /// `"registration_contract"`). See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -171,16 +178,31 @@ pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Addr
 
 /// Emitted when a player disputes a milestone (issue #471)
 /// topics: (event_name, player_wallet)  data: (player_id, milestone_index, reason)
-pub fn milestone_disputed(env: &Env, player_wallet: &Address, player_id: u64, milestone_index: u32, reason: &String) {
+pub fn milestone_disputed(
+    env: &Env,
+    player_wallet: &Address,
+    player_id: u64,
+    milestone_index: u32,
+    reason: &String,
+) {
     env.events().publish(
-        (Symbol::new(env, "milestone_disputed"), player_wallet.clone()),
+        (
+            Symbol::new(env, "milestone_disputed"),
+            player_wallet.clone(),
+        ),
         (player_id, milestone_index, reason.clone()),
     );
 }
 
 /// Emitted when an admin resolves a milestone dispute.
 /// topics: (event_name, admin)  data: (player_id, milestone_index, upheld)
-pub fn dispute_resolved(env: &Env, admin: &Address, player_id: u64, milestone_index: u32, upheld: bool) {
+pub fn dispute_resolved(
+    env: &Env,
+    admin: &Address,
+    player_id: u64,
+    milestone_index: u32,
+    upheld: bool,
+) {
     env.events().publish(
         (Symbol::new(env, "dispute_resolved"), admin.clone()),
         (player_id, milestone_index, upheld),
@@ -229,7 +251,12 @@ pub fn attestation_recorded(
 /// Emitted when a sub-threshold claim's voting window has elapsed and a new
 /// vote resets it to a fresh round, discarding all prior votes.
 /// topics: (event_name, player_id)  data: (evidence_hash, new_round)
-pub fn attestation_window_expired(env: &Env, player_id: u64, evidence_hash: &String, new_round: u32) {
+pub fn attestation_window_expired(
+    env: &Env,
+    player_id: u64,
+    evidence_hash: &String,
+    new_round: u32,
+) {
     env.events().publish(
         (Symbol::new(env, ATTESTATION_WINDOW_EXPIRED), player_id),
         (evidence_hash.clone(), new_round),
@@ -286,41 +313,63 @@ pub fn milestone_record_restored(env: &Env, admin: &Address, player_id: u64, ind
     );
 }
 
-/// Emitted when a validator casts a jury vote on a high-impact dispute.
-/// topics: (event_name, player_id, milestone_index)  data: (validator, for_upheld)
-pub fn dispute_vote_cast(
+/// Emitted for each milestone flagged during a for-cause revocation cascade
+/// (issue #1039).
+///
+/// topics: (event_name, validator)  data: (player_id, milestone_index)
+pub fn milestone_flagged_for_rereview(
     env: &Env,
+    validator: &Address,
     player_id: u64,
     milestone_index: u32,
-    validator: &Address,
-    for_upheld: bool,
 ) {
     env.events().publish(
-        (
-            Symbol::new(env, DISPUTE_VOTE_CAST),
-            player_id,
-            milestone_index,
-        ),
-        (validator.clone(), for_upheld),
+        (Symbol::new(env, "milestone_flagged"), validator.clone()),
+        (player_id, milestone_index),
     );
 }
 
-/// Emitted when a jury dispute is finalized via `tally_dispute`.
-/// topics: (event_name, player_id, milestone_index)  data: (upheld, votes_for, votes_against)
-pub fn dispute_tallied(
+/// Emitted when an active validator clears a pending re-review flag via
+/// `rereview_milestone` (issue #1039).
+///
+/// topics: (event_name, reviewer)  data: (player_id, milestone_index)
+pub fn milestone_flag_cleared(env: &Env, reviewer: &Address, player_id: u64, milestone_index: u32) {
+    env.events().publish(
+        (Symbol::new(env, "milestone_flag_cleared"), reviewer.clone()),
+        (player_id, milestone_index),
+    );
+}
+
+/// Emitted when a for-cause cascade sweep completes (all milestones flagged)
+/// or when `continue_revocation_cascade` exhausts the remaining milestones
+/// in a single call.
+///
+/// topics: (event_name, validator)  data: total_flagged_so_far
+pub fn revocation_cascade_complete(env: &Env, validator: &Address, total_flagged: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, "revocation_cascade_complete"),
+            validator.clone(),
+        ),
+        total_flagged,
+    );
+}
+
+/// Emitted when a for-cause cascade sweep call reaches its per-call limit and
+/// a continuation cursor is stored so the sweep can be resumed.
+///
+/// topics: (event_name, validator)  data: (next_cursor, flagged_this_call)
+pub fn revocation_cascade_continued(
     env: &Env,
-    player_id: u64,
-    milestone_index: u32,
-    upheld: bool,
-    votes_for: u32,
-    votes_against: u32,
+    validator: &Address,
+    next_cursor: u32,
+    flagged_this_call: u32,
 ) {
     env.events().publish(
         (
-            Symbol::new(env, DISPUTE_TALLIED),
-            player_id,
-            milestone_index,
+            Symbol::new(env, "revocation_cascade_continued"),
+            validator.clone(),
         ),
-        (upheld, votes_for, votes_against),
+        (next_cursor, flagged_this_call),
     );
 }

@@ -4,15 +4,15 @@
 //! log_trial_offer → confirm_trial_offer / expire_trial_offers flow:
 //!
 //!  1. Happy path  — confirm before expiry: level advances, escrow released,
-//!                   `trial_offer_confirmed` event emitted.
+//!     `trial_offer_confirmed` event emitted.
 //!  2. Expiry path — confirm after expiry window: escrow refunded to scout,
-//!                   `trial_offer_expired` emitted, `TrialOfferExpired` returned.
+//!     `trial_offer_expired` emitted, refund committed successfully.
 //!  3. Double-confirm — second confirm after a successful first: escrow record
-//!                   is gone, `TrialOfferAlreadyConfirmed` returned.
+//!     is gone, `TrialOfferAlreadyConfirmed` returned.
 //!  4. Confirm without log — index never created: `TrialOfferNotFound` returned.
 //!  5. Admin sweep  — `expire_trial_offers` proactively refunds stale escrows
-//!                   that were never confirmed: escrow refunded, event emitted,
-//!                   outstanding-escrows list cleaned up, return count correct.
+//!     that were never confirmed: escrow refunded, event emitted,
+//!     outstanding-escrows list cleaned up, return count correct.
 //!
 //! Every test asserts both the returned `Result` variant and the on-chain
 //! events emitted, matching the rigor used in the existing integration tests.
@@ -26,8 +26,25 @@ use scoutchain_verification::{VerificationContract, VerificationContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    Address, Env, IntoVal, String, Symbol,
+    Address, Env, IntoVal, String, TryFromVal,
 };
+
+/// Find the first event whose leading topic symbol equals `name`.
+fn find_event<'a>(
+    events: &'a [soroban_sdk::xdr::ContractEvent],
+    name: &str,
+) -> Option<&'a soroban_sdk::xdr::ContractEventV0> {
+    events.iter().find_map(|e| match &e.body {
+        soroban_sdk::xdr::ContractEventBody::V0(v0) => match v0.topics.first() {
+            Some(soroban_sdk::xdr::ScVal::Symbol(sym))
+                if AsRef::<[u8]>::as_ref(&sym.0) == name.as_bytes() =>
+            {
+                Some(v0)
+            }
+            _ => None,
+        },
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Constants — mirror what the contract uses so the test is self-documenting.
@@ -38,6 +55,22 @@ const EXPIRY_SECS: u64 = 3_600; // trial_offer_expiry_secs (1 hour)
 const ELITE_FEE: i128 = 7_000_000;
 const CONTACT_FEE: i128 = 100_000;
 const START_TS: u64 = 10_000_000;
+
+// Distinct format-valid CIDv0 values for milestone evidence and trial details.
+const CID_1: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB";
+const CID_2: &str = "QmwsjoZwgfzgx6xPr3cXEKhzfLt5RQ87yMnWecTp1tf6p7";
+const CID_3: &str = "QmgzsER5ykyxoTsVUSePRkKXqkEzsRVLpUv511dp4c3vAs";
+const CID_4: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+const CID_5: &str = "QmSoLuPdfMphth8NredL2sQpEnAGMTz1kqfXLhFDUQHBio";
+const CID_6: &str = "QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh51";
+const CID_7: &str = "QmRhbYsqpiYgUY9KfNCcbfopHPbLnWSVKBpDNs37aZ3kVC";
+const CID_8: &str = "QmcTzBPBmmVEd19W3UgvE4sGrZXdwrZ3UFzLAWQSmfYFvJ";
+const CID_9: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqC";
+const CID_10: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqD";
+const CID_11: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqE";
+const CID_12: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqF";
+const CID_13: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqG";
+const CID_14: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqH";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -59,7 +92,6 @@ fn default_fees() -> FeeConfig {
 struct Harness {
     env: Env,
     xlm: Address,
-    admin: Address,
     progress: ProgressContractClient<'static>,
     scout_access: ScoutAccessContractClient<'static>,
     verification: VerificationContractClient<'static>,
@@ -72,11 +104,11 @@ fn setup() -> Harness {
 
     let admin = Address::generate(&env);
 
-    let ver_id = env.register_contract(None, VerificationContract);
+    let ver_id = env.register(VerificationContract, ());
     let verification = VerificationContractClient::new(&env, &ver_id);
     verification.initialize(&admin);
 
-    let progress_id = env.register_contract(None, ProgressContract);
+    let progress_id = env.register(ProgressContract, ());
     let progress = ProgressContractClient::new(&env, &progress_id);
     progress.initialize(&admin);
     progress.set_verification_contract(&ver_id);
@@ -85,7 +117,7 @@ fn setup() -> Harness {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
 
-    let sa_id = env.register_contract(None, ScoutAccessContract);
+    let sa_id = env.register(ScoutAccessContract, ());
     let scout_access = ScoutAccessContractClient::new(&env, &sa_id);
     scout_access.initialize(&admin, &xlm, &default_fees());
 
@@ -96,7 +128,6 @@ fn setup() -> Harness {
     Harness {
         env,
         xlm,
-        admin,
         progress,
         scout_access,
         verification,
@@ -115,13 +146,18 @@ fn advance_player(h: &Harness, player_id: u64, levels: u32) {
 /// `evidence_hash` must be a unique CID per call.
 fn approve_milestone(h: &Harness, player_id: u64, evidence_hash: &str) {
     let validator = Address::generate(&h.env);
-    h.verification
-        .register_validator(&validator, &String::from_str(&h.env, "UEFA-B-License"), &Vec::new(&h.env));
+    h.verification.register_validator(
+        &validator,
+        &String::from_str(&h.env, "UEFA-B-License"),
+        &String::from_str(&h.env, "Default Academy"),
+        &soroban_sdk::Vec::new(&h.env),
+    );
     h.verification.approve_milestone(
         &validator,
         &player_id,
         &String::from_str(&h.env, "scored"),
         &String::from_str(&h.env, evidence_hash),
+        &None,
     );
 }
 
@@ -139,11 +175,8 @@ fn setup_elite_scout(h: &Harness, player_id: u64) -> Address {
 /// Log one trial offer for `player_id` by `scout`, approving a milestone first.
 fn log_offer(h: &Harness, scout: &Address, player_id: u64, evidence: &str, hash: &str) -> u32 {
     approve_milestone(h, player_id, evidence);
-    h.scout_access.log_trial_offer(
-        scout,
-        &player_id,
-        &String::from_str(&h.env, hash),
-    )
+    h.scout_access
+        .log_trial_offer(scout, &player_id, &String::from_str(&h.env, hash))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,40 +214,30 @@ fn test_confirm_before_expiry_advances_level_and_emits_event() {
 
     let scout = setup_elite_scout(&h, player_id);
 
-    let index = log_offer(
-        &h,
-        &scout,
-        player_id,
-        "QmConfirm1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa",
-        "QmConfirmHash1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa",
-    );
+    let index = log_offer(&h, &scout, player_id, CID_1, CID_2);
     assert_eq!(index, 1);
 
     // Confirm well within the expiry window (timestamp unchanged).
     // `idempotency_nonce` is optional — pass `None` for a plain confirm.
     h.scout_access
         .confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    let confirmation_events = h.env.events().all();
 
     // Player must now be at EliteTier.
     assert_eq!(h.progress.get_level(&player_id), ProgressLevel::EliteTier);
 
     // `trial_offer_confirmed` must have been emitted.
-    let events = h.env.events().all();
-    let confirmed_event = events.iter().find(|(_, topics, _)| {
-        topics
-            .get(0)
-            .map(|t| t == Symbol::new(&h.env, "trial_offer_confirmed").into_val(&h.env))
-            .unwrap_or(false)
-    });
+    let events = confirmation_events.events();
+    let confirmed_event = find_event(events, "trial_offer_confirmed");
     assert!(
         confirmed_event.is_some(),
         "trial_offer_confirmed event must be emitted on successful confirmation"
     );
 
     // The data payload must be (player_id, index).
-    let (_, _, data) = confirmed_event.unwrap();
     let expected: soroban_sdk::Val = (player_id, index).into_val(&h.env);
-    assert_eq!(data, expected);
+    let expected_xdr = soroban_sdk::xdr::ScVal::try_from_val(&h.env, &expected).unwrap();
+    assert_eq!(confirmed_event.unwrap().data, expected_xdr);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +247,7 @@ fn test_confirm_before_expiry_advances_level_and_emits_event() {
 /// Confirm a trial offer after `trial_offer_expiry_secs` have elapsed.
 ///
 /// Asserts:
-///   - `confirm_trial_offer` returns `Err(TrialOfferExpired)`
+///   - `confirm_trial_offer` returns success after committing the refund
 ///   - Scout's token balance is restored by exactly `trial_offer_escrow_stroops`
 ///   - `trial_offer_expired` event is emitted with correct payload
 ///   - TrialEscrow is cleaned up (subsequent confirm returns AlreadyConfirmed)
@@ -239,31 +262,33 @@ fn test_confirm_after_expiry_refunds_escrow_and_emits_event() {
     let scout = setup_elite_scout(&h, player_id);
     let balance_before_log = xlm_balance(&h, &scout);
 
-    let index = log_offer(
-        &h,
-        &scout,
-        player_id,
-        "QmExpiry1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBb",
-        "QmExpiryHash1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBb",
-    );
+    let index = log_offer(&h, &scout, player_id, CID_3, CID_4);
 
     // Scout paid ESCROW_AMOUNT when logging; balance should be reduced.
     let balance_after_log = xlm_balance(&h, &scout);
     assert_eq!(balance_after_log, balance_before_log - ESCROW_AMOUNT);
 
     // Advance past the expiry window.
-    h.env
-        .ledger()
-        .with_mut(|l| l.timestamp += EXPIRY_SECS + 1);
+    h.env.ledger().with_mut(|l| l.timestamp += EXPIRY_SECS + 1);
 
-    // Attempt to confirm after expiry — must return TrialOfferExpired.
-    let result = h
-        .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    // Confirm after expiry — the refund path must commit successfully.
+    let result =
+        h.scout_access
+            .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    assert!(result.is_ok(), "expired confirm must commit the refund");
+
+    // `trial_offer_expired` must have been emitted before any subsequent view
+    // call clears the invocation event buffer.
+    let expiry_events = h.env.events().all();
+    let events = expiry_events.events();
+    let expired_event = find_event(events, "trial_offer_expired");
     assert!(
-        result.is_err(),
-        "confirm after expiry must return an error"
+        expired_event.is_some(),
+        "trial_offer_expired event must be emitted on expiry-refund path"
     );
+    let expected: soroban_sdk::Val = (player_id, index).into_val(&h.env);
+    let expected_xdr = soroban_sdk::xdr::ScVal::try_from_val(&h.env, &expected).unwrap();
+    assert_eq!(expired_event.unwrap().data, expected_xdr);
 
     // Scout balance must be fully restored.
     let balance_after_refund = xlm_balance(&h, &scout);
@@ -273,27 +298,10 @@ fn test_confirm_after_expiry_refunds_escrow_and_emits_event() {
         "scout balance must be restored by exactly the escrow amount"
     );
 
-    // `trial_offer_expired` must have been emitted.
-    let events = h.env.events().all();
-    let expired_event = events.iter().find(|(_, topics, _)| {
-        topics
-            .get(0)
-            .map(|t| t == Symbol::new(&h.env, "trial_offer_expired").into_val(&h.env))
-            .unwrap_or(false)
-    });
-    assert!(
-        expired_event.is_some(),
-        "trial_offer_expired event must be emitted on expiry-refund path"
-    );
-
-    let (_, _, data) = expired_event.unwrap();
-    let expected: soroban_sdk::Val = (player_id, index).into_val(&h.env);
-    assert_eq!(data, expected);
-
     // Escrow must be cleaned up: a second confirm attempt returns AlreadyConfirmed.
-    let second_result = h
-        .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    let second_result =
+        h.scout_access
+            .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
     assert!(
         second_result.is_err(),
         "second confirm after expiry-refund must error (escrow already gone)"
@@ -318,22 +326,16 @@ fn test_double_confirm_returns_already_confirmed() {
     advance_player(&h, player_id, 2);
     let scout = setup_elite_scout(&h, player_id);
 
-    let index = log_offer(
-        &h,
-        &scout,
-        player_id,
-        "QmDouble1CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCc",
-        "QmDoubleHash1CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCc",
-    );
+    let index = log_offer(&h, &scout, player_id, CID_5, CID_6);
 
     // First confirm — must succeed.
     h.scout_access
         .confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
 
     // Second confirm — escrow is gone, must return TrialOfferAlreadyConfirmed.
-    let result = h
-        .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    let result =
+        h.scout_access
+            .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
     assert!(
         result.is_err(),
         "second confirm must return TrialOfferAlreadyConfirmed"
@@ -356,9 +358,9 @@ fn test_confirm_without_prior_log_returns_error() {
     let player_wallet = Address::generate(&h.env);
 
     // No trial offer was ever logged for player_id = 4.
-    let result = h
-        .scout_access
-        .try_confirm_trial_offer(&player_wallet, &player_id, &1u32, &None::<String>);
+    let result =
+        h.scout_access
+            .try_confirm_trial_offer(&player_wallet, &player_id, &1u32, &None::<String>);
     assert!(
         result.is_err(),
         "confirming a never-logged index must return an error"
@@ -401,27 +403,9 @@ fn test_expire_trial_offers_sweep_refunds_stale_escrows() {
     let bal_c_before = xlm_balance(&h, &scout_c);
 
     // Log three trial offers (A and B will be swept; C will remain active).
-    log_offer(
-        &h,
-        &scout_a,
-        player_a,
-        "QmSweepA1DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDd",
-        "QmSweepHashA1DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDd",
-    );
-    log_offer(
-        &h,
-        &scout_b,
-        player_b,
-        "QmSweepB1EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEe",
-        "QmSweepHashB1EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEe",
-    );
-    log_offer(
-        &h,
-        &scout_c,
-        player_c,
-        "QmSweepC1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFf",
-        "QmSweepHashC1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFf",
-    );
+    log_offer(&h, &scout_a, player_a, CID_7, CID_8);
+    log_offer(&h, &scout_b, player_b, CID_9, CID_10);
+    log_offer(&h, &scout_c, player_c, CID_11, CID_12);
 
     // Balances were reduced by ESCROW_AMOUNT for each log call.
     assert_eq!(xlm_balance(&h, &scout_a), bal_a_before - ESCROW_AMOUNT);
@@ -436,13 +420,15 @@ fn test_expire_trial_offers_sweep_refunds_stale_escrows() {
     // active vs stale in this variant.
     //
     // For the "still-active" assertion we use a separate sub-test below.
-    h.env
-        .ledger()
-        .with_mut(|l| l.timestamp += EXPIRY_SECS + 1);
+    h.env.ledger().with_mut(|l| l.timestamp += EXPIRY_SECS + 1);
 
     // Sweep with limit=2 — only A and B should be swept (first two entries).
     let swept = h.scout_access.expire_trial_offers(&2u32);
-    assert_eq!(swept, 2, "expire_trial_offers with limit=2 must sweep 2 entries");
+    assert_eq!(
+        swept, 2,
+        "expire_trial_offers with limit=2 must sweep 2 entries"
+    );
+    let sweep_events = h.env.events().all();
 
     // Scouts A and B must be refunded.
     assert_eq!(
@@ -463,14 +449,19 @@ fn test_expire_trial_offers_sweep_refunds_stale_escrows() {
     );
 
     // `trial_offer_expired` must have been emitted at least twice.
-    let events = h.env.events().all();
+    let events = sweep_events.events();
     let expired_count = events
         .iter()
-        .filter(|(_, topics, _)| {
-            topics
-                .get(0)
-                .map(|t| t == Symbol::new(&h.env, "trial_offer_expired").into_val(&h.env))
-                .unwrap_or(false)
+        .filter(|e| {
+            matches!(
+                &e.body,
+                soroban_sdk::xdr::ContractEventBody::V0(v0)
+                    if matches!(
+                        v0.topics.first(),
+                        Some(soroban_sdk::xdr::ScVal::Symbol(sym))
+                            if AsRef::<[u8]>::as_ref(&sym.0) == b"trial_offer_expired"
+                    )
+            )
         })
         .count();
     assert!(
@@ -502,13 +493,7 @@ fn test_expire_trial_offers_skips_active_escrow() {
     let scout = setup_elite_scout(&h, player_id);
     let bal_before = xlm_balance(&h, &scout);
 
-    log_offer(
-        &h,
-        &scout,
-        player_id,
-        "QmActive1GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGg",
-        "QmActiveHash1GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGg",
-    );
+    log_offer(&h, &scout, player_id, CID_13, CID_14);
 
     // Do NOT advance past the expiry window — escrow is still active.
     h.env.ledger().with_mut(|l| l.timestamp += EXPIRY_SECS / 2);

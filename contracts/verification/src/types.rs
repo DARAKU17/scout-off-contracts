@@ -11,7 +11,7 @@ use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 ///
 /// This is a pure read-only aggregate — no new storage or business logic.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ValidatorActivityReport {
     /// Validator wallet address.
     pub wallet: Address,
@@ -111,7 +111,7 @@ pub struct GlobalMilestoneIndexPage {
 
 /// A player-initiated dispute for a milestone.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MilestoneDispute {
     /// Unique player identifier for the disputed milestone.
     pub player_id: u64,
@@ -259,6 +259,41 @@ pub enum AttestationStatus {
     Committed(u32),
 }
 
+/// Severity level for a validator revocation.
+///
+/// Passed explicitly to `revoke_validator` instead of inferring severity from
+/// free-text string content.  `Routine` leaves prior milestone approvals
+/// untouched; `ForCause` triggers a cascade sweep that flags every milestone
+/// the validator previously approved as `MilestonePendingReReview`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevocationSeverity {
+    /// Routine deactivation — no cascade flag sweep triggered.
+    Routine,
+    /// For-cause revocation — every previously-approved milestone is flagged
+    /// `MilestonePendingReReview` so scouts and indexers can identify affected
+    /// records.
+    ForCause,
+}
+
+/// Persisted record of a validator revocation (stored under
+/// `DataKey::RevocationRecord(wallet)`).
+///
+/// Retains the severity, human-readable reason, ledger timestamp, and the
+/// admin address that performed the revocation for audit purposes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationRecord {
+    /// Severity of this revocation.
+    pub severity: RevocationSeverity,
+    /// Human-readable reason supplied by the admin (may be empty).
+    pub reason: String,
+    /// Unix timestamp (seconds) when the revocation occurred.
+    pub revoked_at: u64,
+    /// Admin address that performed the revocation.
+    pub admin: Address,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiversityConfig {
@@ -361,6 +396,12 @@ pub enum DataKey {
     /// Whether `RegistrationContract` has been set at least once.
     RegistrationContractSet,
 
+    /// Boolean flag (`true`) written by `open_migration_window`; absent or
+    /// `false` means the migration window is closed. All `admin_seed_*`
+    /// functions on this contract check this flag before writing any state.
+    /// Cleared by `close_migration_window`. Stored in instance storage.
+    MigrationActive,
+
     // ── Wiring epochs (issue #1041) ──
     /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
     /// `set_progress_contract` / `update_progress_contract` call. See
@@ -371,13 +412,25 @@ pub enum DataKey {
     /// `set_registration_contract` / `update_registration_contract` call.
     RegistrationContractEpoch,
 
-    // ── Dispute jury system (issue #1036) ──
-    /// Instance-level jury configuration (impact_threshold, quorum, voting_window_secs).
-    JuryConfig,
-    /// Individual validator vote on a jury dispute, keyed by (player_id, milestone_index, validator).
-    DisputeVote(u64, u32, Address),
-    /// Total vote count for a jury dispute, keyed by (player_id, milestone_index).
-    DisputeVoteCount(u64, u32),
+    // ── Validator revocation cascade re-review (issue #1039) ──
+    /// Persisted `RevocationRecord` for a revoked validator wallet.
+    /// Keyed by validator wallet address.
+    RevocationRecord(Address),
+    /// Legacy per-milestone pending-re-review flag. New cascades use the
+    /// validator-scoped pages below so a bounded batch does not exceed the
+    /// network's per-transaction ledger-write limit; readers retain support
+    /// for this key for state written by an earlier implementation.
+    MilestonePendingReReview(u64, u32),
+    /// Sharded pending-re-review flags for one revoked validator. Each page
+    /// contains compact `(player_id, milestone_index)` references.
+    MilestonePendingReReviewPage(Address, u32),
+    /// Number of pending-re-review references stored for one revoked validator.
+    MilestonePendingReReviewCount(Address),
+    /// Continuation cursor for a bounded for-cause cascade sweep.
+    /// Stores the index (0-based position in the `ValidatorMilestones` vec)
+    /// from which the next `continue_revocation_cascade` call should resume.
+    /// Absent when no cascade is in progress or when the sweep is complete.
+    RevocationCascadeCursor(Address),
 }
 
 /// Snapshot of both cross-contract peer address pointers held by the

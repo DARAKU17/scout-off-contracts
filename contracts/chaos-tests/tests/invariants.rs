@@ -46,9 +46,7 @@ pub fn assert_fee_conservation(harness: &Harness) -> Result<(), String> {
     let actual = harness.scout_access.get_accumulated_fees();
 
     if actual < 0 {
-        return Err(format!(
-            "accumulated fees are negative: {actual}"
-        ));
+        return Err(format!("accumulated fees are negative: {actual}"));
     }
 
     if harness.fee_counter_regressed {
@@ -95,9 +93,7 @@ pub fn assert_level_monotonicity(harness: &Harness) -> Result<(), String> {
     for &player_id in &harness.player_ids {
         let current = harness.progress.get_level(&player_id);
         if !is_valid_level(&current) {
-            return Err(format!(
-                "invalid level for player {player_id}: {current:?}"
-            ));
+            return Err(format!("invalid level for player {player_id}: {current:?}"));
         }
 
         let history = harness.progress.get_progress_history(&player_id);

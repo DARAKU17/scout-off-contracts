@@ -70,7 +70,7 @@ pub struct ProContactPeriod {
 
 /// Escrow record for a trial offer
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TrialEscrow {
     /// Escrowed trial-offer amount in stroops, set from
     /// `FeeConfig.trial_offer_escrow_stroops` when `log_trial_offer` creates
@@ -95,7 +95,7 @@ pub struct FeeConfigProposal {
 
 /// Platform fee configuration
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FeeConfig {
     /// Contact fee in stroops (1 XLM = 10_000_000 stroops)
     pub contact_fee_stroops: i128,
@@ -125,7 +125,7 @@ pub struct FeeConfig {
 /// Stored in `DataKey::FeeConfigHistory` as a `Vec<FeeConfigHistoryEntry>`,
 /// oldest-first, capped at `FEE_CONFIG_HISTORY_CAP` entries.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FeeConfigHistoryEntry {
     /// The fee configuration that was active before this change.
     pub config: FeeConfig,
@@ -140,6 +140,10 @@ pub enum DataKey {
     PendingAdmin,
     Initialized,
     Paused,
+    /// Function-scoped pause flag for `pay_to_contact` (independent of the
+    /// whole-contract `Paused` flag). Stored in instance storage, defaults to
+    /// `false` when absent. Mirrors `verification`'s `PausedApproveMilestone`.
+    PausedPayToContact,
     FeeConfig,
     /// Proposed fee configuration awaiting activation after a 7-day delay
     PendingFeeConfig,
@@ -202,6 +206,12 @@ pub enum DataKey {
     /// the caller to re-check `Subscription.expires_at` for exact filtering,
     /// which `get_subscriptions_expiring_before` already does.
     ExpiryBucket(u64),
+
+    /// Boolean flag (`true`) written by `open_migration_window`; absent or
+    /// `false` means the migration window is closed. All `admin_seed_*`
+    /// functions on this contract check this flag before writing any state.
+    /// Cleared by `close_migration_window`. Stored in instance storage.
+    MigrationActive,
     /// Re-wiring epoch for `DataKey::ProgressContract`, bumped by every
     /// `set_progress_contract` / `update_progress_contract` call. See
     /// `scoutchain_shared_types::WiringLink` and

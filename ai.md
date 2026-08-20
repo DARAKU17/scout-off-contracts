@@ -138,16 +138,19 @@ pub fn register_validator(
     credentials: String,
 ) -> Result<(), VerificationError>
 
+// severity is explicit: RevocationSeverity::Routine (no cascade) or RevocationSeverity::ForCause (cascade flags all prior milestones)
 // reason is optional — pass None to omit a revocation reason
 pub fn revoke_validator(
     env: Env,
     wallet: Address,
+    severity: RevocationSeverity,
     reason: Option<String>,
 ) -> Result<(), VerificationError>
 
 pub fn batch_revoke_validators(
     env: Env,
     wallets: Vec<Address>,
+    severity: RevocationSeverity,
     reason: Option<String>,
 ) -> Result<(), VerificationError>
 
@@ -471,7 +474,7 @@ Error codes are **per-contract**. The same numeric code can mean different thing
 | 20 | `ProContactLimitReached` | Pro-tier scout hit per-period contact limit |
 | 21 | `PendingAdminNotSet` | `accept_admin` called without a prior `propose_admin` |
 | 22 | `TrialOfferAlreadyConfirmed` | `confirm_trial_offer` called twice for same offer |
-| 23 | `TrialOfferExpired` | `confirm_trial_offer` called after offer expiry window |
+| 23 | `TrialOfferExpired` | Legacy compatibility code; expiry confirmation now commits the refund and returns success |
 
 > **Note:** Code 13 is intentionally reserved in `ScoutAccessError` and must not be assigned.
 
@@ -598,7 +601,7 @@ When the progress contract is not wired, a `progress_contract_not_set` event is 
 
 - **Wiring must be re-run after every fresh deployment.** Contract IDs change on each deploy; old wiring references stale IDs.
 - **`initialize` is one-time per contract.** Calling it twice returns `AlreadyInitialized` (code 1). This is not an error — the contract is already ready.
-- **`revoke_validator` takes `Option<String>` for the reason.** Pass `None` if no reason is needed. The old signature without a reason parameter no longer exists.
+- **`revoke_validator` now takes an explicit `RevocationSeverity` as the second parameter.** Pass `RevocationSeverity::Routine` for a routine deactivation (no cascade) or `RevocationSeverity::ForCause` for a misconduct revocation that flags all prior milestone approvals as pending re-review. Pass `None` for reason if no reason is needed. The old single-`reason` signature no longer exists — update all callers. For validators with more than 50 prior approvals, call `continue_revocation_cascade(wallet)` (admin only) one or more times until the `revocation_cascade_complete` event is emitted.
 - **`log_trial_offer` does NOT immediately advance the player's level.** It records the offer and escrows a fee. Level advancement happens in `confirm_trial_offer`, which must be called by the player wallet.
 - **Trial offer two-step flow:** `log_trial_offer` (scout) → `confirm_trial_offer` (player). Missing the confirmation step means the player stays at Level 2.
 - **Admin rotation is two-step.** Current admin calls `propose_admin`, then the pending address calls `accept_admin`. The old admin remains active until acceptance.

@@ -23,6 +23,11 @@ pub struct ContractHealth {
     pub initialized: bool,
     /// Whether state-changing operations are currently paused.
     pub paused: bool,
+    /// Whether the `scout_access.pay_to_contact` function is paused independently
+    /// of the whole-contract pause (function-scoped circuit breaker).
+    /// Always `false` for contracts that do not implement a `pay_to_contact`
+    /// function (`registration`, `verification`, `progress`).
+    pub pay_to_contact_paused: bool,
 }
 
 impl ProgressLevel {
@@ -388,8 +393,8 @@ pub mod safe_math {
 
         #[test]
         fn i128_sub_overflow_returns_err() {
-            // MIN - (-1) would overflow positively
-            assert_eq!(safe_sub_i128(i128::MIN, -1), Err(ArithmeticError));
+            // MAX - (-1) would overflow positively
+            assert_eq!(safe_sub_i128(i128::MAX, -1), Err(ArithmeticError));
         }
 
         #[test]
@@ -445,9 +450,7 @@ pub mod safe_math {
 
         #[test]
         fn i128_all_ops_exhaustive_no_panic() {
-            let values: &[i128] = &[
-                i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX,
-            ];
+            let values: &[i128] = &[i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX];
             for &a in values {
                 for &b in values {
                     let _ = safe_add_i128(a, b);
@@ -491,7 +494,6 @@ pub mod safe_math {
         }
     }
 }
-
 
 ///
 /// Rules:
@@ -572,6 +574,7 @@ fn is_base32_char(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     fn s(env: &Env, v: &str) -> String {
         String::from_str(env, v)

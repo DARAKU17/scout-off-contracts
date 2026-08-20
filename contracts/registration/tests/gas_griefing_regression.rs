@@ -7,14 +7,19 @@
 //! See docs/GAS_GRIEFING_AUDIT.md — Vector 2: register_player Spam Inflates
 //! filter_players Cost.
 
+pub use scoutchain_registration::PlayerVitals;
 use scoutchain_registration::{RegistrationContract, RegistrationContractClient};
 use scoutchain_shared_types::ProgressLevel;
-pub use scoutchain_registration::PlayerVitals;
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
 fn setup() -> (Env, RegistrationContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
+    // These tests register 50–60 players and paginate through them; the test
+    // env's default mainnet-style invocation resource limits (100 footprint
+    // ledger entries) would reject that much state, so disable them. The CPU
+    // cost budget is asserted separately per test below.
+    env.host().set_invocation_resource_limits(None).unwrap();
     let contract_id = env.register(RegistrationContract, ());
     let client = RegistrationContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -70,16 +75,16 @@ fn test_filter_players_page_limit_enforced() {
         &100u32,
     );
 
-        assert!(
-            result.profiles.len() <= 50,
-            "filter_players must return at most 50 results; got {}",
-            result.profiles.len()
-        );
-        assert_eq!(
-            result.profiles.len(),
-            50,
-            "with 60 matching players and limit=100, exactly 50 should be returned"
-        );
+    assert!(
+        result.profiles.len() <= 50,
+        "filter_players must return at most 50 results; got {}",
+        result.profiles.len()
+    );
+    assert_eq!(
+        result.profiles.len(),
+        50,
+        "with 60 matching players and limit=100, exactly 50 should be returned"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +124,11 @@ fn test_filter_players_pagination_retrieves_all() {
         &(page1.next_cursor as u32),
         &50u32,
     );
-    assert_eq!(page2.profiles.len(), 10, "page 2 must return the remaining 10 results");
+    assert_eq!(
+        page2.profiles.len(),
+        10,
+        "page 2 must return the remaining 10 results"
+    );
     assert_eq!(page2.next_cursor, 0, "page 2 must indicate no more results");
 
     // Total across both pages = 60.

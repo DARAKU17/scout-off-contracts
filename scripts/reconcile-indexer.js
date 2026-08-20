@@ -213,6 +213,19 @@ async function reconcilePlayers(pg, cfg, report) {
     report.check("players", key, "registered_at", asBigIntString(p.registered_at), asBigIntString(dbRow.registered_at));
     report.check("players", key, "updated_at", asBigIntString(p.updated_at), asBigIntString(dbRow.updated_at));
 
+    const deactivatedResult = invoke(
+      cfg.network,
+      cfg.source,
+      cfg.registrationId,
+      "is_player_deactivated",
+      ["--player_id", key],
+    );
+    if (deactivatedResult.ok) {
+      report.check("players", key, "deactivated", deactivatedResult.value === true, Boolean(dbRow.deactivated));
+    } else {
+      report.add("players", key, "deactivated", "getter_failed", dbRow.deactivated, deactivatedResult.error);
+    }
+
     const levelResult = invoke(cfg.network, cfg.source, cfg.progressId, "get_level", ["--player_id", key]);
     if (levelResult.ok) {
       const chainLevel = levelNameToInt(levelResult.value);

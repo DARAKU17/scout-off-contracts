@@ -19,10 +19,7 @@ pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, ADMIN_TRANSFER_PROPOSED),
-            old_admin.clone(),
-        ),
+        (Symbol::new(env, ADMIN_TRANSFER_PROPOSED), old_admin.clone()),
         new_admin.clone(),
     );
 }
@@ -64,7 +61,13 @@ pub fn player_level_reset(
 /// `"verification_contract"`, or `"scout_access_contract"`) so a single
 /// indexer subscription can distinguish them without three separate event
 /// names. See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -77,18 +80,14 @@ pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Addr
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"), admin.clone()), ());
 }
 
 /// topics: (event_name, admin)  data: ()
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"), admin.clone()),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"), admin.clone()), ());
 }
 
 /// Emitted by `restore_player_level_record` when an admin re-extends an
@@ -96,7 +95,10 @@ pub fn contract_unpaused(env: &Env, admin: &Address) {
 /// topics: (event_name, admin)  data: player_id
 pub fn player_level_record_restored(env: &Env, admin: &Address, player_id: u64) {
     env.events().publish(
-        (Symbol::new(env, "player_level_record_restored"), admin.clone()),
+        (
+            Symbol::new(env, "player_level_record_restored"),
+            admin.clone(),
+        ),
         player_id,
     );
 }

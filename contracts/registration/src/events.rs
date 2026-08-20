@@ -1,6 +1,8 @@
 #![allow(deprecated, dead_code)]
 use soroban_sdk::{Address, Env, Symbol};
 
+use crate::types::MigrationRole;
+
 pub const PLAYER_REGISTERED: &str = "player_registered";
 pub const SCOUT_REGISTERED: &str = "scout_registered";
 pub const PROFILE_UPDATED: &str = "profile_updated";
@@ -22,7 +24,13 @@ pub const WIRING_UPDATED: &str = "wiring_updated";
 /// `"progress_contract"` (the contract's only wiring pointer); the argument
 /// exists so this event's shape matches the other three contracts'
 /// `wiring_updated` events. See `docs/WIRING_REGISTRY_DESIGN.md`.
-pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Address, new_epoch: u32) {
+pub fn wiring_updated(
+    env: &Env,
+    admin: &Address,
+    link: &str,
+    new_address: &Address,
+    new_epoch: u32,
+) {
     env.events().publish(
         (
             Symbol::new(env, WIRING_UPDATED),
@@ -36,10 +44,7 @@ pub fn wiring_updated(env: &Env, admin: &Address, link: &str, new_address: &Addr
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (
-            Symbol::new(env, ADMIN_TRANSFER_PROPOSED),
-            old_admin.clone(),
-        ),
+        (Symbol::new(env, ADMIN_TRANSFER_PROPOSED), old_admin.clone()),
         new_admin.clone(),
     );
 }
@@ -130,6 +135,20 @@ pub fn scout_reactivated(env: &Env, scout_id: u64, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, SCOUT_REACTIVATED), admin.clone()),
         scout_id,
+    );
+}
+
+/// topics: (event_name, wallet)  data: (role, profile_id, new_contract_hint)
+pub fn migration_redeemed(
+    env: &Env,
+    wallet: &Address,
+    role: &MigrationRole,
+    profile_id: u64,
+    new_contract_hint: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, MIGRATION_REDEEMED), wallet.clone()),
+        (*role, profile_id, new_contract_hint.clone()),
     );
 }
 

@@ -138,6 +138,10 @@ The tool reconstructs state from these events:
 | `trial_offer_logged` | scout_access | Trial offer creation | Trial must be unique per (player, index) |
 | `trial_offer_confirmed` | scout_access | Trial state transition | Must follow logged → confirmed or expired path |
 | `trial_offer_expired` | scout_access | Trial state transition | Must follow logged → expired or confirmed path |
+| `milestone_flagged` | verification | Milestone pending-re-review flag | Milestone must exist; validator must be revoked for cause |
+| `milestone_flag_cleared` | verification | Flag clearance | Flag must be set; reviewer must be an active validator |
+| `revocation_cascade_complete` | verification | End of cascade sweep | Emitted after all milestones for a for-cause revocation are flagged |
+| `revocation_cascade_continued` | verification | Partial cascade sweep | Cursor stored; `continue_revocation_cascade` required to finish |
 
 ---
 
