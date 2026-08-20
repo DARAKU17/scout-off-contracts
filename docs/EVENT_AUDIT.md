@@ -131,8 +131,10 @@ The tool reconstructs state from these events:
 | `progress_updated` | progress | Level progression | `old_level` must match current; transition must follow rules |
 | `player_level_reset` | progress | Level reset | Must be valid reset-to level |
 | `milestone_approved` | verification | Milestone registry | Milestone must be unique per (player, index) |
-| `milestone_disputed` | verification | Dispute state | Milestone must exist |
-| `dispute_resolved` | verification | Dispute outcome | Dispute must be in "disputed" state |
+| `milestone_disputed` | verification | Dispute state (including impact_score, jury_required, quorum, voting_deadline) | Milestone must exist |
+| `dispute_vote_cast` | verification | Per-validator jury vote | Dispute must be jury-required and unresolved; validator must be eligible |
+| `dispute_tallied` | verification | Jury dispute outcome | Dispute must be jury-required; votes_for+votes_against must match accumulated cast events |
+| `dispute_resolved` | verification | Admin dispute outcome | Dispute must be non-jury and in "disputed" state |
 | `trial_offer_logged` | scout_access | Trial offer creation | Trial must be unique per (player, index) |
 | `trial_offer_confirmed` | scout_access | Trial state transition | Must follow logged → confirmed or expired path |
 | `trial_offer_expired` | scout_access | Trial state transition | Must follow logged → expired or confirmed path |

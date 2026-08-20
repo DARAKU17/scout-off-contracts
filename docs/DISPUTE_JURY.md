@@ -1,5 +1,9 @@
 # Dispute Jury Escalation Design
 
+> **Status: Implemented** — shipped in `feature/dispute-jury-escalation-1036` (issue #1036).
+> See `docs/CONTRACT_REFERENCE.md` for the complete function reference and
+> `contracts/verification/src/lib.rs` for the canonical implementation.
+
 This document specifies the multi-validator jury mechanism for high-impact milestone
 disputes in the verification contract.
 

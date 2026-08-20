@@ -18,6 +18,8 @@ pub const ATTESTATION_RECORDED: &str = "attestation_recorded";
 pub const ATTESTATION_WINDOW_EXPIRED: &str = "attestation_window_expired";
 pub const VALIDATOR_PENDING_VOTES_INVALIDATED: &str = "validator_votes_invalidated";
 pub const WIRING_UPDATED: &str = "wiring_updated";
+pub const DISPUTE_VOTE_CAST: &str = "dispute_vote_cast";
+pub const DISPUTE_TALLIED: &str = "dispute_tallied";
 
 /// topics: (event_name, old_admin)  data: new_admin
 pub fn admin_transfer_proposed(env: &Env, old_admin: &Address, new_admin: &Address) {

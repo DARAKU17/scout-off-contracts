@@ -1,5 +1,9 @@
 # Dispute Resolution and Jury Escalation
 
+> **Status: Implemented** — shipped in `feature/dispute-jury-escalation-1036` (issue #1036).
+> See `docs/CONTRACT_REFERENCE.md` for the complete function reference and
+> `docs/DISPUTE_JURY.md` for the design specification.
+
 ## Scope
 
 Milestone disputes use an impact score supplied when the dispute is filed. The

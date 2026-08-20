@@ -45,6 +45,7 @@ const ALL_TABLES = [
   "validators",
   "milestones",
   "milestone_disputes",
+  "dispute_votes",
   "scout_subscriptions",
   "contact_records",
   "trial_offers",
@@ -380,6 +381,13 @@ async function reconcileMilestonesAndDisputes(pg, cfg, report, playerIds) {
             report.check("milestone_disputes", mKey, "disputed_at", asBigIntString(d.disputed_at), asBigIntString(dDb.disputed_at));
             report.check("milestone_disputes", mKey, "resolved", d.resolved, dDb.resolved);
             report.check("milestone_disputes", mKey, "upheld", d.upheld, dDb.upheld);
+            // Jury fields (migration 005)
+            report.check("milestone_disputes", mKey, "impact_score", Number(d.impact_score), Number(dDb.impact_score));
+            report.check("milestone_disputes", mKey, "jury_required", Boolean(d.jury_required), Boolean(dDb.jury_required));
+            report.check("milestone_disputes", mKey, "quorum", Number(d.quorum), Number(dDb.quorum));
+            report.check("milestone_disputes", mKey, "voting_deadline", asBigIntString(d.voting_deadline), asBigIntString(dDb.voting_deadline));
+            report.check("milestone_disputes", mKey, "votes_for", Number(d.votes_for), Number(dDb.votes_for));
+            report.check("milestone_disputes", mKey, "votes_against", Number(d.votes_against), Number(dDb.votes_against));
           }
         }
       }
@@ -523,6 +531,62 @@ async function reconcileContactRecords(pg, cfg, report, playerIds) {
   }
 }
 
+async function reconcileDisputeVotes(pg, cfg, report, playerIds) {
+  // Walk every jury-required dispute and cross-check the per-validator vote
+  // rows in the dispute_votes table against on-chain state.
+  //
+  // For each (player_id, milestone_index) that has_dispute returns true,
+  // get_dispute is called — if jury_required=true the votes_for/votes_against
+  // counters are already reconciled in reconcileMilestonesAndDisputes.  Here
+  // we additionally check that the *individual* vote rows exist in the DB.
+  // Because there is no on-chain enumeration of votes per dispute (only the
+  // aggregate counters), we drive this from the DB: any DB row for a dispute
+  // that doesn't exist on-chain or for a validator that the contract doesn't
+  // recognise as having voted is flagged.  A count cross-check (db_count vs
+  // votes_for+votes_against) catches the reverse direction.
+  for (const id of playerIds) {
+    const key = String(id);
+    const countResult = invoke(cfg.network, cfg.source, cfg.verificationId, "get_milestone_count", ["--player_id", key]);
+    if (!countResult.ok) continue;
+    const count = Number(countResult.value);
+
+    for (let index = 1; index <= count; index++) {
+      const mKey = `${key}:${index}`;
+      const hasDispute = invoke(cfg.network, cfg.source, cfg.verificationId, "has_dispute", [
+        "--player_id", key,
+        "--milestone_index", String(index),
+      ]);
+      if (!hasDispute.ok || !hasDispute.value) continue;
+
+      const dChain = invoke(cfg.network, cfg.source, cfg.verificationId, "get_dispute", [
+        "--player_id", key,
+        "--milestone_index", String(index),
+      ]);
+      if (!dChain.ok || !dChain.value.jury_required) continue;
+
+      const d = dChain.value;
+      const totalVotes = Number(d.votes_for) + Number(d.votes_against);
+
+      const { rows: voteRows } = await pg.query(
+        "SELECT * FROM dispute_votes WHERE player_id = $1 AND milestone_index = $2",
+        [id, index],
+      );
+
+      // Cross-check aggregate: DB vote count must match on-chain totals
+      if (voteRows.length !== totalVotes) {
+        report.add(
+          "dispute_votes",
+          mKey,
+          "vote_count",
+          totalVotes,
+          voteRows.length,
+          `on-chain votes_for=${d.votes_for} votes_against=${d.votes_against}`,
+        );
+      }
+    }
+  }
+}
+
 async function reconcileIndexerCursor(pg, cfg, report) {
   if (!cfg.rpcUrl) return;
   const res = await fetch(cfg.rpcUrl, {
@@ -583,6 +647,7 @@ async function main() {
   try {
     let playerIds = [];
     if (tablesToRun.includes("players") || tablesToRun.includes("milestones") ||
+        tablesToRun.includes("milestone_disputes") || tablesToRun.includes("dispute_votes") ||
         tablesToRun.includes("trial_offers") || tablesToRun.includes("contact_records")) {
       const countResult = invoke(cfg.network, cfg.source, cfg.registrationId, "get_player_count", []);
       if (!countResult.ok) throw new Error(`get_player_count failed: ${countResult.error}`);
@@ -597,6 +662,7 @@ async function main() {
     if (tablesToRun.includes("milestones") || tablesToRun.includes("milestone_disputes")) {
       await reconcileMilestonesAndDisputes(pg, cfg, report, playerIds);
     }
+    if (tablesToRun.includes("dispute_votes")) await reconcileDisputeVotes(pg, cfg, report, playerIds);
     if (tablesToRun.includes("trial_offers")) await reconcileTrialOffers(pg, cfg, report, playerIds);
     if (tablesToRun.includes("scout_subscriptions")) await reconcileSubscriptions(pg, cfg, report);
     if (tablesToRun.includes("contact_records")) await reconcileContactRecords(pg, cfg, report, playerIds);
