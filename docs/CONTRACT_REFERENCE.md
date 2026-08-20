@@ -263,6 +263,18 @@ stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
 
 ---
 
+#### `get_progress_contract() -> Option<Address>`
+
+Returns the configured progress contract address, or `None` when the link has
+not yet been configured. Read-only and requires no auth.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+---
+
 #### `get_wiring_state() -> RegistrationWiringState`
 
 Returns a snapshot of the single peer-address pointer this contract holds
@@ -805,6 +817,18 @@ link's re-wiring epoch and emits `wiring_updated`, same as `set_progress_contrac
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- update_progress_contract --progress_contract $NEW_PROGRESS_CONTRACT_ID
 ```
+
+---
+
+#### `get_progress_contract() -> Option<Address>`
+
+Returns the configured progress contract address, or `None` when the link has
+not yet been configured. Read-only and requires no auth.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
 
 ---
 
@@ -2564,6 +2588,23 @@ stellar contract invoke --id $PROGRESS_CONTRACT_ID \
 
 ---
 
+#### `get_verification_contract() -> Option<Address>`
+
+Returns the configured verification contract address, or `None` when unset.
+Read-only and requires no auth.
+
+#### `get_registration_contract() -> Option<Address>`
+
+Returns the configured registration contract address, or `None` when unset.
+Read-only and requires no auth.
+
+#### `get_scout_access_contract() -> Option<Address>`
+
+Returns the configured scout_access contract address, or `None` when unset.
+Read-only and requires no auth.
+
+---
+
 #### `get_wiring_state() -> ProgressWiringState`
 
 Returns a snapshot of all three peer-address pointers this contract holds (`registration_contract`, `verification_contract`, `scout_access_contract`), each paired with a re-wiring epoch (`registration_epoch`, `verification_epoch`, `scout_access_epoch` — `0` iff the corresponding address is `None`). `ProgressWiringState::is_fully_wired()` returns `true` iff all three addresses are set. Read-only, no auth required, exempt from the pause/init guards so it stays callable on a mis-wired or paused contract — see [`docs/WIRING_REGISTRY_DESIGN.md`](WIRING_REGISTRY_DESIGN.md).
@@ -2951,6 +2992,18 @@ re-wire the progress contract link across contracts.
 stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
   -- update_progress_contract --addr $NEW_PROGRESS_CONTRACT_ID
 ```
+
+---
+
+#### `get_progress_contract() -> Option<Address>`
+
+Returns the configured progress contract address, or `None` when the link has
+not yet been configured. Read-only and requires no auth.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
 
 ---
 

@@ -428,6 +428,12 @@ impl ScoutAccessContract {
         Self::set_progress_contract(env, addr)
     }
 
+    /// Return the configured progress contract address, or `None` if the
+    /// link has not been configured. Read-only and requires no auth.
+    pub fn get_progress_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ProgressContract)
+    }
+
     /// Wire the registration contract address for Pro-tier scout verification gating.
     /// Admin only. Can be re-invoked to re-wire the link.
     pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
@@ -4286,6 +4292,17 @@ mod tests {
     // -------------------------------------------------------------------------
     // Wiring observability (issue #1041)
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_progress_contract_before_and_after_configuration() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        assert_eq!(client.get_progress_contract(), None);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        assert_eq!(client.get_progress_contract(), Some(progress_addr));
+    }
 
     #[test]
     fn test_get_wiring_state_initially_unconfigured() {
