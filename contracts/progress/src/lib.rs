@@ -155,6 +155,24 @@ impl ProgressContract {
         Ok(())
     }
 
+    /// Return the configured verification contract address, or `None` if the
+    /// link has not been configured. Read-only and requires no auth.
+    pub fn get_verification_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::VerificationContract)
+    }
+
+    /// Return the configured registration contract address, or `None` if the
+    /// link has not been configured. Read-only and requires no auth.
+    pub fn get_registration_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::RegistrationContract)
+    }
+
+    /// Return the configured scout_access contract address, or `None` if the
+    /// link has not been configured. Read-only and requires no auth.
+    pub fn get_scout_access_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ScoutAccessContract)
+    }
+
     /// Propose a replacement administrator. The current admin remains active
     /// until the proposed address calls `accept_admin`.
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ProgressError> {
@@ -1396,6 +1414,51 @@ mod tests {
         testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
         vec, Env, IntoVal, Symbol,
     };
+
+    #[test]
+    fn test_get_verification_contract_before_and_after_configuration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(ProgressContract, ());
+        let client = ProgressContractClient::new(&env, &id);
+
+        assert_eq!(client.get_verification_contract(), None);
+
+        client.initialize(&Address::generate(&env));
+        let peer = Address::generate(&env);
+        client.set_verification_contract(&peer);
+        assert_eq!(client.get_verification_contract(), Some(peer));
+    }
+
+    #[test]
+    fn test_get_registration_contract_before_and_after_configuration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(ProgressContract, ());
+        let client = ProgressContractClient::new(&env, &id);
+
+        assert_eq!(client.get_registration_contract(), None);
+
+        client.initialize(&Address::generate(&env));
+        let peer = Address::generate(&env);
+        client.set_registration_contract(&peer);
+        assert_eq!(client.get_registration_contract(), Some(peer));
+    }
+
+    #[test]
+    fn test_get_scout_access_contract_before_and_after_configuration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(ProgressContract, ());
+        let client = ProgressContractClient::new(&env, &id);
+
+        assert_eq!(client.get_scout_access_contract(), None);
+
+        client.initialize(&Address::generate(&env));
+        let peer = Address::generate(&env);
+        client.set_scout_access_contract(&peer);
+        assert_eq!(client.get_scout_access_contract(), Some(peer));
+    }
 
     /// Deterministically generate a syntactically valid CIDv0 string (46 chars,
     /// "Qm" prefix, base58btc charset) so tests can approve unique milestones.

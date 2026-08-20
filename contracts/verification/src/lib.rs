@@ -314,6 +314,12 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Return the configured progress contract address, or `None` if the
+    /// link has not been configured. Read-only and requires no auth.
+    pub fn get_progress_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ProgressContract)
+    }
+
     /// Store the registration contract address so `dispute_milestone` can
     /// verify wallet↔player_id binding via a cross-contract call (admin only).
     /// Returns AlreadyConfigured if called more than once — use
@@ -4968,6 +4974,19 @@ mod tests {
     // -------------------------------------------------------------------------
     // Wiring observability (issue #1041)
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_progress_contract_before_and_after_configuration() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_progress_contract(), None);
+
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+        assert_eq!(client.get_progress_contract(), Some(progress_addr));
+    }
 
     #[test]
     fn test_get_wiring_state_initially_unconfigured() {

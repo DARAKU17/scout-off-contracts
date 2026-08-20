@@ -28,6 +28,12 @@ Use the structure below for upcoming MINOR or MAJOR contract changes:
 
 > **Breaking-change classification rules:** See [docs/VERSIONING.md — What Constitutes a Breaking Change](VERSIONING.md#what-constitutes-a-breaking-change) for the full criteria (storage layout changes, function signature changes, error code renumbering, event schema changes, cross-contract interface changes).
 
+- Version: `v1.1.0`
+- Release date: `2026-08-20`
+- Contracts affected: `progress`, `registration`, `scout_access`, `verification`
+- Summary: Added unauthenticated scalar peer-address getters for the six links identified by issue #1116. Each getter returns `None` before configuration and the stored address afterward; existing aggregate `get_wiring_state()` APIs remain unchanged.
+- Classification: `Non-breaking (MINOR)`
+
 - Version: `v1.0.1`
 - Release date: `2026-08-20`
 - Contracts affected: `shared-tests` (removed — no deployed contract affected)
