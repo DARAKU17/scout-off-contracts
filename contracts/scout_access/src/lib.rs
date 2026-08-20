@@ -132,6 +132,17 @@ const FEE_CONFIG_PROPOSAL_DELAY_SECS: u64 = 7 * 24 * 60 * 60; // 604,800 seconds
 // are updated over the contract's lifetime.
 const FEE_CONFIG_HISTORY_CAP: u32 = 5;
 
+// #1040: EvidenceAccessGrant enumeration is paged in fixed-size shards keyed
+// by (player_id, page_index) rather than one growing Vec per player, so a
+// popular player who has accumulated thousands of grants over time doesn't
+// make `get_player_access_grants` (or the write path that appends to it)
+// cost proportional to their total history. `MAX_ACCESS_GRANT_PAGE_LIMIT`
+// caps `get_player_access_grants`'s `limit` argument at exactly one page, so
+// a single call touches at most two pages (the tail of one, the head of the
+// next) regardless of `offset` or total grant count. See ci/cpu-cost-budget.md.
+const ACCESS_GRANT_PAGE_SIZE: u32 = 50;
+const MAX_ACCESS_GRANT_PAGE_LIMIT: u32 = 50;
+
 #[contract]
 pub struct ScoutAccessContract;
 
@@ -881,6 +892,62 @@ impl ScoutAccessContract {
             .set(&quota_key, &(current.saturating_add(count)));
     }
 
+    /// Write an `EvidenceAccessGrant(player_id, scout)` and append `scout` to
+    /// that player's paged enumeration index, atomically with the caller's
+    /// storage writes (both happen inside the same contract invocation, so a
+    /// later error in the caller rolls this back along with everything else).
+    ///
+    /// Called from `pay_to_contact` and `batch_contact_players` — the two
+    /// entrypoints that record a *new* `ContactRecord` — exactly once per
+    /// newly-recorded contact, so a grant is issued if and only if the
+    /// contact fee was actually collected. See `docs/EVIDENCE_PRIVACY.md`.
+    fn grant_evidence_access(
+        env: &Env,
+        player_id: u64,
+        scout: &Address,
+        tier: &SubscriptionTier,
+        granted_at: u64,
+    ) -> Result<(), ScoutAccessError> {
+        let count_key = DataKey::EvidenceAccessGrantCount(player_id);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
+        let page_idx = count / ACCESS_GRANT_PAGE_SIZE;
+
+        let page_key = DataKey::EvidenceAccessGrantPage(player_id, page_idx);
+        let mut page: soroban_sdk::Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&page_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        page.push_back(scout.clone());
+        env.storage().persistent().set(&page_key, &page);
+        env.storage()
+            .persistent()
+            .extend_ttl(&page_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        let new_count = safe_add_u32(count, 1).map_err(|_| ScoutAccessError::Overflow)?;
+        env.storage().persistent().set(&count_key, &new_count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        let grant_key = DataKey::EvidenceAccessGrant(player_id, scout.clone());
+        let grant = EvidenceAccessGrant {
+            player_id,
+            scout: scout.clone(),
+            granted_at,
+            tier_at_grant: tier.clone(),
+            revoked: false,
+            revoked_at: None,
+        };
+        env.storage().persistent().set(&grant_key, &grant);
+        env.storage()
+            .persistent()
+            .extend_ttl(&grant_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        events::evidence_access_granted(env, player_id, scout, tier);
+        Ok(())
+    }
+
     /// Pay a micro-fee to unlock a player's contact details.
     ///
     /// Payment flow:
@@ -1009,6 +1076,15 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MAX,
         );
 
+        // #1040: a successful pay_to_contact is the on-chain authorization
+        // event for this scout to request the wrapped decryption key for
+        // player_id's confidential evidence. This runs after every check
+        // above has already passed and the fee has already been collected,
+        // so it is unreachable on any rejected call (see
+        // adversarial_atomicity.rs / atomic_fee_settlement.rs for the
+        // atomicity tests this must satisfy).
+        Self::grant_evidence_access(&env, player_id, &scout, &subscription.tier, record.contacted_at)?;
+
         events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
         Ok(())
     }
@@ -1123,6 +1199,12 @@ impl ScoutAccessContract {
                 PERSISTENT_TTL_MIN,
                 PERSISTENT_TTL_MAX,
             );
+
+            // #1040: same grant issuance as pay_to_contact, for each new
+            // contact this batch call actually recorded (and charged) — a
+            // scout must not be able to bypass evidence-access grants by
+            // reaching a contact through the batch entrypoint instead.
+            Self::grant_evidence_access(&env, player_id, &scout, &sub.tier, record.contacted_at)?;
 
             events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
         }
@@ -1817,6 +1899,140 @@ impl ScoutAccessContract {
                 .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         }
         list
+    }
+
+    // -------------------------------------------------------------------------
+    // Evidence access grants (docs/EVIDENCE_PRIVACY.md)
+    // -------------------------------------------------------------------------
+
+    /// True if `scout` currently holds a non-revoked `EvidenceAccessGrant`
+    /// for `player_id`. The off-chain key-wrapping service calls this (or
+    /// `get_evidence_access_grant`) before honoring a key-wrap request.
+    pub fn has_evidence_access(env: Env, player_id: u64, scout: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, EvidenceAccessGrant>(&DataKey::EvidenceAccessGrant(player_id, scout))
+            .map(|g| !g.revoked)
+            .unwrap_or(false)
+    }
+
+    /// Return the full `EvidenceAccessGrant` record for (player_id, scout),
+    /// if one has ever been issued — including a revoked grant, so callers
+    /// can distinguish "never granted" from "granted, then revoked".
+    pub fn get_evidence_access_grant(
+        env: Env,
+        player_id: u64,
+        scout: Address,
+    ) -> Option<EvidenceAccessGrant> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EvidenceAccessGrant(player_id, scout))
+    }
+
+    /// Page through every `EvidenceAccessGrant` ever issued for `player_id`,
+    /// oldest-first, so a player-facing UI can audit who has access to their
+    /// evidence. `limit` is capped at `MAX_ACCESS_GRANT_PAGE_LIMIT` (50) and
+    /// equals `ACCESS_GRANT_PAGE_SIZE`, so a single call reads at most two
+    /// index pages (the tail of one, the head of the next) plus one grant
+    /// record per returned entry — CPU cost bounded by `limit`, independent
+    /// of how many grants `player_id` has accumulated in total (proven at
+    /// 1,000+ grants by `contracts/scout_access/tests/cost_budget.rs`).
+    ///
+    /// Page through a player's full history by advancing `offset` by the
+    /// number of entries returned in the previous page.
+    pub fn get_player_access_grants(
+        env: Env,
+        player_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<EvidenceAccessGrant> {
+        Self::bump_instance_ttl(&env);
+        let mut results: soroban_sdk::Vec<EvidenceAccessGrant> = soroban_sdk::Vec::new(&env);
+
+        let effective_limit = limit.min(MAX_ACCESS_GRANT_PAGE_LIMIT);
+        if effective_limit == 0 {
+            return results;
+        }
+        let end = match offset.checked_add(effective_limit) {
+            Some(e) => e,
+            None => return results,
+        };
+
+        let mut position = offset;
+        while position < end {
+            let page_idx = position / ACCESS_GRANT_PAGE_SIZE;
+            let page: soroban_sdk::Vec<Address> = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::EvidenceAccessGrantPage(player_id, page_idx))
+            {
+                Some(p) => p,
+                // Pages are appended contiguously with no gaps, so a missing
+                // page means the enumeration ends here.
+                None => break,
+            };
+            let mut i = position % ACCESS_GRANT_PAGE_SIZE;
+            if i >= page.len() {
+                break;
+            }
+            while i < page.len() && position < end {
+                let scout = page.get(i).unwrap();
+                if let Some(grant) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, EvidenceAccessGrant>(&DataKey::EvidenceAccessGrant(
+                        player_id,
+                        scout,
+                    ))
+                {
+                    results.push_back(grant);
+                }
+                i = i.saturating_add(1);
+                position = position.saturating_add(1);
+            }
+        }
+
+        results
+    }
+
+    /// Compliance/abuse takedown: mark an `EvidenceAccessGrant` revoked.
+    ///
+    /// This does not delete the grant record — it is an append-only fact
+    /// that this scout *was* authorized at `granted_at`. Revoking only
+    /// instructs the off-chain key-wrapping service to stop honoring
+    /// *future* key-wrap requests for this (player_id, scout) pair; it
+    /// cannot claw back a wrapped key already delivered before the revoke
+    /// (the contract never held the key — see `docs/EVIDENCE_PRIVACY.md`).
+    /// Idempotent: revoking an already-revoked grant is a no-op that
+    /// returns `Ok(())` without re-emitting the event.
+    pub fn admin_revoke_evidence_access(
+        env: Env,
+        player_id: u64,
+        scout: Address,
+    ) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        let admin = require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        let grant_key = DataKey::EvidenceAccessGrant(player_id, scout.clone());
+        let mut grant: EvidenceAccessGrant = env
+            .storage()
+            .persistent()
+            .get(&grant_key)
+            .ok_or(ScoutAccessError::GrantNotFound)?;
+
+        if grant.revoked {
+            return Ok(());
+        }
+
+        grant.revoked = true;
+        grant.revoked_at = Some(env.ledger().timestamp());
+        env.storage().persistent().set(&grant_key, &grant);
+        env.storage()
+            .persistent()
+            .extend_ttl(&grant_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
+        events::evidence_access_revoked(&env, player_id, &scout, &admin);
+        Ok(())
     }
 
     pub fn get_trial_offer(

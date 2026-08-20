@@ -134,3 +134,34 @@ fn cost_expire_trial_offers() {
     assert_eq!(swept, 20);
     assert_cpu_budget(&env, "expire_trial_offers", EXPIRE_TRIAL_OFFERS_CPU_BUDGET);
 }
+
+/// #1040: proves `get_player_access_grants`' CPU cost is independent of a
+/// player's total historical grant count. A single popular player
+/// accumulates 1,000 grants from 1,000 distinct scouts, then a mid-history
+/// page read (offset 500, spanning a page boundary) is measured — if the
+/// query scanned the whole history instead of seeking directly to the
+/// relevant page(s), this would blow well past the same budget a small
+/// player's read costs.
+#[test]
+fn cost_get_player_access_grants_at_1000_grants() {
+    let (env, client, xlm) = setup();
+    let player_id = 1u64;
+
+    for _ in 0..1_000u32 {
+        let scout = Address::generate(&env);
+        fund(&env, &xlm, &scout);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &player_id);
+    }
+
+    // Offset 500 with page size 50 lands mid-page (page 10, index 0) —
+    // not a boundary-favorable case.
+    env.cost_estimate().budget().reset_default();
+    let page = client.get_player_access_grants(&player_id, &500u32, &50u32);
+    assert_eq!(page.len(), 50);
+    assert_cpu_budget(
+        &env,
+        "get_player_access_grants(1000 total, page of 50)",
+        GET_PLAYER_ACCESS_GRANTS_CPU_BUDGET,
+    );
+}

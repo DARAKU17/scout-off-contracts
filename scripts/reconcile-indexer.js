@@ -49,6 +49,7 @@ const ALL_TABLES = [
   "scout_subscriptions",
   "contact_records",
   "trial_offers",
+  "evidence_access_grants",
   "indexer_cursor",
 ];
 
@@ -666,6 +667,9 @@ async function main() {
     if (tablesToRun.includes("trial_offers")) await reconcileTrialOffers(pg, cfg, report, playerIds);
     if (tablesToRun.includes("scout_subscriptions")) await reconcileSubscriptions(pg, cfg, report);
     if (tablesToRun.includes("contact_records")) await reconcileContactRecords(pg, cfg, report, playerIds);
+    if (tablesToRun.includes("evidence_access_grants")) {
+      await reconcileEvidenceAccessGrants(pg, cfg, report, playerIds);
+    }
     if (tablesToRun.includes("indexer_cursor")) await reconcileIndexerCursor(pg, cfg, report);
   } finally {
     await pg.end();

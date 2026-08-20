@@ -191,4 +191,9 @@ mod tests {
     fn pro_contact_limit_reached_is_code_20() {
         assert_eq!(ScoutAccessError::ProContactLimitReached as u32, 20);
     }
+
+    #[test]
+    fn grant_not_found_is_code_30() {
+        assert_eq!(ScoutAccessError::GrantNotFound as u32, 30);
+    }
 }

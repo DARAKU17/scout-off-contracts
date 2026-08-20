@@ -310,3 +310,29 @@ pub fn subscription_record_restored(env: &Env, admin: &Address, scout: &Address)
         scout.clone(),
     );
 }
+
+/// topics: (event_name, scout)  data: (player_id, tier_at_grant)
+///
+/// Emitted exactly once, atomically with a successful `pay_to_contact` /
+/// `batch_contact_players` call, when an `EvidenceAccessGrant` is written.
+/// The frontend/backend key-wrapping service watches this event to deliver
+/// a viewer-specific wrapped decryption key — see `docs/EVIDENCE_PRIVACY.md`.
+pub fn evidence_access_granted(env: &Env, player_id: u64, scout: &Address, tier: &SubscriptionTier) {
+    env.events().publish(
+        (Symbol::new(env, EVIDENCE_ACCESS_GRANTED), scout.clone()),
+        (player_id, tier.clone()),
+    );
+}
+
+/// topics: (event_name, scout)  data: (player_id, admin)
+///
+/// Emitted by `admin_revoke_evidence_access`. This only signals that the
+/// off-chain key-wrapping service should stop honoring future key-wrap
+/// requests for this (player_id, scout) pair — it cannot revoke a wrapped
+/// key that was already delivered before this event.
+pub fn evidence_access_revoked(env: &Env, player_id: u64, scout: &Address, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, EVIDENCE_ACCESS_REVOKED), scout.clone()),
+        (player_id, admin.clone()),
+    );
+}

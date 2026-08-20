@@ -2838,6 +2838,26 @@ greater than zero; either function returns `InvalidInput` otherwise.
 
 See the [Glossary](GLOSSARY.md#feeconfig) for a plain-language description of each field.
 
+### `EvidenceAccessGrant` Struct
+
+On-chain proof that a scout is authorized to request the off-chain wrapped
+decryption key for a player's confidential evidence. See
+[EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md) for the full model, including why
+this is an append-only fact rather than a live entitlement check.
+
+| Field | Rust Type | Description |
+|---|---|---|
+| `player_id` | `u64` | Player whose evidence this grant authorizes access to. |
+| `scout` | `Address` | Scout wallet authorized by this grant. |
+| `granted_at` | `u64` | Unix-seconds ledger timestamp when the grant was issued. |
+| `tier_at_grant` | `SubscriptionTier` | The scout's subscription tier at the moment of issuance. Recorded for audit only; not re-checked afterward. |
+| `revoked` | `bool` | `true` once `admin_revoke_evidence_access` has been called for this grant. |
+| `revoked_at` | `Option<u64>` | Unix-seconds ledger timestamp of revocation, if any. |
+
+Written exactly once, atomically, by a successful `pay_to_contact` or
+`batch_contact_players` call — never on a rejected call. Never deleted;
+`admin_revoke_evidence_access` only flips `revoked`/`revoked_at`.
+
 > [!NOTE]
 > **Historical Fee Configs & Auditability**
 > The `scout_access` contract stores the *current* `FeeConfig` on-chain (retrievable via `get_fee_config`) and a bounded on-chain trail of the **last 5 previous configs** (retrievable via `get_fee_config_history`). The history list is maintained oldest-first and is capped at 5 entries; when the cap is reached the oldest entry is evicted on the next `update_fee_config` call.
@@ -3355,6 +3375,11 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 Pay a micro-fee to unlock a player's contact details. Scout must have an active
 (non-expired) subscription.
 
+**Evidence access grant**: on success, atomically writes an
+`EvidenceAccessGrant(player_id, scout)` and emits `evidence_access_granted` —
+see [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md). This never happens on a
+rejected call.
+
 **Pro-tier contact limit**: Pro-tier scouts are capped at `pro_contact_limit`
 unique player contacts per subscription period (configured in `FeeConfig`).
 Once the limit is reached, further `pay_to_contact` calls return
@@ -3418,6 +3443,11 @@ The total fee for all new contacts is deducted in a single token transfer.
 Returns the count of new contacts recorded.
 
 Scout must have an active (non-expired) subscription.
+
+**Evidence access grant**: for each newly-recorded contact in the batch
+(never for an already-contacted player that was silently skipped), atomically
+writes an `EvidenceAccessGrant` and emits `evidence_access_granted`, same as
+`pay_to_contact` — see [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md).
 
 | | |
 |---|---|
@@ -4088,6 +4118,89 @@ stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
 
 ---
 
+#### `has_evidence_access(player_id: u64, scout: Address) -> bool`
+
+Return `true` if `scout` currently holds a non-revoked `EvidenceAccessGrant`
+for `player_id`. This is the fast check the off-chain key-wrapping service
+should call before honoring a wrapped-key request. See
+[EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- has_evidence_access --player_id 1 --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_evidence_access_grant(player_id: u64, scout: Address) -> Option<EvidenceAccessGrant>`
+
+Return the full grant record for `(player_id, scout)`, if one has ever been
+issued — including a revoked grant, so callers can distinguish "never
+granted" from "granted, then revoked".
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_evidence_access_grant --player_id 1 --scout $SCOUT_ADDRESS
+```
+
+---
+
+#### `get_player_access_grants(player_id: u64, offset: u32, limit: u32) -> Vec<EvidenceAccessGrant>`
+
+Page through every `EvidenceAccessGrant` ever issued for `player_id`,
+oldest-first, for a player-facing "who has access to my evidence" audit UI.
+
+`limit` is capped at 50 (`MAX_ACCESS_GRANT_PAGE_LIMIT`), matching the
+on-chain index page size (`ACCESS_GRANT_PAGE_SIZE`), so a single call reads
+at most two index pages plus one grant record per returned entry — cost
+bounded by `limit`, independent of the player's total historical grant
+count (proven at 1,000+ grants in `contracts/scout_access/tests/cost_budget.rs`).
+Page through a player's full history by advancing `offset` by the number of
+entries the previous call returned.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Errors** | None |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- get_player_access_grants --player_id 1 --offset 0 --limit 50
+```
+
+---
+
+#### `admin_revoke_evidence_access(player_id: u64, scout: Address) -> Result<(), ScoutAccessError>`
+
+Compliance/abuse takedown: mark an `EvidenceAccessGrant` revoked. Does not
+delete the record — see [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md) for why
+grants are append-only facts, and why this only gates *future* key-wrap
+requests rather than clawing back an already-delivered key. Idempotent:
+revoking an already-revoked grant returns `Ok(())` without re-emitting the
+event or changing `revoked_at`.
+
+| | |
+|---|---|
+| **Auth** | admin must sign |
+| **Errors** | `NotInitialized` · `GrantNotFound` |
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- admin_revoke_evidence_access --player_id 1 --scout $SCOUT_ADDRESS
+```
+
+---
+
 Manages the trusted validator registry and milestone approvals.
 
 | Function | Auth | Description |
@@ -4628,6 +4741,9 @@ All events follow the unified `(Symbol, actor)` topic schema introduced in #246.
 | `pay_to_contact_paused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` engaged (issue #1056) |
 | `pay_to_contact_unpaused` | event_name, admin (Address) | () | Function-scoped circuit breaker for `pay_to_contact` released |
 | `wiring_updated` | event_name, admin (Address), link (Symbol) | new_address (Address), new_epoch (u32) | `set_progress_contract` / `update_progress_contract` / `set_registration_contract` re-wired a peer link — `link` is `"progress_contract"` or `"registration_contract"` (issue #1041 — see [Cross-Contract Wiring](#cross-contract-wiring) below) |
+| `subscription_record_restored` | event_name, admin (Address) | scout (Address) | `restore_subscription_record` re-extends an archived or expired subscription entry's TTL back to the policy value |
+| `evidence_access_granted` | event_name, scout (Address) | player_id (u64), tier_at_grant (SubscriptionTier) | `pay_to_contact` / `batch_contact_players` atomically authorizes this scout to request the wrapped decryption key for this player's evidence — see [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md) |
+| `evidence_access_revoked` | event_name, scout (Address) | player_id (u64), admin (Address) | `admin_revoke_evidence_access` — off-chain key-wrapping service should stop honoring *future* requests for this pair |
 
 ---
 
