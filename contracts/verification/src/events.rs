@@ -5,6 +5,8 @@ pub const MILESTONE_APPROVED: &str = "milestone_approved";
 pub const VALIDATOR_REGISTERED: &str = "validator_registered";
 pub const VALIDATOR_REVOKED: &str = "validator_revoked";
 pub const VALIDATOR_REVOKED_FOR_CAUSE: &str = "validator_revoked_for_cause";
+pub const VALIDATOR_RESTORED: &str = "validator_restored";
+pub const VALIDATOR_TRANSFERRED: &str = "validator_transferred";
 pub const CONTRACT_PAUSED: &str = "contract_paused";
 pub const CONTRACT_UNPAUSED: &str = "contract_unpaused";
 pub const APPROVE_MILESTONE_PAUSED: &str = "approve_milestone_paused";
@@ -87,7 +89,7 @@ pub fn validator_revoked_for_cause(env: &Env, admin: &Address, wallet: &Address,
 /// topics: (event_name, admin)  data: wallet
 pub fn validator_restored(env: &Env, admin: &Address, wallet: &Address) {
     env.events().publish(
-        (Symbol::new(env, "validator_restored"), admin.clone()),
+        (Symbol::new(env, VALIDATOR_RESTORED), admin.clone()),
         wallet.clone(),
     );
 }
@@ -100,7 +102,7 @@ pub fn validator_transferred(
     new_wallet: &Address,
 ) {
     env.events().publish(
-        (Symbol::new(env, "validator_transferred"), admin.clone()),
+        (Symbol::new(env, VALIDATOR_TRANSFERRED), admin.clone()),
         (old_wallet.clone(), new_wallet.clone()),
     );
 }
