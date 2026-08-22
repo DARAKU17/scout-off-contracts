@@ -166,6 +166,7 @@ To speed up audits:
 3. **Requires database access** for indexer comparison. Without `DATABASE_URL`, only validates internal consistency and live state.
 4. **Does not audit fee_config_history, admin_transfers, or validator_history** — these are pure event logs with no "current state" to reconstruct (they are audited separately, see [INDEXER.md](INDEXER.md)).
 5. **Does not replay `evidence_access_granted` / `evidence_access_revoked`** — `scripts/reconcile-indexer.js` reconciles the `evidence_access_grants` table directly against `scout_access.get_player_access_grants` (a current-state getter, not an event replay), which is sufficient for that data shape; see [INDEXER.md](INDEXER.md) and [EVIDENCE_PRIVACY.md](EVIDENCE_PRIVACY.md). Event-chain validation here (e.g. "no `evidence_access_revoked` without a prior `evidence_access_granted` for the same pair") is a reasonable future extension of this tool but is not implemented yet.
+6. **Does not audit the k-of-n attestation flow** — `attestation_recorded`, `attestation_window_expired`, and `validator_pending_votes_invalidated` are not currently replayed or chain-validated by this tool. Pending vote tallies, per-validator vote status, and round resets are therefore not cross-validated against on-chain state by `audit-event-history.js` today.
 
 ---
 
