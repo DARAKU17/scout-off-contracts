@@ -32,7 +32,6 @@ This breaking change is **intentional and expected**, as documented in:
 - `CHANGELOG.md` — v0.4.0 entry with migration guide
 - `docs/VERSIONING.md` — v0.4.0 version history row (MAJOR)
 - `docs/DISPUTE_JURY.md` — design spec (now marked Implemented)
-- `docs/DISPUTE_RESOLUTION.md` — design spec (now marked Implemented)
 
 ## Migration path
 

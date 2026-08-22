@@ -47,6 +47,9 @@ The dispute filer is not restricted unless they are also the original approver (
 
 Configurable via `set_jury_config` (admin only).
 
+A dispute snapshots its quorum and voting deadline when it is filed, so later
+configuration changes cannot alter an in-progress vote.
+
 ## Tie-breaking
 
 When `tally_dispute` runs:
