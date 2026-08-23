@@ -211,9 +211,9 @@ Per ai.md and standard microservice patterns:
 
 | Component | Repo | Owner | Responsibility |
 |-----------|------|-------|-----------------|
-| On-chain verified-tier gating | this repo | @StellarCN | Reject Pro subscriptions for unverified scouts via contract enforcement |
+| On-chain verified-tier gating | this repo | @scout-off | Reject Pro subscriptions for unverified scouts via contract enforcement |
 | Off-chain KYC gate | frontend/backend | @frontend-team | Prevent UI submission of `register_scout` calls from unverified identities |
-| Scout identity verification (admin) | this repo | @StellarCN | Admin `verify_scout` function to mark scouts as verified |
+| Scout identity verification (admin) | this repo | @scout-off | Admin `verify_scout` function to mark scouts as verified |
 | KYC service (identity provider) | external | e.g., Stripe, Onfido | Provide proof-of-personhood, document verification, etc. |
 | Wallet tracking (if any) | frontend/backend | @frontend-team | Optional: maintain off-chain ledger of identity → wallet mappings for audit trails |
 
