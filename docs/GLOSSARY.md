@@ -34,6 +34,25 @@ until an operator deliberately opts into k-of-n mode.
 
 ---
 
+## Auto-Renewal
+
+A mechanism that lets a scout's subscription be renewed automatically when it
+expires, without the scout signing each renewal transaction themselves. The
+scout opts in via `set_auto_renew(scout, enabled)` (emitting the
+`auto_renew_set` event); after that, any keeper — an off-chain cron job, bot,
+or the scout — can call `renew_if_due(scout)` when the subscription is due,
+emitting `subscription_auto_renewed` on success.
+
+If auto-renewal is not enabled for a scout, `renew_if_due` returns the
+`AutoRenewNotEnabled` error (`ScoutAccessError` code 28).
+
+- Relevant functions: `set_auto_renew`, `renew_if_due`, `get_auto_renew` — see
+  [CONTRACT_REFERENCE.md — scout_access](CONTRACT_REFERENCE.md#scout_access).
+- Related: [Subscription Tier](#subscription-tier),
+  [Sybil Resistance](#sybil-resistance).
+
+---
+
 ## CID (Content Identifier)
 
 A self-describing content hash produced by IPFS or Arweave. CIDs are stored
@@ -269,6 +288,26 @@ fee with no proration.
 
 - Relevant functions: `subscribe`, `get_subscription` — see
   [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md#scout_access).
+- Related: [Auto-Renewal](#auto-renewal).
+
+---
+
+## Sybil Resistance
+
+The access-control mechanism that gates Pro-tier subscriptions behind a
+verified-scout requirement. `subscribe()` rejects a scout with
+`ScoutNotVerified` (`ScoutAccessError` code 27) when the scout is not verified
+(or not found), preventing one person from creating many fake scout accounts to
+defeat per-scout tier limits.
+
+A scout becomes verified when the platform admin calls `verify_scout(scout_id)`
+(marking the profile `verified: true`). The full design rationale — including
+the "On-chain verified-tier gating" strategy and the admin verification flow —
+is documented in [SYBIL_MITIGATION_DESIGN.md](SYBIL_MITIGATION_DESIGN.md).
+
+- Relevant functions: `verify_scout`, `get_verification`, `subscribe` — see
+  [CONTRACT_REFERENCE.md — scout_access](CONTRACT_REFERENCE.md#scout_access).
+- Related: [Scout](#scout), [Subscription Tier](#subscription-tier).
 
 ---
 
