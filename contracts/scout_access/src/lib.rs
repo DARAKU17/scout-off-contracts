@@ -1635,6 +1635,48 @@ impl ScoutAccessContract {
         Ok(swept)
     }
 
+    /// Admin-only rescue valve: directly refund one identified, still
+    /// outstanding `TrialEscrow` entry — e.g. one flagged by a scout
+    /// complaint or surfaced by the indexer's drift-detection — without
+    /// waiting for `expire_trial_offers` to reach it. See
+    /// docs/TRIAL_ESCROW_IMPACT.md, recommendation 2.
+    ///
+    /// Rejects with `TrialEscrowNotOutstanding` if `(player_id, offer_index)`
+    /// has no live `TrialEscrow` entry: already confirmed, already
+    /// expired/refunded, already admin-refunded, or never logged. Because the
+    /// check and the removal target the same record, a retried call after a
+    /// successful refund finds nothing outstanding and safely no-ops into
+    /// that same error instead of transferring a second time.
+    pub fn admin_refund_trial_escrow(
+        env: Env,
+        player_id: u64,
+        offer_index: u32,
+        to: Address,
+    ) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        require_admin(&env, &DataKey::Admin, ADMIN_BUMP_LEDGERS)?;
+
+        let escrow_key = DataKey::TrialEscrow(player_id, offer_index);
+        let escrow: TrialEscrow = env
+            .storage()
+            .persistent()
+            .get(&escrow_key)
+            .ok_or(ScoutAccessError::TrialEscrowNotOutstanding)?;
+
+        let token_addr = Self::get_token(&env)?;
+        let contract_addr = env.current_contract_address();
+        token::Client::new(&env, &token_addr).transfer(&contract_addr, &to, &escrow.amount);
+
+        // Same cleanup order as confirm_trial_offer/expire_trial_offers:
+        // drop the primary record, then scrub the enumeration index, so no
+        // later sweep or late confirm can see or act on this entry again.
+        env.storage().persistent().remove(&escrow_key);
+        Self::remove_from_outstanding_trial_escrows(&env, player_id, offer_index);
+
+        events::trial_escrow_admin_refunded(&env, player_id, offer_index, &to, escrow.amount);
+        Ok(())
+    }
+
     /// Propose a replacement administrator. The current admin remains active
     /// until the proposed address calls `accept_admin`.
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ScoutAccessError> {
