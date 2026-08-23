@@ -231,7 +231,7 @@ admin to sign the first step. This is the scenario one level worse than
 the team cannot even issue that first `pause_contract` call.
 
 For response-time expectations and incident-severity guidance, see
-[`SECURITY.md#emergency-response-immediate-mitigation`](SECURITY.md#emergency-response-immediate-mitigation).
+[`SECURITY.md#emergency-response-immediate-mitigation`](../SECURITY.md#emergency-response-immediate-mitigation).
 
 This section assumes the multisig/timelock admin work tracked in
 [issue #609](https://github.com/scout-off/scout-off-contracts/issues/609)
