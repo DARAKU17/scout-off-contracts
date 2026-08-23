@@ -51,7 +51,7 @@ A change is **non-breaking** (MINOR or PATCH) if:
 
 ## Upgrade Checklist
 
-The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYMENT.md — Upgrading a Deployed Contract](docs/DEPLOYMENT.md#upgrading-a-deployed-contract) for manual steps).
+The upgrade procedure is implemented in `scripts/upgrade.sh` (see [DEPLOYMENT.md — Upgrading a Deployed Contract](DEPLOYMENT.md#upgrading-a-deployed-contract) for manual steps).
 
 ```bash
 ./scripts/upgrade.sh <network> <contract_name> <new_wasm_path>
@@ -95,7 +95,7 @@ The upgrade procedure is implemented in `scripts/upgrade.sh` (see [docs/DEPLOYME
 This is the initial release. No prior on-chain state exists. The migration path from v0.1.0 to any future v0.x.0 (minor, backward-compatible) release is:
 
 1. **Build the new WASM** for the changed contract(s).
-2. **Install and upgrade** each changed contract using the procedure in [DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrading-a-deployed-contract).
+2. **Install and upgrade** each changed contract using the procedure in [DEPLOYMENT.md](DEPLOYMENT.md#upgrading-a-deployed-contract).
 3. **Re-verify instance storage** — fee config and contract links are in instance storage and must be confirmed after each WASM swap.
 4. **Re-wire cross-contract links** if any contract address changed (i.e., a contract was re-deployed rather than upgraded in-place).
 5. **Regenerate bindings** and redeploy the backend/frontend.
@@ -106,7 +106,7 @@ All persistent-storage keys in v0.1.0 use the `DataKey` enum defined in each con
 
 ### Error code compatibility (v0.1.0 baseline)
 
-Error code assignments for v0.1.0 are fixed as documented in [docs/CONTRACT_REFERENCE.md](docs/CONTRACT_REFERENCE.md). Future minor releases may only **append** new error codes at the end of each enum. SDK consumers should handle unknown error codes gracefully (treat them as unexpected errors and surface to the user).
+Error code assignments for v0.1.0 are fixed as documented in [CONTRACT_REFERENCE.md](CONTRACT_REFERENCE.md). Future minor releases may only **append** new error codes at the end of each enum. SDK consumers should handle unknown error codes gracefully (treat them as unexpected errors and surface to the user).
 
 > **Known gap:** `ScoutAccessError` code 13 is intentionally reserved and will never be assigned. See `contracts/scout_access/src/errors.rs` for the inline explanation.
 
@@ -120,7 +120,7 @@ When adding new entries to the Version History table:
 - **Contract Scope**: All four contracts (`registration`, `verification`, `progress`, `scout_access`) were initially released together at `v0.1.0`. Future releases may update all contracts in lockstep or target specific contracts individually. Specify the scope in the **Version** column (e.g., `v0.2.0 (all)` or `v0.2.0 (verification)`).
 - **SemVer Bump Type**: Explicitly classify each change as `MAJOR` (breaking storage/API change), `MINOR` (backward-compatible feature/event/error addition), or `PATCH` (backward-compatible bug fix/gas optimization) in the **Type** column.
 - **Summary**: Provide a concise summary of changes, explicitly calling out breaking changes if `MAJOR`.
-- **Cross-reference**: Every entry must mirror the corresponding entry in [CHANGELOG.md](CHANGELOG.md) — keep both files in sync.
+- **Cross-reference**: Every entry must mirror the corresponding entry in [CHANGELOG.md](../CHANGELOG.md) — keep both files in sync.
 
 > **Current enforcement gap:** Keeping this Version History table current is
 > currently a convention-only process that relies on contributor discipline; no
