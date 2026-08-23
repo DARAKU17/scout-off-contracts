@@ -1,6 +1,6 @@
 # TTL (Time-To-Live) and Persistent Storage Archival Policy
 
-**Issue:** [#705](https://github.com/StellarCN/scout-off-contracts/issues/705)
+**Issue:** [#705](https://github.com/scout-off/scout-off-contracts/issues/705)
 
 ## Overview
 
