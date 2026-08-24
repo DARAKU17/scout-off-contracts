@@ -122,6 +122,13 @@ pub enum ScoutAccessError {
     /// whole-contract pause (issue #1056). Mirrors `verification`'s
     /// `ApproveMilestonePaused`.
     PayToContactPaused = 36,
+
+    // ── Trial escrow rescue ──
+    /// `admin_refund_trial_escrow` targeted a `(player_id, offer_index)` pair
+    /// with no outstanding `TrialEscrow` entry: it was never created, or was
+    /// already released by `confirm_trial_offer` or `expire_trial_offers`
+    /// (or by a prior `admin_refund_trial_escrow` call).
+    TrialEscrowNotOutstanding = 37,
 }
 
 impl AdminError for ScoutAccessError {

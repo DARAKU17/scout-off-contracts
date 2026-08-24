@@ -13,6 +13,12 @@
 //!  5. Admin sweep  — `expire_trial_offers` proactively refunds stale escrows
 //!     that were never confirmed: escrow refunded, event emitted,
 //!     outstanding-escrows list cleaned up, return count correct.
+//!  6. Admin rescue — `admin_refund_trial_escrow` (issue: interim mitigation
+//!     from docs/TRIAL_ESCROW_IMPACT.md) directly refunds one identified,
+//!     still-outstanding entry: correct payout, index cleanup so it can't be
+//!     double-swept, a later confirm on the same offer fails, and non-
+//!     outstanding targets (never logged / already confirmed / already
+//!     admin-refunded) are rejected.
 //!
 //! Every test asserts both the returned `Result` variant and the on-chain
 //! events emitted, matching the rigor used in the existing integration tests.
@@ -506,5 +512,107 @@ fn test_expire_trial_offers_skips_active_escrow() {
         xlm_balance(&h, &scout),
         bal_before - ESCROW_AMOUNT,
         "scout balance must not change when no escrow is expired"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Admin rescue: admin_refund_trial_escrow
+// ---------------------------------------------------------------------------
+
+/// Admin directly rescues one identified, still-outstanding TrialEscrow entry.
+///
+/// Asserts:
+///   - Exactly `trial_offer_escrow_stroops` is transferred to `to`
+///   - `trial_escrow_admin_refunded` event is emitted
+///   - The entry is dropped from OutstandingTrialEscrows, so a later
+///     `expire_trial_offers` sweep finds nothing left for it
+///   - A subsequent `confirm_trial_offer` on the same offer fails instead of
+///     double-releasing funds
+#[test]
+fn test_admin_refund_trial_escrow_rescues_outstanding_entry() {
+    let h = setup();
+    let player_id: u64 = 30;
+    let player_wallet = Address::generate(&h.env);
+    let rescue_to = Address::generate(&h.env);
+
+    advance_player(&h, player_id, 2);
+    let scout = setup_elite_scout(&h, player_id);
+    let index = log_offer(&h, &scout, player_id, CID_1, CID_2);
+    let rescue_before = xlm_balance(&h, &rescue_to);
+
+    h.scout_access
+        .admin_refund_trial_escrow(&player_id, &index, &rescue_to);
+    let refund_events = h.env.events().all();
+
+    assert_eq!(
+        xlm_balance(&h, &rescue_to),
+        rescue_before + ESCROW_AMOUNT,
+        "rescue address must receive exactly the escrowed amount"
+    );
+    assert!(
+        find_event(refund_events.events(), "trial_escrow_admin_refunded").is_some(),
+        "trial_escrow_admin_refunded event must be emitted"
+    );
+
+    // Removed from the index, not just from TrialEscrow — a later sweep
+    // must not find (and thus not double-pay) this entry.
+    let swept = h.scout_access.expire_trial_offers(&20u32);
+    assert_eq!(
+        swept, 0,
+        "admin-refunded entry must not be double-swept by expire_trial_offers"
+    );
+
+    // A late confirm must fail rather than double-release funds.
+    let result =
+        h.scout_access
+            .try_confirm_trial_offer(&player_wallet, &player_id, &index, &None::<String>);
+    assert!(
+        result.is_err(),
+        "confirm_trial_offer on an admin-refunded offer must fail, not double-pay"
+    );
+}
+
+/// Rejects targets with no outstanding escrow: never logged, already
+/// confirmed, or already rescued by a prior `admin_refund_trial_escrow` call.
+#[test]
+fn test_admin_refund_trial_escrow_rejects_non_outstanding_targets() {
+    let h = setup();
+    let rescue_to = Address::generate(&h.env);
+
+    // Never logged at all — no TrialEscrow record ever existed.
+    let never_logged = h
+        .scout_access
+        .try_admin_refund_trial_escrow(&999u64, &1u32, &rescue_to);
+    assert!(never_logged.is_err(), "refunding a never-created escrow must fail");
+
+    // Already confirmed via confirm_trial_offer.
+    let player_confirmed: u64 = 31;
+    let player_wallet = Address::generate(&h.env);
+    advance_player(&h, player_confirmed, 2);
+    let scout_a = setup_elite_scout(&h, player_confirmed);
+    let index_a = log_offer(&h, &scout_a, player_confirmed, CID_3, CID_4);
+    h.scout_access
+        .confirm_trial_offer(&player_wallet, &player_confirmed, &index_a, &None::<String>);
+    let already_confirmed = h
+        .scout_access
+        .try_admin_refund_trial_escrow(&player_confirmed, &index_a, &rescue_to);
+    assert!(
+        already_confirmed.is_err(),
+        "refunding an already-confirmed escrow must fail"
+    );
+
+    // Already rescued by a prior admin_refund_trial_escrow call.
+    let player_double: u64 = 32;
+    advance_player(&h, player_double, 2);
+    let scout_b = setup_elite_scout(&h, player_double);
+    let index_b = log_offer(&h, &scout_b, player_double, CID_5, CID_6);
+    h.scout_access
+        .admin_refund_trial_escrow(&player_double, &index_b, &rescue_to);
+    let already_refunded = h
+        .scout_access
+        .try_admin_refund_trial_escrow(&player_double, &index_b, &rescue_to);
+    assert!(
+        already_refunded.is_err(),
+        "a second admin_refund_trial_escrow on the same entry must fail, not double-pay"
     );
 }

@@ -11,23 +11,32 @@
 
 ## Background
 
-### The confirmed code gap
+### The confirmed code gap (status: fixed)
+
+> **Update:** this section originally described a state where `log_trial_offer`
+> logged trial offers without collecting any escrow, so `trial_offer_escrow_stroops`
+> was purely aspirational and no capital was actually at risk. That has since
+> shipped (#795): `log_trial_offer` now collects the escrow via a real token
+> transfer, `contracts/scout_access/src/types.rs` defines `TrialEscrow` and
+> `trial_offer_escrow_stroops` is a live `FeeConfig` field, and
+> `expire_trial_offers` is an implemented, bounded sweep (see
+> `docs/GAS_GRIEFING_AUDIT.md`) rather than a no-op stub. The original risk
+> analysis and recommendations below remain valid — they just now describe a
+> present, not a hypothetical, condition.
 
 The current `log_trial_offer` implementation in `contracts/scout_access/src/lib.rs`
-logs a trial offer on-chain and advances a player to `EliteTier`, but the
-`expire_trial_offers` function — which is supposed to sweep unconfirmed trial
-offers and refund locked escrow — **is currently a no-op stub**. Nothing
-releases escrow back to scouts for offers that are never confirmed.
-
-If a `trial_offer_escrow_stroops` fee is ever introduced (the natural next step
-once confirm/expire flows are built), every scout-logged trial offer that is
-never confirmed or explicitly expired will permanently lock that escrow in the
-contract with no recovery path under the current code.
+logs a trial offer on-chain, collects `trial_offer_escrow_stroops` from the
+scout into a `TrialEscrow` record, and advances a player to `EliteTier`.
+Unconfirmed offers are released by two paths: `confirm_trial_offer`'s own
+late-expiry branch, and the admin-run `expire_trial_offers` sweep. Recommendation
+2 below (an admin-callable manual rescue valve, `admin_refund_trial_escrow`)
+has also since been implemented as an additional, targeted release path for
+individual identified stuck entries.
 
 This document cross-references:
 
 - **expire_trial_offers implementation issue** — the code-level fix (sweep
-  function that refunds stale escrow).
+  function that refunds stale escrow). Implemented.
 - **TrialEscrow enumeration-index issue** — enumerating locked escrow entries
   so admin tooling can identify and manually recover them.
 
@@ -158,28 +167,28 @@ The fix is also low-risk: `expire_trial_offers` is already stubbed; it needs
 a well-defined expiry window, an index over unconfirmed offers, and a token
 transfer back to the scout. This is a bounded, testable change.
 
-### 2. Implement an interim admin mitigation — YES, in parallel
+### 2. Implement an interim admin mitigation — DONE
 
-While the proper sweep function is being built, add an admin-callable
-`admin_refund_trial_escrow(player_id: u64, offer_index: u32, to: Address)`
-function — analogous to the existing `refund_subscription` — that allows
-manual rescue of identified stuck escrow entries.
+`admin_refund_trial_escrow(player_id: u64, offer_index: u32, to: Address)` is
+now implemented — admin-only, analogous to `refund_subscription` — and lets
+operations directly resolve one specific, identified stuck `TrialEscrow`
+entry (e.g. one flagged by a scout complaint) without waiting for a generic
+`expire_trial_offers` sweep to reach it. It rejects any target that is not
+currently outstanding (already confirmed, already expired/refunded, or never
+logged) and removes the entry from `OutstandingTrialEscrows` on success, so
+neither a later sweep nor a late `confirm_trial_offer` can act on it again.
 
-This provides a zero-downtime safety valve: operations can manually refund
-scouts who complain about locked capital while the automated fix is
-developed and audited.
+This remains useful as a standing operational tool even though
+`expire_trial_offers` is now implemented: the sweep is generic, capped, and
+best-effort, while this gives a direct, deliberate path for one record.
 
-The TrialEscrow enumeration-index fix (tracked separately) is a prerequisite
-for making this admin tooling practical, since without an index, identifying
-stuck offers requires iterating all `(player_id, offer_index)` pairs off-chain.
+### 3. `trial_offer_escrow_stroops` — now in place
 
-### 3. Do not introduce `trial_offer_escrow_stroops` without the fix in place
-
-The current implementation logs trial offers without collecting any escrow,
-so no capital is currently at risk. **Do not add the escrow collection step**
-to `log_trial_offer` until `expire_trial_offers` is functional and the
-enumeration index exists. Introducing escrow collection before the release
-path exists converts a future risk into an immediate certainty.
+This recommendation's premise (escrow collection not yet existing) is moot:
+`trial_offer_escrow_stroops` is a live `FeeConfig` field and `log_trial_offer`
+collects it via an actual token transfer (#795). The release paths this
+recommendation was gating on — `expire_trial_offers` and, now,
+`admin_refund_trial_escrow` — are both implemented.
 
 ---
 

@@ -8,6 +8,7 @@ pub const PLAYER_CONTACTED: &str = "player_contacted";
 pub const TRIAL_OFFER_LOGGED: &str = "trial_offer_logged";
 pub const TRIAL_OFFER_CONFIRMED: &str = "trial_offer_confirmed";
 pub const TRIAL_OFFER_EXPIRED: &str = "trial_offer_expired";
+pub const TRIAL_ESCROW_ADMIN_REFUNDED: &str = "trial_escrow_admin_refunded";
 pub const FEES_WITHDRAWN: &str = "fees_withdrawn";
 pub const ADMIN_TRANSFERRED: &str = "admin_transferred";
 pub const ADMIN_TRANSFER_PROPOSED: &str = "admin_transfer_proposed";
@@ -66,6 +67,14 @@ pub fn trial_offer_expired(env: &Env, player_id: u64, scout: &Address, index: u3
     env.events().publish(
         (Symbol::new(env, TRIAL_OFFER_EXPIRED), scout.clone()),
         (player_id, index),
+    );
+}
+
+/// topics: (event_name, to)  data: (player_id, index, amount)
+pub fn trial_escrow_admin_refunded(env: &Env, player_id: u64, index: u32, to: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, TRIAL_ESCROW_ADMIN_REFUNDED), to.clone()),
+        (player_id, index, amount),
     );
 }
 
