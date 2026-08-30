@@ -38,6 +38,7 @@ That keeps the command copy-paste-runnable in a standard `bash`/`zsh` shell.
 - [Error Codes](#error-codes)
 - [Events](#events)
 - [Design Discussion: Check-Ordering Follow-ups](#design-discussion-check-ordering-follow-ups)
+- [Cross-Contract Wiring](#cross-contract-wiring)
 
 ---
 
