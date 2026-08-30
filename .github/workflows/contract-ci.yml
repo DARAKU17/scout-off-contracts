@@ -520,15 +520,7 @@ jobs:
             stellar contract optimize --wasm "$wasm_src" --wasm-out "$wasm_opt"
             size=$(wc -c < "$wasm_opt" | tr -d ' ')
             echo "    ${contract}: ${size} bytes (optimized)"
-            python3 -c "
-import json
-path = 'abi/wasm-sizes.json'
-with open(path) as f:
-    data = json.load(f)
-data['${contract}'] = ${size}
-with open(path, 'w') as f:
-    json.dump(data, f, indent=2, sort_keys=True)
-"
+            python3 scripts/record_wasm_sizes.py "${contract}"
           done
           echo ""
           echo "==> abi/wasm-sizes.json:"
