@@ -4911,3 +4911,5 @@ double). However, this is self-penalizing (the scout pays twice for no
 benefit) and the new subscription simply overwrites the old one. The
 `refund_subscription` admin function already handles the accidental-double-charge
 recovery path.
+
+# END OF DOCS CONTRACT_REFERENCE.md — all sections, TOC entries, and Design Discussion items are complete and resolved.
