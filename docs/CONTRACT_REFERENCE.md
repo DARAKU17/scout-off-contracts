@@ -4838,19 +4838,32 @@ before the Pro monthly quota check (`ProContactLimitReached`). A scout who
 is simultaneously at their quota limit *and* has already contacted the same
 player sees `AlreadyContacted`.
 
-**Why this may be suboptimal**: `AlreadyContacted` (code 8) is the correct
-terminal error for a genuine duplicate contact attempt, so the ordering is
-correct for the pure-duplicate case. However, the quota check at Priority 7
-fires *only* for new contacts — if a scout at quota tries to contact a new
-player they will correctly see `ProContactLimitReached`. The current ordering
-is therefore only relevant when both the quota and a duplicate exist for the
-same `(scout, player_id)` pair. In that case `AlreadyContacted` is the more
-actionable response ("you already unlocked this player") and the quota is
-irrelevant. The current ordering is defensible.
+**Rationale**: `AlreadyContacted` (error code 8) is the correct terminal error
+for a genuine duplicate-contact attempt — it signals that this specific
+`(scout, player_id)` pair has already been processed. The Pro-quota guard
+at Priority 7 is a separate concern that only applies to new contacts; it
+fires `ProContactLimitReached` (code 20) when a Pro-tier scout attempts to
+contact a *new* player beyond their monthly limit. The ordering is therefore
+correct for its intended purpose: duplicate detection takes precedence over
+quota enforcement.
 
-**Conclusion**: No change recommended. The ordering is correct and the
-"worse" scenario (quota masking duplicate) does not arise in practice because
-the quota check only runs for *new* contacts.
+The apparent overlap — a Pro scout at their quota limit who re-attempts an
+already-contacted player — sees `AlreadyContacted` because the duplicate-check
+guard runs first. This is intentional: if a scout has already contacted a
+player, the system should report that condition first, regardless of quota
+status. The quota check is only meaningfully different for new contacts, where
+it correctly returns `ProContactLimitReached`.
+
+**Why no change is needed**: Swapping the ordering so that `ProContactLimitReached`
+fires before `AlreadyContacted` would change the error semantics for any caller
+that currently handles `AlreadyContacted` as the "duplicate already exists"
+signal. The existing property-test suite (`check_precedence_property_tests.rs`)
+locks in the current priority order across all reachable states, and altering
+it would be a behavioral change beyond a simple doc update. The current ordering
+is consistent, well-tested, and the quota-versus-duplicate overlap is rare in
+practice because the quota guard is only active for new contacts.
+
+**Decision**: No change. The ordering is correct and resolved.
 
 ---
 
